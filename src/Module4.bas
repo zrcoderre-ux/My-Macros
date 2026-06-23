@@ -1,26 +1,22 @@
 Attribute VB_Name = "Module4"
 Option Explicit
 
-' REMOVED: Dim oApp As New AutoExecClass (No longer needed)
+' Spacebar/Return citation-wrapping bindings. Called at startup by AutoExec in
+' the MacroKeyBindings module. Bound in THIS template's context (not Normal),
+' so the bindings stay contained to My_Macros.dotm, reapply every launch, and
+' never need an AutoClose teardown.
+Public Sub RegisterWrapKeyBindings()
+    CustomizationContext = ThisDocument
 
-Sub AutoExec()
-    ' REMOVED: Set oApp.WordApp = word.Application (No longer needed)
-    
-    CustomizationContext = NormalTemplate
-    
-    ' This is what makes it "Global" - it maps the keys to your wrapping script
     Application.KeyBindings.Add KeyCategory:=wdKeyCategoryMacro, _
         Command:="WrapCitations.CheckAndWrap", _
         KeyCode:=BuildKeyCode(wdKeySpacebar)
-        
+
     Application.KeyBindings.Add KeyCategory:=wdKeyCategoryMacro, _
         Command:="WrapCitations.CheckAndWrapEnter", _
         KeyCode:=BuildKeyCode(wdKeyReturn)
-End Sub
 
-Sub AutoClose()
-    On Error Resume Next
-    FindKey(BuildKeyCode(wdKeySpacebar)).Clear
-    FindKey(BuildKeyCode(wdKeyReturn)).Clear
+    ' Don't mark the template dirty; bindings reapply on the next launch anyway.
+    ThisDocument.Saved = True
 End Sub
 
