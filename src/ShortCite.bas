@@ -602,7 +602,14 @@ Private Function ScanLongCite(m As Object, PARA As Paragraph, _
             Dim cp2 As Long: cp2 = InStr(sp + 1, pt, ")")
             If cp2 > sp + 1 Then
                 Dim pnTxt As String: pnTxt = Mid(pt, sp + 1, cp2 - sp - 1)
-                If Len(Trim(pnTxt)) > 0 And Len(Trim(pnTxt)) <= 60 And InStr(pnTxt, Chr(13)) = 0 Then
+                ' A substantive/explanatory parenthetical (e.g. "(disapproved on
+                ' other grounds in People v. Jones ...)") is never a case short
+                ' name. Skip it here so it is NOT captured as a short-name
+                ' override and is NOT swallowed into the cite length. Leaving it
+                ' outside the cite means a later short-name parenthetical added
+                ' to this first occurrence is inserted BEFORE this parenthetical.
+                If Len(Trim(pnTxt)) > 0 And Len(Trim(pnTxt)) <= 60 And InStr(pnTxt, Chr(13)) = 0 _
+                   And Not IsExplanatoryParenthetical(pnTxt) Then
                     Dim fc As String: fc = Left(Trim(pnTxt), 1)
                     If (fc >= "A" And fc <= "Z") Or (fc >= "a" And fc <= "z") Then
                         snO = Trim(pnTxt)
@@ -699,6 +706,38 @@ Private Function ScanLongCite(m As Object, PARA As Paragraph, _
     dc.isCompound = foundParen And (cpChar = ";" Or cpChar = "]")
 
     ScanLongCite = True
+End Function
+
+'------------------------------------------------------------------------------
+' True when a parenthetical's text is a subsequent-history / explanatory note
+' (e.g. "disapproved on other grounds ...", "overruled by ...") rather than a
+' case short name. Such parentheticals must never be treated as the short-name
+' override. Match is on the opening word only, case-insensitive; no case short
+' name begins with any of these words, so this cannot suppress a real one.
+'------------------------------------------------------------------------------
+Private Function IsExplanatoryParenthetical(ByVal s As String) As Boolean
+    Dim t As String: t = LCase(Trim(s))
+    If Len(t) = 0 Then Exit Function
+
+    Dim leads As Variant
+    leads = Array("disapproved", "overruled", "abrogated", "superseded")
+
+    Dim i As Long
+    For i = LBound(leads) To UBound(leads)
+        Dim w As String: w = leads(i)
+        If Left(t, Len(w)) = w Then
+            If Len(t) = Len(w) Then
+                IsExplanatoryParenthetical = True
+                Exit Function
+            Else
+                Dim nx As String: nx = Mid(t, Len(w) + 1, 1)
+                If nx = " " Or nx = "," Or nx = "." Then
+                    IsExplanatoryParenthetical = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
 End Function
 
 '------------------------------------------------------------------------------
@@ -2679,14 +2718,14 @@ Private Function HasNonCaseDocumentMarker(content As String) As Boolean
     HasNonCaseDocumentMarker = False
     If Len(content) = 0 Then Exit Function
 
-    ' Paragraph symbol (¶ = ChrW(182)) without a reporter strongly indicates
+    ' Paragraph symbol (ï¿½ = ChrW(182)) without a reporter strongly indicates
     ' a pleading/declaration pin-cite.
     If InStr(1, content, ChrW(182), vbBinaryCompare) > 0 Then
         HasNonCaseDocumentMarker = True
         Exit Function
     End If
 
-    ' Section symbol (§ = ChrW(167)) without a reporter indicates a statute
+    ' Section symbol (ï¿½ = ChrW(167)) without a reporter indicates a statute
     ' or code section reference -- not a case citation.
     If InStr(1, content, ChrW(167), vbBinaryCompare) > 0 Then
         HasNonCaseDocumentMarker = True
