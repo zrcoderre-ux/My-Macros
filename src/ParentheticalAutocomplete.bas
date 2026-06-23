@@ -31,6 +31,11 @@ Attribute VB_Name = "ParentheticalAutocomplete"
 '   - Tab / Enter / Right-Arrow accepts the displayed suggestion.
 '   - Escape, or typing a prefix that matches nothing, dismisses.
 '   - The popup NEVER inserts a closing ")".
+'   - A parenthetical counts as a citation template if it contains a
+'     section/paragraph symbol (§ / ¶) OR matches the page-reference
+'     pattern "... at p" (e.g. "(Mot. at p 6:5)" or "(Opp. at pp. 4-5)").
+'     Either way, the page/line numbers after the marker are stripped so
+'     the reusable template ends right after the symbol or the "at p".
 '
 ' INSTALL:
 '   1. Alt+F11; replace the ParentheticalAutocomplete module with this file.
@@ -573,7 +578,7 @@ Public Sub ScanDocument()
 
         inner = Mid(sText, pos + 1, closeP - pos - 1)
 
-        If ContainsSymbol(inner) Then
+        If IsCiteSegment(inner) Then
             Dim parts() As String
             parts = Split(inner, ";")
 
@@ -582,10 +587,8 @@ Public Sub ScanDocument()
                 Dim rawCite As String
                 rawCite = Trim(parts(p))
 
-                If ContainsSymbol(rawCite) And Len(rawCite) > 0 Then
-                    rawCite = NormalizeDoubleSymbols(rawCite)
-                    rawCite = NormalizeSpaces(rawCite)
-                    rawCite = StripAfterSymbol(rawCite)
+                If IsCiteSegment(rawCite) And Len(rawCite) > 0 Then
+                    rawCite = NormalizeCiteSegment(rawCite)
 
                     If Len(Trim(rawCite)) > 0 Then
                         Dim found As Boolean
@@ -685,10 +688,8 @@ Private Sub CollectExistingCites()
     For p = 0 To UBound(parts)
         Dim seg As String
         seg = Trim(parts(p))
-        If ContainsSymbol(seg) Then
-            seg = NormalizeDoubleSymbols(seg)
-            seg = NormalizeSpaces(seg)
-            seg = StripAfterSymbol(seg)
+        If IsCiteSegment(seg) Then
+            seg = NormalizeCiteSegment(seg)
             If Len(Trim(seg)) > 0 And m_ExcludeCount < 100 Then
                 m_ExcludeCites(m_ExcludeCount) = seg
                 m_ExcludeCount = m_ExcludeCount + 1
@@ -1094,6 +1095,88 @@ End Sub
 
 Public Function ContainsSymbol(ByVal s As String) As Boolean
     ContainsSymbol = (InStr(s, PARA()) > 0 Or InStr(s, SECT()) > 0)
+End Function
+
+' A parenthetical segment qualifies as a citation template if it carries a
+' section/paragraph symbol OR matches the "... at p" page-reference pattern
+' (e.g. "Mot. at p 6:5", "Opp. at pp. 4-5").
+Public Function IsCiteSegment(ByVal s As String) As Boolean
+    IsCiteSegment = (ContainsSymbol(s) Or ContainsAtP(s))
+End Function
+
+' Turn a raw segment into its reusable template: collapse doubled symbols and
+' spaces, then strip the page/line text after whichever marker is present.
+Public Function NormalizeCiteSegment(ByVal s As String) As String
+    Dim r As String
+    r = NormalizeDoubleSymbols(s)
+    r = NormalizeSpaces(r)
+    If ContainsSymbol(r) Then
+        r = StripAfterSymbol(r)
+    ElseIf ContainsAtP(r) Then
+        r = StripAfterAtP(r)
+    End If
+    NormalizeCiteSegment = r
+End Function
+
+' True when the string contains an "at p" page reference. The marker must be
+' a standalone "at" (preceded by start-of-string or a non-letter) so words
+' like "treat patient" don't trip it.
+Public Function ContainsAtP(ByVal s As String) As Boolean
+    ContainsAtP = (FindAtPMarker(s) > 0)
+End Function
+
+' Returns the 1-based index of the "p" in the first qualifying "at p" marker,
+' or 0 if none. ("at p" is a/t/space/p, so the "p" sits 3 chars past "at".)
+Private Function FindAtPMarker(ByVal s As String) As Long
+    Dim lc As String
+    lc = LCase(s)
+
+    Dim startAt As Long
+    startAt = 1
+    Dim atPos As Long
+    Do
+        atPos = InStr(startAt, lc, "at p")
+        If atPos = 0 Then Exit Do
+        If atPos = 1 Then
+            FindAtPMarker = atPos + 3
+            Exit Function
+        ElseIf Not IsLetterChar(Mid(lc, atPos - 1, 1)) Then
+            FindAtPMarker = atPos + 3
+            Exit Function
+        End If
+        startAt = atPos + 1
+    Loop
+    FindAtPMarker = 0
+End Function
+
+' Trim a segment down to "... at p" (or "at pp.", "at p.") and append a space,
+' dropping the page/line numbers that follow. Mirrors StripAfterSymbol.
+Public Function StripAfterAtP(ByVal s As String) As String
+    Dim pPos As Long
+    pPos = FindAtPMarker(s)
+    If pPos = 0 Then
+        StripAfterAtP = s
+        Exit Function
+    End If
+
+    Dim endPos As Long
+    endPos = pPos
+    ' Consume an additional "p" so "at pp." is kept intact.
+    Do While endPos < Len(s) And LCase(Mid(s, endPos + 1, 1)) = "p"
+        endPos = endPos + 1
+    Loop
+    ' Consume an optional abbreviating period.
+    If endPos < Len(s) And Mid(s, endPos + 1, 1) = "." Then
+        endPos = endPos + 1
+    End If
+
+    StripAfterAtP = Left(s, endPos) & " "
+End Function
+
+Private Function IsLetterChar(ByVal c As String) As Boolean
+    Dim lc As String
+    lc = LCase(c)
+    IsLetterChar = (lc >= "a" And lc <= "z")
 End Function
 
 Public Function NormalizeDoubleSymbols(ByVal s As String) As String
