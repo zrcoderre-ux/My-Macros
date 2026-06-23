@@ -1,0 +1,9 @@
+# The built .dotm lives in Word's STARTUP folder (the copy Word actually loads),
+# NOT in this repo. src/ is the source; build/Import-Macros.ps1 rebuilds the
+# STARTUP copy on every pull. Nothing of value lives only in the .dotm: the form
+# is kept in src/ as frmSuggest.frm + .frx (run Export-Macros once).
+My_Macros.dotm
+
+# VBE export noise
+*.frx.bak
+~$*
