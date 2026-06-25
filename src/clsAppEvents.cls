@@ -34,13 +34,12 @@ End Sub
 ' DOCUMENT BEFORE CLOSE  (existing, unchanged)
 '=============================================================================
 Private Sub App_DocumentBeforeClose(ByVal Doc As Document, Cancel As Boolean)
-    If Not IsInOneDrive(Doc) Then
-        MsgBox "Skipped: not in OneDrive. Path = " & Doc.FullName
-        Exit Sub
-    End If
-
-    ' Only run checks on documents saved inside OneDrive or SharePoint
+    ' Silent gates: the close review runs ONLY on dated work documents saved
+    ' in OneDrive. If either condition fails, do nothing at all -- no popup,
+    ' no checks. (A document whose title doesn't end in M.D.YYYY, or that
+    ' isn't in OneDrive, just closes normally.)
     If Not IsInOneDrive(Doc) Then Exit Sub
+    If Not TitleEndsWithDate(Doc) Then Exit Sub
 
     ' Skip checks when the mail merge macro is closing documents mid-workflow
     If modMain.gSkipCloseChecks Then Exit Sub

@@ -27,7 +27,7 @@ Public Function IsInOneDrive(Doc As Document) As Boolean
     fullPath = Doc.FullName
     On Error GoTo 0
 
-    ' Unsaved documents have no real path — skip them
+    ' Unsaved documents have no real path ï¿½ skip them
     If fullPath = "" Or Doc.Path = "" Then
         IsInOneDrive = False
         Exit Function
@@ -41,6 +41,28 @@ Public Function IsInOneDrive(Doc As Document) As Boolean
     ElseIf InStr(1, fullPath, "lacourts-my", vbTextCompare) > 0 Then
         IsInOneDrive = True
     End If
+End Function
+' ============================================================
+' TITLE DATE GUARD
+' Returns True only if the document's file name ends with a
+' date in M.D.YYYY format (1-2 digit month and day, 4-digit
+' year), optionally followed by a file extension -- e.g.
+' "Ruling 6.25.2026.docx". Used to limit the close-review to
+' dated work documents. Returns False for unsaved/untitled docs.
+' ============================================================
+Public Function TitleEndsWithDate(Doc As Document) As Boolean
+    Dim nm As String
+    nm = ""
+    On Error Resume Next
+    nm = Doc.Name
+    On Error GoTo 0
+    If nm = "" Then Exit Function
+
+    Dim re As Object: Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = "\d{1,2}\.\d{1,2}\.\d{4}(\.[A-Za-z]{2,5})?$"
+    TitleEndsWithDate = re.Test(nm)
 End Function
 ' ============================================================
 ' FAST-EXIT CHECK
@@ -63,7 +85,7 @@ Public Function FindFirstIssue(ByVal Doc As Document, _
         GoTo RunApostrophes
     End If
 
-    ' 2. Straight double quotes (odd count — highlight the last one)
+    ' 2. Straight double quotes (odd count ï¿½ highlight the last one)
     If (CountChar(Doc, Chr(34)) Mod 2) <> 0 Then
         Dim rng  As Range
         Dim last As Range
@@ -151,7 +173,7 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Smart double quotes
     If CheckUnmatchedPairs(Doc, ChrW(8220), ChrW(8221), HL_GREEN) Then issues = True
 
-    ' Straight double quotes (odd count — highlight the last one)
+    ' Straight double quotes (odd count ï¿½ highlight the last one)
     If (CountChar(Doc, Chr(34)) Mod 2) <> 0 Then
         Dim rng  As Range
         Dim last As Range
@@ -194,7 +216,7 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
 End Sub
 
 ' ============================================================
-' PAIR CHECKING — PARAGRAPH BY PARAGRAPH
+' PAIR CHECKING ï¿½ PARAGRAPH BY PARAGRAPH
 ' Both functions use the same collect ? sort ? stack algorithm
 ' scoped to one paragraph at a time. A ( in one paragraph and
 ' a ) in a different paragraph are each flagged as unmatched.
@@ -266,16 +288,16 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
 
         For i = 1 To count
             If types(i) Then
-                ' Opener — push position
+                ' Opener ï¿½ push position
                 stackTop = stackTop + 1
                 ReDim Preserve stack(stackTop)
                 stack(stackTop) = positions(i)
             Else
                 ' Closer
                 If stackTop > 0 Then
-                    stackTop = stackTop - 1         ' Matched — pop
+                    stackTop = stackTop - 1         ' Matched ï¿½ pop
                 Else
-                    ' Unmatched closer — highlight it
+                    ' Unmatched closer ï¿½ highlight it
                     Dim closeRng As Range
                     Set closeRng = Doc.Range(positions(i), positions(i) + 1)
                     closeRng.HighlightColorIndex = RGBToHighlightIndex(color)
@@ -363,16 +385,16 @@ Private Function FindFirstUnmatchedPair(Doc As Document, opener As String, _
 
         For i = 1 To count
             If types(i) Then
-                ' Opener — push position
+                ' Opener ï¿½ push position
                 stackTop = stackTop + 1
                 ReDim Preserve stack(stackTop)
                 stack(stackTop) = positions(i)
             Else
                 ' Closer
                 If stackTop > 0 Then
-                    stackTop = stackTop - 1         ' Matched — pop
+                    stackTop = stackTop - 1         ' Matched ï¿½ pop
                 Else
-                    ' First unmatched closer — highlight and return immediately
+                    ' First unmatched closer ï¿½ highlight and return immediately
                     Dim closeRng As Range
                     Set closeRng = Doc.Range(positions(i), positions(i) + 1)
                     closeRng.HighlightColorIndex = RGBToHighlightIndex(color)
@@ -459,7 +481,7 @@ Private Function FindFirstBlank(Doc As Document) As Range
 End Function
 
 ' ============================================================
-' DOUBLE SPACE CHECK — FAST-EXIT
+' DOUBLE SPACE CHECK ï¿½ FAST-EXIT
 ' Finds the first double space in Doc.Content (main body only;
 ' headers, footers, footnotes, and text boxes are excluded).
 ' Highlights the two-space run in bright green and returns the
@@ -483,7 +505,7 @@ Private Function FindFirstDoubleSpace(Doc As Document) As Range
 End Function
 
 ' ============================================================
-' DOUBLE SPACE CHECK — FULL RUN
+' DOUBLE SPACE CHECK ï¿½ FULL RUN
 ' Highlights ALL double-space runs in bright green.
 ' Returns True if any are found.
 ' ============================================================
@@ -505,7 +527,7 @@ Private Function CheckDoubleSpaces(Doc As Document) As Boolean
 End Function
 
 ' ============================================================
-' HIGHLIGHT WORD (full run — all occurrences)
+' HIGHLIGHT WORD (full run ï¿½ all occurrences)
 ' Used by RunAllDocumentChecks for the "blank" check.
 ' ============================================================
 Private Function HighlightWord(Doc As Document, word As String, _
