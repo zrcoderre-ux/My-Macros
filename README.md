@@ -61,3 +61,54 @@ first to pull that change back into `src/`, then commit.
   rebuild is skipped with a warning; close it and re-run.
 - If a rebuild ever fails, nothing is lost: fix the issue, close Word, and run
   `build/Import-Macros.ps1` by hand.
+
+## Troubleshooting: a change merged but Word still runs the old macro
+
+If you merged a change to `main` but Word still behaves the old way, the
+STARTUP `.dotm` didn't actually get rebuilt. Work through these in order:
+
+1. **Confirm the loaded build is stale.** Check when the template Word loads was
+   last built:
+
+   ```powershell
+   Get-Item "$env:APPDATA\Microsoft\Word\STARTUP\My_Macros.dotm" |
+     Select-Object FullName, LastWriteTime
+   ```
+
+   If `LastWriteTime` predates your change, Word is running an old build.
+
+2. **Make sure your local clone actually pulled.** The importer builds from the
+   local `src/`, so a failed `git pull` leaves it stale. If `git pull` errors
+   with *"Please specify which branch you want to merge with"*, the local `main`
+   has no upstream; fix it once:
+
+   ```powershell
+   git branch --set-upstream-to=origin/main main
+   git pull origin main
+   ```
+
+3. **Run the importer by hand with the execution policy bypassed.** Running the
+   script directly (not via the pull shortcut) hits PowerShell's default policy
+   and fails with *"not digitally signed"*. Invoke it like this (this also forces
+   Windows PowerShell 5.1, which the script requires):
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File "<repo>\build\Import-Macros.ps1"
+   ```
+
+4. **If it fails with `RPC server is unavailable (0x800706BA)`**, the script
+   attached to a live or zombie Word that died mid-rebuild. Give it a clean slate
+   so it starts its own headless Word, then re-run step 3:
+
+   ```powershell
+   Get-Process WINWORD -ErrorAction SilentlyContinue | Stop-Process -Force
+   Get-Process WINWORD -ErrorAction SilentlyContinue   # should print nothing
+   ```
+
+5. **If it fails with a VBProject/"hidden module" or access error**, enable
+   Word > Options > Trust Center > Trust Center Settings > Macro Settings >
+   **Trust access to the VBA project object model**, then re-run step 3.
+
+A successful run prints `rebuilt OK` and the STARTUP `.dotm` `LastWriteTime`
+updates to now. Launch Word and confirm the new behavior. To verify which code
+is actually loaded, press `Alt+F11` in Word and inspect the module directly.
