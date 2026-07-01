@@ -22,7 +22,7 @@ Option Explicit
 
 ' ---- CONFIGURE THESE -------------------------------------------------------
 Private Const PYTHON_EXE As String = "python"             ' or "py", or a full path to python.exe
-Private Const SCRIPT_DIR As String = "C:\Tools\citelink"  ' folder holding the two .py files
+Private Const SCRIPT_DIR As String = Private Const SCRIPT_DIR As String = "C:\Users\ZCoderre\Apps\Workup Search"  ' folder holding the two .py files
 Private Const REPO_JSON As String = ""                    ' full path to citation_repo.json, or "" to disable
 Private Const SCREENTIP_PREFIX As String = "CiteLink:: "  ' tag identifying our links
 ' ----------------------------------------------------------------------------
