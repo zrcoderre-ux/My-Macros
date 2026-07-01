@@ -253,6 +253,27 @@ Public Sub RemoveAllHyperlinks()
 End Sub
 
 
+' Quiet variant of RemoveAllHyperlinks for automated callers (e.g. the
+' review-on-close flow). Removes EVERY hyperlink in the body with no
+' confirmation and no result dialog. Returns the number removed.
+Public Function RemoveAllHyperlinks_Quiet(ByVal doc As Document) As Long
+    If doc Is Nothing Then Exit Function
+
+    Dim removed As Long: removed = 0
+    Dim i As Long, rng As Range
+    Application.ScreenUpdating = False
+    For i = doc.Hyperlinks.Count To 1 Step -1
+        Set rng = doc.Hyperlinks(i).Range
+        doc.Hyperlinks(i).Delete
+        ResetLinkFormatting rng
+        removed = removed + 1
+    Next i
+    Application.ScreenUpdating = True
+
+    RemoveAllHyperlinks_Quiet = removed
+End Function
+
+
 '==============================================================================
 ' CORE HELPERS
 '==============================================================================

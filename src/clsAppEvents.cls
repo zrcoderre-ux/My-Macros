@@ -53,6 +53,9 @@ Private Sub App_DocumentBeforeClose(ByVal Doc As Document, Cancel As Boolean)
                         vbQuestion + vbYesNo, "Document Review")
     If respReview = vbNo Then Exit Sub
 
+    ' --- Auto-cleanup: strip every hyperlink as part of the review (silent) ---
+    CitationLinker.RemoveAllHyperlinks_Quiet Doc
+
     ' --- Phase 1: Run all checks, highlight everything found ---
     Dim issues         As Boolean
     Dim userHighlights As Boolean
