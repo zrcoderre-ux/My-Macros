@@ -18,6 +18,8 @@ Option Explicit
 ' Runs automatically when Word starts and loads this global template.
 Sub AutoExec()
     ApplyMacroKeyBindings
+    ' Spacebar / Return citation-wrapping bindings (WrapCitations via Module4).
+    RegisterWrapKeyBindings
     ' Reapply the autocomplete shortcuts too, quietly (no scan, no popup).
     RegisterParenKeyBindings
 End Sub
