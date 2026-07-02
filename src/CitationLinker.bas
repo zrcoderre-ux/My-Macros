@@ -11,6 +11,8 @@ Attribute VB_Name = "CitationLinker"
 '   AddCitationLinks       - detect + hyperlink every authority (idempotent)
 '   RemoveCitationLinks    - remove only the links this tool added (recommended)
 '   RemoveAllHyperlinks    - remove EVERY hyperlink in the body (asks first)
+'   ToggleCitationLinks    - Ctrl+Shift+H: remove this tool's links if any are
+'                            present, otherwise apply them
 '
 ' SETUP: edit the four Const lines below, then put word_cite_bridge.py and
 ' citation_extractor.py together in SCRIPT_DIR. See SETUP.md.
@@ -222,6 +224,23 @@ Public Sub RemoveCitationLinks()
 End Sub
 
 
+' Toggle for the keyboard shortcut: if the document already has any of this
+' tool's citation links, remove them; otherwise detect and apply them. A
+' "mixed" document (some cites linked, some not) has citation links present, so
+' it removes on this press and applies on the next.
+Public Sub ToggleCitationLinks()
+    Dim doc As Document
+    Set doc = ActiveDocument
+    If doc Is Nothing Then Exit Sub
+
+    If HasCitationLinks(doc) Then
+        RemoveCitationLinks
+    Else
+        AddCitationLinks
+    End If
+End Sub
+
+
 Public Sub RemoveAllHyperlinks()
     Dim doc As Document
     Set doc = ActiveDocument
@@ -277,6 +296,19 @@ End Function
 '==============================================================================
 ' CORE HELPERS
 '==============================================================================
+
+' True if the document contains at least one hyperlink added by this tool
+' (identified by the SCREENTIP_PREFIX tag). Used by ToggleCitationLinks.
+Private Function HasCitationLinks(ByVal doc As Document) As Boolean
+    Dim i As Long
+    For i = 1 To doc.Hyperlinks.Count
+        If Left$(doc.Hyperlinks(i).ScreenTip, Len(SCREENTIP_PREFIX)) = SCREENTIP_PREFIX Then
+            HasCitationLinks = True
+            Exit Function
+        End If
+    Next i
+End Function
+
 
 Private Function RemoveCitationLinks_Quiet(ByVal doc As Document) As Long
     Dim removed As Long

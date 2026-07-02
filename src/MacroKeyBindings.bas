@@ -45,6 +45,10 @@ Public Sub ApplyMacroKeyBindings()
     KeyBindings.Add KeyCode:=BuildKeyCode(32, 512, 256), _
                     KeyCategory:=1, Command:="ReplaceParagraphMarksWithSpaces"
 
+    ' Ctrl+Shift+H -> ToggleCitationLinks   (apply/remove citation hyperlinks)
+    KeyBindings.Add KeyCode:=BuildKeyCode(72, 512, 256), _
+                    KeyCategory:=1, Command:="ToggleCitationLinks"
+
     ' Don't mark the template dirty; bindings reapply on the next launch anyway.
     ThisDocument.Saved = True
 End Sub
