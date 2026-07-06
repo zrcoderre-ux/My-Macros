@@ -352,11 +352,31 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     If n > 0 Then
         Dim disp As Range
         Set disp = h.Range
+        Dim baseStart As Long
+        baseStart = disp.start
         Dim m As Long
         m = disp.Characters.Count
+
+        ' Reapply italic to whole contiguous runs via explicit position ranges.
+        ' Setting .Font.Italic on Characters(1) of a hyperlink range gets
+        ' absorbed by the field's leading boundary and skips the first letter;
+        ' a multi-character Range applies it reliably, including that first char.
+        Dim runStart As Long
+        runStart = 0
         For i = 1 To n
-            If ital(i) And i <= m Then disp.Characters(i).Font.Italic = True
+            Dim onNow As Boolean
+            onNow = (i <= m)
+            If onNow Then onNow = ital(i)
+            If onNow Then
+                If runStart = 0 Then runStart = i
+            ElseIf runStart > 0 Then
+                ActiveDocument.Range(baseStart + runStart - 1, baseStart + (i - 1)).Font.Italic = True
+                runStart = 0
+            End If
         Next i
+        If runStart > 0 Then
+            ActiveDocument.Range(baseStart + runStart - 1, baseStart + m).Font.Italic = True
+        End If
     End If
 
     AddLink = True
