@@ -329,8 +329,36 @@ End Function
 
 Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String) As Boolean
     On Error GoTo Fail
-    ActiveDocument.Hyperlinks.Add Anchor:=rng, Address:=url, _
-        ScreenTip:=Left$(SCREENTIP_PREFIX & typ & " | " & url, 255)
+
+    ' Snapshot per-character italic before linking. Hyperlinks.Add applies
+    ' Word's Hyperlink character style to the anchor, which drops the direct
+    ' italic on case names; reapply it to the link's display text afterward so
+    ' italicized case names survive linking.
+    Dim n As Long
+    n = rng.Characters.Count
+    Dim ital() As Boolean
+    Dim i As Long
+    If n > 0 Then
+        ReDim ital(1 To n)
+        For i = 1 To n
+            ital(i) = (rng.Characters(i).Font.Italic = True)
+        Next i
+    End If
+
+    Dim h As Hyperlink
+    Set h = ActiveDocument.Hyperlinks.Add(Anchor:=rng, Address:=url, _
+        ScreenTip:=Left$(SCREENTIP_PREFIX & typ & " | " & url, 255))
+
+    If n > 0 Then
+        Dim disp As Range
+        Set disp = h.Range
+        Dim m As Long
+        m = disp.Characters.Count
+        For i = 1 To n
+            If ital(i) And i <= m Then disp.Characters(i).Font.Italic = True
+        Next i
+    End If
+
     AddLink = True
     Exit Function
 Fail:
