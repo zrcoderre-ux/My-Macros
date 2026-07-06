@@ -22,6 +22,11 @@ Private Const CITE_PYTHON_EXE  As String = "python"  ' or full path to python.ex
 ' (or have exhausted the one startup attempt).  Prevents repeated delays.
 Private g_ServerVerified As Boolean
 
+' Diagnostic: the pipeline phase currently executing. Surfaced in the error
+' handler so an unexpected runtime error (e.g. 4609 "Value out of range") can
+' be traced to the step that raised it. Set as the pipeline advances.
+Private g_Phase As String
+
 '===========================================================
 ' Pleading-paste configuration (markers from pdf_linker.py)
 '===========================================================
@@ -58,6 +63,7 @@ Sub PasteLegalQuotation()
     ' FIX 1: Wrap entire body in error handler so the undo record
     '         is always closed, even if a runtime error occurs.
     On Error GoTo CleanUp
+    g_Phase = "pre-paste detection & paste"
 
     ' Detect and remove pre-paste opener marks before pasting
     ' so that position tracking is clean after the paste lands
@@ -147,6 +153,8 @@ Sub PasteLegalQuotation()
     Dim bNumericSubParagraphs As Boolean
     bIsStatute = DetectStatutePaste(oRange)
 
+    g_Phase = "Steps 1-6: paste cleanup (shapes, line numbers, pleading, headnotes, page/parallel cites)"
+
     ' Step 1: Remove Westlaw flag images (inline shapes)
     RemoveInlineShapes oRange
     lSelEnd = oDoc.content.End - lTailLen
@@ -224,6 +232,8 @@ Sub PasteLegalQuotation()
         Set oRange = oDoc.Range(lStart, lSelEnd)
 
     End If
+
+    g_Phase = "Steps 7-10: spacing, soft returns, statute normalize, subdivisions"
 
     ' Step 7: Replace non-breaking spaces except after
     ReplaceNonBreakingSpaces oRange
@@ -321,6 +331,8 @@ Sub PasteLegalQuotation()
         lSelEnd = oDoc.content.End - lTailLen
         Set oRange = oDoc.Range(lStart, lSelEnd)
     End If
+
+    g_Phase = "Steps 11-12: passage boundary, blank-paragraph merge, subdivision insert, citation-only"
 
     ' Step 11: Find passage end BEFORE removing blank paragraphs
     ' citation is still on its own paragraph here, most reliable boundary
@@ -436,6 +448,8 @@ Sub PasteLegalQuotation()
     End If
 
     ' --- Quote-related steps: skipped for citation-only pastes ---
+
+    g_Phase = "Steps 13-18: quote conversion, wrapping, capitalization, footnotes"
 
     If Not bCitationOnly Then
 
@@ -559,6 +573,8 @@ Sub PasteLegalQuotation()
 
     End If
 
+    g_Phase = "Steps 19-22: quote spacing, restructure sentence, italicize, format"
+
     ' Step 19: Ensure exactly one space between adjacent opposite-direction
     ' quotes and between quotes and adjacent non-exempt characters.
     lSelEnd = oDoc.content.End - lTailLen
@@ -618,7 +634,8 @@ CleanUp:
     sErrDesc = Err.Description
     oUndo.EndCustomRecord
     If lErrNum <> 0 Then
-        MsgBox "Error " & lErrNum & ": " & sErrDesc, vbExclamation, "PasteLegalQuotation"
+        MsgBox "Error " & lErrNum & ": " & sErrDesc & vbCrLf & vbCrLf & _
+               "During: " & g_Phase, vbExclamation, "PasteLegalQuotation"
     End If
 
     Set oRange = Nothing
