@@ -2962,15 +2962,24 @@ Private Function DetectStatutePaste(oRange As Range) As Boolean
         End If
     Next iLP
 
+    Dim sCheck As String
     If iDS = -1 Then
         ' No outermost paren found -- check full text (statute may lack parens)
-        DetectStatutePaste = (InStr(sLP, ChrW(&HA7)) > 0)
+        sCheck = sLP
     Else
         ' Check only the citation paren block for the section sign
-        Dim sCitBlock As String
-        sCitBlock = Mid(sLP, iDS)
-        DetectStatutePaste = (InStr(sCitBlock, ChrW(&HA7)) > 0)
+        sCheck = Mid(sLP, iDS)
     End If
+
+    ' A statute paste has a section sign in its citation block. But a CASE
+    ' string-cite can also carry a section sign when it cross-references a
+    ' statute, e.g. "(Evid. Code, § 452, subd. (d); Sosinsky v. Grant (1992)
+    ' 6 Cal.App.4th 1548, 1564-1565.)". Such a block always contains a case
+    ' name ("... v. ..."); statute citations never do. Excluding " v. " keeps
+    ' those on the case path (running them through the statute pipeline throws
+    ' a "Value out of range" error on the mismatched structure).
+    DetectStatutePaste = (InStr(sCheck, ChrW(&HA7)) > 0) And _
+                         (InStr(sCheck, " v. ") = 0)
 
 End Function
 
