@@ -352,15 +352,15 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     If n > 0 Then
         Dim disp As Range
         Set disp = h.Range
-        Dim baseStart As Long
-        baseStart = disp.start
         Dim m As Long
         m = disp.Characters.Count
 
-        ' Reapply italic to whole contiguous runs via explicit position ranges.
-        ' Setting .Font.Italic on Characters(1) of a hyperlink range gets
-        ' absorbed by the field's leading boundary and skips the first letter;
-        ' a multi-character Range applies it reliably, including that first char.
+        ' Reapply italic to whole contiguous runs. Locate each run via the
+        ' display Characters (their .Start/.End are the true positions of the
+        ' linked text, past the hidden field code) and set italic on the run as
+        ' one Range. A per-Characters(1) set gets absorbed by the field's
+        ' leading boundary and skips the first letter; absolute disp.Start math
+        ' points into the field code and misses the text entirely.
         Dim runStart As Long
         runStart = 0
         For i = 1 To n
@@ -370,13 +370,11 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
             If onNow Then
                 If runStart = 0 Then runStart = i
             ElseIf runStart > 0 Then
-                ActiveDocument.Range(baseStart + runStart - 1, baseStart + (i - 1)).Font.Italic = True
+                ItalicizeCharRun disp, runStart, i - 1
                 runStart = 0
             End If
         Next i
-        If runStart > 0 Then
-            ActiveDocument.Range(baseStart + runStart - 1, baseStart + m).Font.Italic = True
-        End If
+        If runStart > 0 Then ItalicizeCharRun disp, runStart, m
     End If
 
     AddLink = True
@@ -384,6 +382,18 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
 Fail:
     AddLink = False
 End Function
+
+' Italicize display characters a..b (1-based, inclusive) of a hyperlink's
+' display range. The Range is built from the characters' own positions and
+' set as a whole so the first character is included (setting Characters(1)
+' individually is absorbed by the field boundary).
+Private Sub ItalicizeCharRun(ByVal disp As Range, ByVal a As Long, ByVal b As Long)
+    On Error Resume Next
+    Dim r As Range
+    Set r = disp.Characters(a).Duplicate
+    r.End = disp.Characters(b).End
+    r.Font.Italic = True
+End Sub
 
 
 Private Function FindAndLink(ByVal scope As Range, ByVal needle As String, _
