@@ -360,7 +360,13 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
 
     Dim tailStart As Long
     tailStart = CaseNameTailStart(s)   ' 1-based index where the non-italic tail begins
-    If tailStart <= 1 Then Exit Sub    ' no case name found -- leave as-is
+    If tailStart <= 1 Then
+        ' No case name inside the link. It may be a supra cite whose short name
+        ' sits just BEFORE the link (the linker anchors supra cites on the
+        ' reporter). Italicize that preceding short name.
+        ItalicizeSupraShortNameBefore disp
+        Exit Sub
+    End If
 
     Dim m As Long
     m = disp.Characters.Count
@@ -382,6 +388,74 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
         Set firstFix = ActiveDocument.Range(disp.start - 1, disp.start + 1)
         firstFix.Font.Italic = True
     End If
+End Sub
+
+' Italicize the short name of a supra cite that sits just BEFORE a linked
+' reporter, e.g. the document reads "Rappleyea, supra, " and then the linked
+' "8 Cal.4th at p. 982". The short name is outside the hyperlink, so it is a
+' plain document range (no field-boundary quirk). Only called when the in-link
+' logic found nothing, so it never disturbs cites handled inside the link.
+Private Sub ItalicizeSupraShortNameBefore(ByVal disp As Range)
+    On Error Resume Next
+    Dim linkStart As Long: linkStart = disp.start
+    If linkStart < 8 Then Exit Sub
+
+    Dim lookLen As Long: lookLen = 70
+    If lookLen > linkStart Then lookLen = linkStart
+    Dim base As Long: base = linkStart - lookLen
+    Dim b As String: b = ActiveDocument.Range(base, linkStart).text
+    If Len(b) = 0 Then Exit Sub
+
+    ' The text right before the link must end with "..., supra" (ignoring any
+    ' trailing spaces / comma the link itself doesn't include).
+    Dim t As String: t = b
+    Do While Len(t) > 0
+        Dim last As String: last = Right$(t, 1)
+        If last = " " Or last = "," Then t = Left$(t, Len(t) - 1) Else Exit Do
+    Loop
+    If Len(t) < 5 Then Exit Sub
+    If LCase$(Right$(t, 5)) <> "supra" Then Exit Sub
+
+    ' The comma separating the short name from ", supra".
+    Dim supraPos As Long: supraPos = Len(t) - 4      ' 1-based start of "supra" in b
+    Dim j As Long: j = supraPos - 1
+    Do While j >= 1 And Mid$(b, j, 1) = " ": j = j - 1
+    Loop
+    If j >= 1 And Mid$(b, j, 1) = "," Then j = j - 1 Else Exit Sub
+    Dim nameEnd As Long: nameEnd = j                 ' last char of the short name
+
+    ' Walk back to the start of the short name: stop at "(", ";", or a sentence
+    ' boundary ". ".
+    Dim k As Long: k = nameEnd
+    Do While k >= 1
+        Dim ch As String: ch = Mid$(b, k, 1)
+        If ch = "(" Or ch = ";" Then Exit Do
+        If ch = " " And k >= 2 Then
+            If Mid$(b, k - 1, 1) = "." Then Exit Do
+        End If
+        k = k - 1
+    Loop
+    Dim nameStart As Long: nameStart = k + 1
+
+    ' Skip leading spaces and any lowercase signal words ("see", "cf.", etc.);
+    ' a case short name always begins with a capital.
+    Do
+        Do While nameStart <= nameEnd And Mid$(b, nameStart, 1) = " ": nameStart = nameStart + 1
+        Loop
+        If nameStart > nameEnd Then Exit Sub
+        Dim fc As String: fc = Mid$(b, nameStart, 1)
+        If fc >= "a" And fc <= "z" Then
+            Do While nameStart <= nameEnd And Mid$(b, nameStart, 1) <> " ": nameStart = nameStart + 1
+            Loop
+        Else
+            Exit Do
+        End If
+    Loop
+    If nameStart > nameEnd Then Exit Sub
+
+    Dim absS As Long: absS = base + nameStart - 1
+    Dim absE As Long: absE = base + nameEnd
+    If absE > absS Then ActiveDocument.Range(absS, absE).Font.Italic = True
 End Sub
 
 ' Return the 1-based character index where the non-italic citation tail begins:
