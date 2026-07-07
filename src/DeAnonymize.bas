@@ -29,8 +29,9 @@ Attribute VB_Name = "DeAnonymize"
 '==============================================================================
 Option Explicit
 
-' Default file name PDF-Linker writes (see write_key in pdf_linker.py).
-Private Const KEY_FILENAME As String = "pseudonym_key.xlsx"
+' PDF-Linker writes "pseudonym_key.xlsx"; match that plus any de-duplicated
+' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
+Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 
 Private Type Mapping
     real As String
@@ -46,7 +47,7 @@ Public Sub DeAnonymizeTentative()
     If oDoc Is Nothing Then Exit Sub
 
     Dim keyPath As String
-    keyPath = ResolveKeyPath()
+    keyPath = ResolveKeyPath(oDoc)
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
 
     Dim maps() As Mapping
@@ -99,14 +100,19 @@ End Sub
 '==============================================================================
 ' KEY-FILE LOCATION
 '==============================================================================
-' Prefer the default pseudonym_key.xlsx in Downloads (where PDF-Linker writes
-' it); otherwise let the user pick the file.
-Private Function ResolveKeyPath() As String
-    Dim defaultPath As String
-    defaultPath = Environ$("USERPROFILE") & "\Downloads\" & KEY_FILENAME
-    If Dir(defaultPath) <> "" Then
-        ResolveKeyPath = defaultPath
-        Exit Function
+' Look in the active document's own folder for the newest pseudonym_key*.xlsx
+' (the key travels with the document -- often Downloads, but not always).
+' Fall back to a file picker, starting in that folder, if none is found.
+Private Function ResolveKeyPath(ByVal oDoc As Document) As String
+    Dim docFolder As String
+    docFolder = ""
+    On Error Resume Next
+    docFolder = oDoc.Path          ' "" if the document has never been saved
+    On Error GoTo 0
+
+    If Len(docFolder) > 0 Then
+        ResolveKeyPath = MostRecentKeyInFolder(docFolder)
+        If Len(ResolveKeyPath) > 0 Then Exit Function
     End If
 
     Dim fd As FileDialog
@@ -117,12 +123,39 @@ Private Function ResolveKeyPath() As String
         .Filters.Clear
         .Filters.Add "Excel key", "*.xlsx"
         .Filters.Add "All files", "*.*"
+        If Len(docFolder) > 0 Then .InitialFileName = docFolder & "\"
         If .Show = -1 Then
             ResolveKeyPath = .SelectedItems(1)
         Else
             ResolveKeyPath = ""
         End If
     End With
+End Function
+
+' Return the full path of the most recently modified pseudonym_key*.xlsx in the
+' given folder, or "" if none exists.
+Private Function MostRecentKeyInFolder(ByVal folderPath As String) As String
+    On Error GoTo Done
+    If Len(folderPath) = 0 Then Exit Function
+
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(folderPath) Then Exit Function
+
+    Dim bestPath As String: bestPath = ""
+    Dim bestDate As Date
+    Dim f As Object
+    For Each f In fso.GetFolder(folderPath).Files
+        Dim nm As String: nm = LCase$(f.Name)
+        If nm Like KEY_PATTERN Then
+            If bestPath = "" Or f.DateLastModified > bestDate Then
+                bestPath = f.path
+                bestDate = f.DateLastModified
+            End If
+        End If
+    Next f
+
+    MostRecentKeyInFolder = bestPath
+Done:
 End Function
 
 '==============================================================================
