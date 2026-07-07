@@ -394,7 +394,29 @@ Private Function CaseNameTailStart(ByVal s As String) As Long
         CaseNameTailStart = p
         Exit Function
     End If
-    CaseNameTailStart = FindYearParen(s)
+
+    p = FindYearParen(s)
+    If p > 0 Then
+        CaseNameTailStart = p
+        Exit Function
+    End If
+
+    ' No year and no supra. If this is still a case citation (has a "... v. ..."
+    ' party separator), italicize the case name anyway: it runs from the start
+    ' up to the court/docket parenthetical -- the first "(" -- e.g. "Pate v. BMW
+    ' of North America, LLC (C.D.Cal., No. 2:21-cv-04915-KS)". With no such
+    ' paren, italicize the whole span.
+    If InStr(1, s, " v. ", vbTextCompare) > 0 Then
+        p = InStr(1, s, "(")
+        If p > 1 Then
+            CaseNameTailStart = p
+        Else
+            CaseNameTailStart = Len(s) + 1
+        End If
+        Exit Function
+    End If
+
+    CaseNameTailStart = 0
 End Function
 
 ' Index of the "(" that opens the date parenthetical -- the first parenthetical
