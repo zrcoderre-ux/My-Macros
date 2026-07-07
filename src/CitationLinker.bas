@@ -330,52 +330,16 @@ End Function
 Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String) As Boolean
     On Error GoTo Fail
 
-    ' Snapshot per-character italic before linking. Hyperlinks.Add applies
-    ' Word's Hyperlink character style to the anchor, which drops the direct
-    ' italic on case names; reapply it to the link's display text afterward so
-    ' italicized case names survive linking.
-    Dim n As Long
-    n = rng.Characters.Count
-    Dim ital() As Boolean
-    Dim i As Long
-    If n > 0 Then
-        ReDim ital(1 To n)
-        For i = 1 To n
-            ital(i) = (rng.Characters(i).Font.Italic = True)
-        Next i
-    End If
-
     Dim h As Hyperlink
     Set h = ActiveDocument.Hyperlinks.Add(Anchor:=rng, Address:=url, _
         ScreenTip:=Left$(SCREENTIP_PREFIX & typ & " | " & url, 255))
 
-    If n > 0 Then
-        Dim disp As Range
-        Set disp = h.Range
-        Dim m As Long
-        m = disp.Characters.Count
-
-        ' Reapply italic to whole contiguous runs. Locate each run via the
-        ' display Characters (their .Start/.End are the true positions of the
-        ' linked text, past the hidden field code) and set italic on the run as
-        ' one Range. A per-Characters(1) set gets absorbed by the field's
-        ' leading boundary and skips the first letter; absolute disp.Start math
-        ' points into the field code and misses the text entirely.
-        Dim runStart As Long
-        runStart = 0
-        For i = 1 To n
-            Dim onNow As Boolean
-            onNow = (i <= m)
-            If onNow Then onNow = ital(i)
-            If onNow Then
-                If runStart = 0 Then runStart = i
-            ElseIf runStart > 0 Then
-                ItalicizeCharRun disp, runStart, i - 1
-                runStart = 0
-            End If
-        Next i
-        If runStart > 0 Then ItalicizeCharRun disp, runStart, m
-    End If
+    ' Word's Hyperlink style drops the case-name italic. Rather than try to
+    ' preserve the prior formatting through the field boundary (fragile --
+    ' anything applied to the first display character gets absorbed), re-derive
+    ' the italic from citation structure: in a case cite the case name is
+    ' everything to the left of the "(year)" date, or of ", supra".
+    ItalicizeCaseName h.Range
 
     AddLink = True
     Exit Function
@@ -383,17 +347,65 @@ Fail:
     AddLink = False
 End Function
 
-' Italicize display characters a..b (1-based, inclusive) of a hyperlink's
-' display range. The Range is built from the characters' own positions and
-' set as a whole so the first character is included (setting Characters(1)
-' individually is absorbed by the field boundary).
-Private Sub ItalicizeCharRun(ByVal disp As Range, ByVal a As Long, ByVal b As Long)
+' Italicize the case-name portion of a linked citation's display text: the run
+' from the start up to the "(year)" date, or up to ", supra". We italicize the
+' WHOLE display range first (which reliably includes the first character,
+' unlike a sub-range that starts at the field boundary), then clear italic from
+' the citation tail, whose range starts mid-text and so is not absorbed.
+Private Sub ItalicizeCaseName(ByVal disp As Range)
     On Error Resume Next
-    Dim r As Range
-    Set r = disp.Characters(a).Duplicate
-    r.End = disp.Characters(b).End
-    r.Font.Italic = True
+    Dim s As String
+    s = disp.text
+    If Len(s) = 0 Then Exit Sub
+
+    Dim tailStart As Long
+    tailStart = CaseNameTailStart(s)   ' 1-based index where the non-italic tail begins
+    If tailStart <= 1 Then Exit Sub    ' no case name found -- leave as-is
+
+    Dim m As Long
+    m = disp.Characters.Count
+
+    disp.Font.Italic = True            ' whole display, first character included
+    If tailStart <= m Then
+        Dim tail As Range
+        Set tail = disp.Characters(tailStart).Duplicate
+        tail.End = disp.Characters(m).End
+        tail.Font.Italic = False
+    End If
 End Sub
+
+' Return the 1-based character index where the non-italic citation tail begins:
+' the comma of ", supra", else the "(" of the first four-digit "(year)". Returns
+' 0 when neither is present (nothing to italicize).
+Private Function CaseNameTailStart(ByVal s As String) As Long
+    Dim p As Long
+    p = InStr(1, s, ", supra", vbTextCompare)
+    If p > 0 Then
+        CaseNameTailStart = p
+        Exit Function
+    End If
+    CaseNameTailStart = FindYearParen(s)
+End Function
+
+' Index of the "(" that opens the first "(19xx)" or "(20xx)" year, or 0.
+Private Function FindYearParen(ByVal s As String) As Long
+    Dim i As Long
+    For i = 1 To Len(s) - 5
+        If Mid$(s, i, 1) = "(" Then
+            Dim d1 As String, d2 As String, d3 As String, d4 As String, cl As String
+            d1 = Mid$(s, i + 1, 1): d2 = Mid$(s, i + 2, 1)
+            d3 = Mid$(s, i + 3, 1): d4 = Mid$(s, i + 4, 1)
+            cl = Mid$(s, i + 5, 1)
+            If d1 Like "#" And d2 Like "#" And d3 Like "#" And d4 Like "#" And cl = ")" Then
+                If (d1 = "1" And d2 = "9") Or (d1 = "2" And d2 = "0") Then
+                    FindYearParen = i
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+    FindYearParen = 0
+End Function
 
 
 Private Function FindAndLink(ByVal scope As Range, ByVal needle As String, _
