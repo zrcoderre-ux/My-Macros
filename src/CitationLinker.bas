@@ -365,12 +365,22 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     Dim m As Long
     m = disp.Characters.Count
 
-    disp.Font.Italic = True            ' whole display, first character included
+    disp.Font.Italic = True
     If tailStart <= m Then
         Dim tail As Range
         Set tail = disp.Characters(tailStart).Duplicate
         tail.End = disp.Characters(m).End
         tail.Font.Italic = False
+    End If
+
+    ' The first display character sits at the hyperlink field's result boundary
+    ' and won't take italic from a range that starts there (the boundary absorbs
+    ' it). Re-apply it via a range that begins one position earlier -- in the
+    ' hidden field separator -- so the italic spills onto that first character.
+    If disp.start >= 1 Then
+        Dim firstFix As Range
+        Set firstFix = ActiveDocument.Range(disp.start - 1, disp.start + 1)
+        firstFix.Font.Italic = True
     End If
 End Sub
 
