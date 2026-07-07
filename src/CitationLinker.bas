@@ -397,24 +397,55 @@ Private Function CaseNameTailStart(ByVal s As String) As Long
     CaseNameTailStart = FindYearParen(s)
 End Function
 
-' Index of the "(" that opens the first "(19xx)" or "(20xx)" year, or 0.
+' Index of the "(" that opens the date parenthetical -- the first parenthetical
+' containing a 4-digit year (19xx/20xx). Handles "(1992)" (California) as well
+' as "(C.D. Cal. 2021)" / "(9th Cir. 2019)" (federal: court + year). Returns 0
+' when no parenthesized year is present.
 Private Function FindYearParen(ByVal s As String) As Long
+    Dim yearPos As Long
+    yearPos = FindYearPos(s)
+    If yearPos = 0 Then
+        FindYearParen = 0
+        Exit Function
+    End If
+
+    ' Walk left from the year to the "(" that opens its parenthetical. Stop if a
+    ' ")" is reached first (the year is not inside parentheses).
     Dim i As Long
-    For i = 1 To Len(s) - 5
-        If Mid$(s, i, 1) = "(" Then
-            Dim d1 As String, d2 As String, d3 As String, d4 As String, cl As String
-            d1 = Mid$(s, i + 1, 1): d2 = Mid$(s, i + 2, 1)
-            d3 = Mid$(s, i + 3, 1): d4 = Mid$(s, i + 4, 1)
-            cl = Mid$(s, i + 5, 1)
-            If d1 Like "#" And d2 Like "#" And d3 Like "#" And d4 Like "#" And cl = ")" Then
-                If (d1 = "1" And d2 = "9") Or (d1 = "2" And d2 = "0") Then
-                    FindYearParen = i
+    For i = yearPos - 1 To 1 Step -1
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = "(" Then
+            FindYearParen = i
+            Exit Function
+        ElseIf c = ")" Then
+            Exit For
+        End If
+    Next i
+    FindYearParen = 0
+End Function
+
+' Position of the first standalone 4-digit year (19xx/20xx) in s, or 0.
+Private Function FindYearPos(ByVal s As String) As Long
+    Dim i As Long
+    For i = 1 To Len(s) - 3
+        Dim d1 As String, d2 As String, d3 As String, d4 As String
+        d1 = Mid$(s, i, 1): d2 = Mid$(s, i + 1, 1)
+        d3 = Mid$(s, i + 2, 1): d4 = Mid$(s, i + 3, 1)
+        If d1 Like "#" And d2 Like "#" And d3 Like "#" And d4 Like "#" Then
+            If (d1 = "1" And d2 = "9") Or (d1 = "2" And d2 = "0") Then
+                Dim okBefore As Boolean, okAfter As Boolean
+                okBefore = (i = 1)
+                If Not okBefore Then okBefore = Not (Mid$(s, i - 1, 1) Like "#")
+                okAfter = (i + 4 > Len(s))
+                If Not okAfter Then okAfter = Not (Mid$(s, i + 4, 1) Like "#")
+                If okBefore And okAfter Then
+                    FindYearPos = i
                     Exit Function
                 End If
             End If
         End If
     Next i
-    FindYearParen = 0
+    FindYearPos = 0
 End Function
 
 
