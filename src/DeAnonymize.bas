@@ -77,7 +77,7 @@ Public Sub DeAnonymizeTentative()
     If MsgBox("Restore real names using " & nMaps & " mapping(s) from:" & vbCrLf & vbCrLf & _
               keyPath & vbCrLf & vbCrLf & _
               "This replaces every pseudonym throughout the document with its " & _
-              "real value. Ctrl+Z undoes it.", _
+              "real value. Work on a copy if you want an easy way back.", _
               vbYesNo + vbQuestion, "De-Anonymize") <> vbYes Then Exit Sub
 
     Application.ScreenUpdating = False
@@ -95,8 +95,10 @@ Public Sub DeAnonymizeTentative()
     On Error GoTo ErrH
     LogStep "autosave off (was " & prevAutoSave & ")"
 
-    Dim oUndo As UndoRecord: Set oUndo = Application.UndoRecord
-    oUndo.StartCustomRecord "De-Anonymize Tentative"
+    ' NOTE: deliberately NO custom UndoRecord. Wrapping every replacement across
+    ' a large document (dozens of terms, each many hits) into one custom undo
+    ' record overflows and crashes Word -- which is why it worked only in small
+    ' batches. Word still records normal (multi-step) undo for each replacement.
 
     LogStep "replace begin"
     Dim distinctHits As Long, i As Long
@@ -105,10 +107,10 @@ Public Sub DeAnonymizeTentative()
         If ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real) > 0 Then
             distinctHits = distinctHits + 1
         End If
+        If i Mod 5 = 0 Then DoEvents      ' let Word service its queue; avoids overflow
     Next i
     LogStep "replace done"
 
-    oUndo.EndCustomRecord
     On Error Resume Next
     oDoc.AutoSaveOn = prevAutoSave
     On Error GoTo ErrH
@@ -126,7 +128,6 @@ ErrH:
     Dim eD As String: eD = Err.Description
     On Error Resume Next
     Application.ScreenUpdating = True
-    If Not oUndo Is Nothing Then oUndo.EndCustomRecord
     LogStep "ERROR " & eN & ": " & eD
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & eN & ": " & eD, vbExclamation, "De-Anonymize"
