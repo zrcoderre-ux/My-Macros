@@ -348,10 +348,11 @@ Fail:
 End Function
 
 ' Italicize the case-name portion of a linked citation's display text: the run
-' from the start up to the "(year)" date, or up to ", supra". We italicize the
-' WHOLE display range first (which reliably includes the first character,
-' unlike a sub-range that starts at the field boundary), then clear italic from
-' the citation tail, whose range starts mid-text and so is not absorbed.
+' from the case name's first letter up to the "(year)" date or ", supra". Works
+' directly on that run (via the display Characters, whose positions are the true
+' text positions) rather than italicizing the whole span and clearing the tail
+' -- which mis-handled a citation wrapped in outer parentheses, e.g.
+' "(Gutierrez v. Tostado (2025) 18 Cal.5th 222, 231.)".
 Private Sub ItalicizeCaseName(ByVal disp As Range)
     On Error Resume Next
     Dim s As String
@@ -369,25 +370,45 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     End If
 
     Dim m As Long
-    m = disp.Characters.Count
+    m = disp.Characters.count
+    If tailStart > m + 1 Then tailStart = m + 1
 
-    disp.Font.Italic = True
-    If tailStart <= m Then
-        Dim tail As Range
-        Set tail = disp.Characters(tailStart).Duplicate
-        tail.End = disp.Characters(m).End
-        tail.Font.Italic = False
-    End If
+    ' First letter of the case name: skip a leading outer "(", quote, or space,
+    ' then any lowercase signal words ("see", "cf.", "see also"). A case short
+    ' name always starts with a capital.
+    Dim nameStart As Long: nameStart = 1
+    Do While nameStart < tailStart
+        If Mid$(s, nameStart, 1) Like "[A-Za-z]" Then Exit Do
+        nameStart = nameStart + 1
+    Loop
+    Do While nameStart < tailStart
+        If Mid$(s, nameStart, 1) Like "[a-z]" Then
+            Do While nameStart < tailStart And Mid$(s, nameStart, 1) <> " ": nameStart = nameStart + 1
+            Loop
+            Do While nameStart < tailStart And Mid$(s, nameStart, 1) = " ": nameStart = nameStart + 1
+            Loop
+        Else
+            Exit Do
+        End If
+    Loop
 
-    ' The first display character sits at the hyperlink field's result boundary
-    ' and won't take italic from a range that starts there (the boundary absorbs
-    ' it). Re-apply it via a range that begins one position earlier -- in the
-    ' hidden field separator -- so the italic spills onto that first character.
-    If disp.start >= 1 Then
-        Dim firstFix As Range
-        Set firstFix = ActiveDocument.Range(disp.start - 1, disp.start + 1)
-        firstFix.Font.Italic = True
-    End If
+    ' Trim trailing spaces before the tail.
+    Dim nameEnd As Long: nameEnd = tailStart - 1
+    Do While nameEnd >= nameStart And Mid$(s, nameEnd, 1) = " ": nameEnd = nameEnd - 1
+    Loop
+    If nameEnd < nameStart Or nameStart > m Then Exit Sub
+    If nameEnd > m Then nameEnd = m
+
+    ' Italicize the case-name run as one range. Only when it starts at the very
+    ' first display character do we extend the start one position back into the
+    ' hidden field separator, so the field boundary doesn't absorb the italic on
+    ' that first letter. (Characters(1).Start is the true text position; the
+    ' Range's own .Start points into the field code and must not be used here.)
+    Dim startPos As Long
+    startPos = disp.Characters(nameStart).start
+    If nameStart = 1 Then startPos = startPos - 1
+
+    ActiveDocument.Range(startPos, disp.Characters(nameEnd).End).Font.Italic = True
 End Sub
 
 ' Italicize the short name of a supra cite that sits just BEFORE a linked
