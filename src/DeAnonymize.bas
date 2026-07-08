@@ -20,8 +20,8 @@ Attribute VB_Name = "DeAnonymize"
 ' NOTES:
 '   - The draft is a regular document (no live mail-merge fields): every fake
 '     -- caption, party block, and body prose -- is plain text and gets
-'     restored. Replacement runs across all stories: main text, headers,
-'     footers, footnotes, and text boxes.
+'     restored. Replacement covers the main body, each section's headers and
+'     footers, and footnotes/endnotes.
 '   - Longest fakes are replaced first so a bare-surname fake never rewrites
 '     part of a longer full-name fake.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
@@ -78,12 +78,9 @@ Public Sub DeAnonymizeTentative()
     Dim oUndo As UndoRecord: Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "De-Anonymize Tentative"
 
-    Dim totalHits As Long, distinctHits As Long, i As Long
+    Dim distinctHits As Long, i As Long
     For i = 1 To nMaps
-        Dim hits As Long
-        hits = ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real)
-        If hits > 0 Then
-            totalHits = totalHits + hits
+        If ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real) > 0 Then
             distinctHits = distinctHits + 1
         End If
     Next i
@@ -92,8 +89,8 @@ Public Sub DeAnonymizeTentative()
     oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
 
-    MsgBox "De-anonymized: " & totalHits & " replacement(s) across " & _
-           distinctHits & " pseudonym(s)." & vbCrLf & vbCrLf & _
+    MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
+           " pseudonym(s)." & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
 End Sub
 
@@ -257,9 +254,14 @@ End Function
 '==============================================================================
 ' REPLACEMENT
 '==============================================================================
-' Replace findText with replaceText across every story in the document -- main
-' text, plus each header/footer/footnote/text-box story reached via
-' NextStoryRange. Returns the total number replaced.
+' Replace findText with replaceText across the document's stable stories: the
+' main body, each section's headers/footers, and footnotes/endnotes when
+' present. Returns the number of those ranges in which a replacement was made.
+'
+' This deliberately does NOT walk StoryRanges/NextStoryRange (including text
+' frames): enumerating that collection while doing wdReplaceAll inside the loop
+' can destabilize and crash Word. The collections below stay valid across text
+' replacement, so iterating them is safe.
 Private Function ReplaceEverywhere(ByVal oDoc As Document, _
                                     ByVal findText As String, _
                                     ByVal replaceText As String) As Long
@@ -268,52 +270,48 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
 
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
 
-    Dim story As Range
-    For Each story In oDoc.StoryRanges
-        Dim s As Range: Set s = story
-        Do While Not s Is Nothing
-            total = total + ReplaceInRange(s, findText, replaceText, whole)
-            ' NextStoryRange raises an error past the last linked story on some
-            ' builds; trap it and end the walk rather than looping forever.
-            Dim nxt As Range: Set nxt = Nothing
-            On Error Resume Next
-            Set nxt = s.NextStoryRange
-            On Error GoTo 0
-            Set s = nxt
-        Loop
-    Next story
+    ' Main body (caption, party block, and prose are all here in a plain draft).
+    If ReplaceInRange(oDoc.content, findText, replaceText, whole) Then total = total + 1
+
+    ' Headers and footers, section by section.
+    Dim sec As Section
+    Dim hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then
+                If ReplaceInRange(hf.Range, findText, replaceText, whole) Then total = total + 1
+            End If
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then
+                If ReplaceInRange(hf.Range, findText, replaceText, whole) Then total = total + 1
+            End If
+        Next hf
+    Next sec
+
+    ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
+    On Error Resume Next
+    If oDoc.Footnotes.count > 0 Then
+        If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole) Then total = total + 1
+    End If
+    If oDoc.Endnotes.count > 0 Then
+        If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole) Then total = total + 1
+    End If
+    On Error GoTo 0
 
     ReplaceEverywhere = total
 End Function
 
-' Count occurrences of findText within one story range, then replace them all.
-' Counting first (on a duplicate, so the original range is untouched) keeps the
-' report accurate without a replace-loop.
+' Replace every occurrence of findText with replaceText in one range, in a
+' single pass. Returns True if at least one replacement was made. Execute with
+' wdReplaceAll returns that flag directly, so no counting loop is needed.
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
-                                 ByVal whole As Boolean) As Long
-    ReplaceInRange = 0
-
-    Dim cnt As Long: cnt = 0
-    Dim cRng As Range: Set cRng = rng.Duplicate
-    With cRng.Find
-        .ClearFormatting
-        .text = findText
-        .Forward = True
-        .Wrap = wdFindStop
-        .MatchCase = False
-        .MatchWholeWord = whole
-        .MatchWildcards = False
-        Do While .Execute
-            cnt = cnt + 1
-            If cnt > 100000 Then Exit Do        ' runaway guard
-        Loop
-    End With
-    If cnt = 0 Then Exit Function
-
-    Dim rRng As Range: Set rRng = rng.Duplicate
-    With rRng.Find
+                                 ByVal whole As Boolean) As Boolean
+    On Error Resume Next
+    Dim r As Range: Set r = rng.Duplicate
+    With r.Find
         .ClearFormatting
         .Replacement.ClearFormatting
         .text = findText
@@ -323,10 +321,8 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         .MatchCase = False
         .MatchWholeWord = whole
         .MatchWildcards = False
-        .Execute Replace:=wdReplaceAll
+        ReplaceInRange = .Execute(Replace:=wdReplaceAll)
     End With
-
-    ReplaceInRange = cnt
 End Function
 
 ' Whole-word matching is safe (and wanted) only for single alphanumeric tokens
