@@ -47,6 +47,12 @@ Private Sub App_DocumentBeforeClose(ByVal Doc As Document, Cancel As Boolean)
     ' Self-healing guard: re-initialize if the event handler was lost
     If gAppEvents Is Nothing Then InitializeAppEvents
 
+    ' Auto-restore real names on close. Runs only if de-anonymize has not already
+    ' run on this document AND the document was not produced by the re-anonymize
+    ' macro (both tracked via document variables). Silently does nothing when
+    ' there is no pseudonym key in the document's folder.
+    DeAnonymize.RunDeAnonymizeOnClose Doc
+
     ' Ask first - run no checks unless the user wants to review
     Dim respReview As Integer
     respReview = MsgBox("Review document before closing?", _

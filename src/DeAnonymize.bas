@@ -31,12 +31,25 @@ Attribute VB_Name = "DeAnonymize"
 '     longer full name.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
+'   - AUTOMATIC ON CLOSE: RunDeAnonymizeOnClose (called from the close-review in
+'     clsAppEvents) restores real names when a dated OneDrive tentative is
+'     closed -- once per document, and never for re-anonymize output. It keys
+'     off a pseudonym_key.xlsx in the document's folder and does nothing
+'     silently if there isn't one. Two document variables track state:
+'     MM_DeAnonymizeDone and MM_ReAnonymizeCreated.
 '==============================================================================
 Option Explicit
 
 ' PDF-Linker writes "pseudonym_key.xlsx"; match that plus any de-duplicated
 ' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
 Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
+
+' Document variables (persisted inside the .docx) that gate the automatic
+' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
+' REANON_CREATED marks a document produced by the re-anonymize macro, which must
+' never be de-anonymized.
+Private Const DEANON_DONE_VAR    As String = "MM_DeAnonymizeDone"
+Private Const REANON_CREATED_VAR As String = "MM_ReAnonymizeCreated"
 
 Private Type Mapping
     real As String
@@ -106,6 +119,8 @@ Public Sub DeAnonymizeTentative()
     oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
 
+    SetDocFlag oDoc, DEANON_DONE_VAR      ' don't auto-run again on close
+
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s)." & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
@@ -169,6 +184,10 @@ Public Sub ReAnonymizeTentative()
     oDoc.SaveAs2 FileName:=savePath, FileFormat:=wdFormatXMLDocument, _
                  AddToRecentFiles:=False
     ' oDoc is now bound to savePath.
+
+    ' Mark this file as re-anonymize output so the close hook never tries to
+    ' de-anonymize it back to real names.
+    SetDocFlag oDoc, REANON_CREATED_VAR
 
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
@@ -246,6 +265,62 @@ Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
         PickReAnonSavePath = PickReAnonSavePath & ".docx"
     End If
 End Function
+
+'==============================================================================
+' AUTOMATIC DE-ANONYMIZE ON CLOSE
+'==============================================================================
+' Called from clsAppEvents.App_DocumentBeforeClose. Restores real names when a
+' dated OneDrive tentative is closed, but ONLY if de-anonymize hasn't already
+' run on it and it wasn't produced by the re-anonymize macro. Silent: with no
+' pseudonym key in the document's folder it does nothing (the document isn't an
+' anonymized draft, or the key is unavailable). Never sets Cancel, so it can't
+' block the close.
+Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
+    On Error Resume Next
+    If Doc Is Nothing Then Exit Sub
+    If HasDocFlag(Doc, DEANON_DONE_VAR) Then Exit Sub
+    If HasDocFlag(Doc, REANON_CREATED_VAR) Then Exit Sub
+
+    Dim folder As String: folder = Doc.path
+    If Len(folder) = 0 Then Exit Sub
+    Dim keyPath As String: keyPath = MostRecentKeyInFolder(folder)
+    If Len(keyPath) = 0 Then Exit Sub
+
+    Dim maps() As Mapping, nMaps As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps) Then Exit Sub
+
+    SortMappingsByLenDesc maps, nMaps, True
+
+    Application.ScreenUpdating = False
+    Dim prevTrack As Boolean: prevTrack = Doc.TrackRevisions
+    Doc.TrackRevisions = False
+    Dim prevAutoSave As Boolean: prevAutoSave = False
+    prevAutoSave = Doc.AutoSaveOn
+    Doc.AutoSaveOn = False
+
+    Dim i As Long
+    For i = 1 To nMaps
+        ReplaceEverywhere Doc, maps(i).fake, maps(i).real
+        If i Mod 5 = 0 Then DoEvents
+    Next i
+
+    Doc.AutoSaveOn = prevAutoSave
+    Doc.TrackRevisions = prevTrack
+    Application.ScreenUpdating = True
+
+    SetDocFlag Doc, DEANON_DONE_VAR
+End Sub
+
+' --- Document flags, persisted as document variables inside the .docx --------
+Private Function HasDocFlag(ByVal Doc As Document, ByVal name As String) As Boolean
+    On Error Resume Next
+    HasDocFlag = (Doc.Variables(name).Value = "1")
+End Function
+
+Private Sub SetDocFlag(ByVal Doc As Document, ByVal name As String)
+    On Error Resume Next
+    Doc.Variables(name).Value = "1"
+End Sub
 
 '==============================================================================
 ' KEY-FILE LOCATION
