@@ -84,6 +84,17 @@ Public Sub DeAnonymizeTentative()
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
 
+    ' A cloud/SharePoint document with AutoSave on tries to co-author-sync after
+    ' every edit, which crashes Word during a bulk find/replace. Turn it off for
+    ' the run and restore it afterward. (AutoSaveOn errors on older Word builds
+    ' or local files; ignore that.)
+    Dim prevAutoSave As Boolean: prevAutoSave = False
+    On Error Resume Next
+    prevAutoSave = oDoc.AutoSaveOn
+    oDoc.AutoSaveOn = False
+    On Error GoTo ErrH
+    LogStep "autosave off (was " & prevAutoSave & ")"
+
     Dim oUndo As UndoRecord: Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "De-Anonymize Tentative"
 
@@ -98,6 +109,9 @@ Public Sub DeAnonymizeTentative()
     LogStep "replace done"
 
     oUndo.EndCustomRecord
+    On Error Resume Next
+    oDoc.AutoSaveOn = prevAutoSave
+    On Error GoTo ErrH
     oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
 
@@ -302,9 +316,11 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
 
     ' Main body (caption, party block, and prose are all here in a plain draft).
+    LogStep "  r:body"
     If ReplaceInRange(oDoc.content, findText, replaceText, whole) Then total = total + 1
 
     ' Headers and footers, section by section.
+    LogStep "  r:hf"
     Dim sec As Section
     Dim hf As HeaderFooter
     For Each sec In oDoc.Sections
@@ -323,9 +339,11 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
     On Error Resume Next
     If oDoc.Footnotes.count > 0 Then
+        LogStep "  r:fn"
         If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole) Then total = total + 1
     End If
     If oDoc.Endnotes.count > 0 Then
+        LogStep "  r:en"
         If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole) Then total = total + 1
     End If
     On Error GoTo 0
