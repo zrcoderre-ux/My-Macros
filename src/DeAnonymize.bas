@@ -13,17 +13,22 @@ Attribute VB_Name = "DeAnonymize"
 '     Category | Real Value | Replacement | Source | Occurrences
 ' where "Replacement" is the fake that appears in the anonymized draft.
 '
-' MACRO YOU RUN:
+' MACROS YOU RUN:
 '   DeAnonymizeTentative - locate the key, then replace every fake with its
-'                          real value throughout the document body.
+'                          real value throughout the document (in place).
+'   ReAnonymizeTentative - the reverse: replace every real value with its fake,
+'                          then save a metadata-free copy as a NEW document
+'                          (fresh file = no version history) so it is safe to
+'                          share. The original file is left unchanged.
 '
 ' NOTES:
-'   - The draft is a regular document (no live mail-merge fields): every fake
-'     -- caption, party block, and body prose -- is plain text and gets
-'     restored. Replacement covers the main body, each section's headers and
-'     footers, and footnotes/endnotes.
-'   - Longest fakes are replaced first so a bare-surname fake never rewrites
-'     part of a longer full-name fake.
+'   - The draft is a regular document (no live mail-merge fields): every value
+'     -- caption, party block, and body prose -- is plain text. Replacement
+'     covers the main body, each section's headers and footers, and
+'     footnotes/endnotes.
+'   - De-anonymize replaces longest fakes first, re-anonymize replaces longest
+'     real values first, so a bare-surname token never rewrites part of a
+'     longer full name.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
 '==============================================================================
@@ -65,7 +70,7 @@ Public Sub DeAnonymizeTentative()
 
     ' Longest fake first: a bare token like "Thorne" must not rewrite part of a
     ' longer fake like "Barry Thorne" before that longer one is handled.
-    SortMappingsByFakeLenDesc maps, nMaps
+    SortMappingsByLenDesc maps, nMaps, True
 
     If MsgBox("Restore real names using " & nMaps & " mapping(s) from:" & vbCrLf & vbCrLf & _
               keyPath & vbCrLf & vbCrLf & _
@@ -114,6 +119,133 @@ ErrH:
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & eN & ": " & eD, vbExclamation, "De-Anonymize"
 End Sub
+
+'==============================================================================
+' RE-ANONYMIZE  (reverse: real -> fake, saved as a clean new document)
+'==============================================================================
+Public Sub ReAnonymizeTentative()
+    On Error GoTo ErrH
+
+    Dim oDoc As Document
+    Set oDoc = ActiveDocument
+    If oDoc Is Nothing Then Exit Sub
+
+    Dim keyPath As String
+    keyPath = ResolveKeyPath(oDoc)
+    If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
+
+    Dim maps() As Mapping
+    Dim nMaps As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps) Then
+        MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
+               keyPath & vbCrLf & vbCrLf & _
+               "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
+               "(with 'Real Value' and 'Replacement' columns).", _
+               vbExclamation, "Re-Anonymize"
+        Exit Sub
+    End If
+
+    ' Longest real value first so a bare surname doesn't rewrite part of a
+    ' longer full name before that longer one is handled.
+    SortMappingsByLenDesc maps, nMaps, False
+
+    ' Choose where to save the clean copy BEFORE changing anything, so the run
+    ' can be cancelled with nothing touched. Give it a neutral default name so
+    ' the real party names are never carried in the filename.
+    Dim savePath As String
+    savePath = PickReAnonSavePath(oDoc)
+    If Len(savePath) = 0 Then Exit Sub
+
+    If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save a " & _
+              "metadata-free copy to:" & vbCrLf & vbCrLf & savePath & vbCrLf & vbCrLf & _
+              "The original document on disk is left unchanged.", _
+              vbYesNo + vbQuestion, "Re-Anonymize") <> vbYes Then Exit Sub
+
+    Application.ScreenUpdating = False
+
+    ' Save the current document AS the new file first, so all edits and the
+    ' metadata strip happen on a fresh file (no inherited version history) and
+    ' the original file is never written to.
+    oDoc.SaveAs2 FileName:=savePath, FileFormat:=wdFormatXMLDocument, _
+                 AddToRecentFiles:=False
+    ' oDoc is now bound to savePath.
+
+    Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
+    oDoc.TrackRevisions = False
+    Dim prevAutoSave As Boolean: prevAutoSave = False
+    On Error Resume Next
+    prevAutoSave = oDoc.AutoSaveOn
+    oDoc.AutoSaveOn = False
+    On Error GoTo ErrH
+
+    ' Reverse direction: replace each real value with its fake. No custom undo
+    ' record (it overflows and crashes Word on large documents).
+    Dim distinctHits As Long, i As Long
+    For i = 1 To nMaps
+        If ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake) > 0 Then
+            distinctHits = distinctHits + 1
+        End If
+        If i Mod 5 = 0 Then DoEvents
+    Next i
+
+    ' Strip metadata: comments, revisions, versions, and personal/document
+    ' information. Combined with the new file, this leaves no trail back to the
+    ' real matter.
+    On Error Resume Next
+    oDoc.RemoveDocumentInformation wdRDIAll
+    On Error GoTo ErrH
+
+    oDoc.TrackRevisions = prevTrack
+    On Error Resume Next
+    oDoc.AutoSaveOn = prevAutoSave
+    On Error GoTo ErrH
+
+    oDoc.Save
+    Application.ScreenUpdating = True
+
+    MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
+           " value(s)." & vbCrLf & vbCrLf & _
+           "Saved a metadata-free copy to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
+           "This window is now that copy; the original file is unchanged.", _
+           vbInformation, "Re-Anonymize"
+    Exit Sub
+
+ErrH:
+    Dim reN As Long: reN = Err.Number
+    Dim reD As String: reD = Err.Description
+    On Error Resume Next
+    Application.ScreenUpdating = True
+    MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
+           "Error " & reN & ": " & reD, vbExclamation, "Re-Anonymize"
+End Sub
+
+' Ask where to save the anonymized copy. Defaults to the document's folder with
+' a neutral name (so real party names aren't carried in the filename). Returns
+' "" if cancelled. Ensures a .docx extension.
+Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
+    Dim folder As String
+    folder = ""
+    On Error Resume Next
+    folder = oDoc.path
+    On Error GoTo 0
+    If Len(folder) = 0 Then folder = Environ$("USERPROFILE") & "\Documents"
+
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogSaveAs)
+    With fd
+        .Title = "Save the anonymized copy as"
+        .InitialFileName = folder & "\Anonymized Draft.docx"
+        If .Show <> -1 Then
+            PickReAnonSavePath = ""
+            Exit Function
+        End If
+        PickReAnonSavePath = .SelectedItems(1)
+    End With
+
+    If LCase$(Right$(PickReAnonSavePath, 5)) <> ".docx" Then
+        PickReAnonSavePath = PickReAnonSavePath & ".docx"
+    End If
+End Function
 
 '==============================================================================
 ' KEY-FILE LOCATION
@@ -365,13 +497,24 @@ Private Function ShouldWholeWord(ByVal s As String) As Boolean
 End Function
 
 '==============================================================================
-' SORT  (fake length, descending)
+' SORT  (search term length, descending)
 '==============================================================================
-Private Sub SortMappingsByFakeLenDesc(ByRef maps() As Mapping, ByVal nMaps As Long)
+' byFake = True sorts by the fake length (de-anonymize searches for fakes);
+' byFake = False sorts by the real-value length (re-anonymize searches for
+' reals). Longest search term first so a bare token never rewrites part of a
+' longer full name.
+Private Sub SortMappingsByLenDesc(ByRef maps() As Mapping, ByVal nMaps As Long, _
+                                   ByVal byFake As Boolean)
     Dim i As Long, j As Long, tmp As Mapping
     For i = 1 To nMaps - 1
         For j = 1 To nMaps - i
-            If Len(maps(j).fake) < Len(maps(j + 1).fake) Then
+            Dim a As Long, b As Long
+            If byFake Then
+                a = Len(maps(j).fake): b = Len(maps(j + 1).fake)
+            Else
+                a = Len(maps(j).real): b = Len(maps(j + 1).real)
+            End If
+            If a < b Then
                 tmp = maps(j)
                 maps(j) = maps(j + 1)
                 maps(j + 1) = tmp
