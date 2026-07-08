@@ -43,23 +43,17 @@ End Type
 '==============================================================================
 Public Sub DeAnonymizeTentative()
     On Error GoTo ErrH
-    LogReset
-    LogStep "start"
 
     Dim oDoc As Document
     Set oDoc = ActiveDocument
     If oDoc Is Nothing Then Exit Sub
-    LogStep "doc = " & oDoc.Name
 
     Dim keyPath As String
-    LogStep "resolving key"
     keyPath = ResolveKeyPath(oDoc)
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
-    LogStep "key = " & keyPath
 
     Dim maps() As Mapping
     Dim nMaps As Long
-    LogStep "reading key"
     If Not ReadPseudonymKey(keyPath, maps, nMaps) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
@@ -68,7 +62,6 @@ Public Sub DeAnonymizeTentative()
                vbExclamation, "De-Anonymize"
         Exit Sub
     End If
-    LogStep "key read: " & nMaps & " maps"
 
     ' Longest fake first: a bare token like "Thorne" must not rewrite part of a
     ' longer fake like "Barry Thorne" before that longer one is handled.
@@ -84,32 +77,23 @@ Public Sub DeAnonymizeTentative()
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
 
-    ' A cloud/SharePoint document with AutoSave on tries to co-author-sync after
-    ' every edit, which crashes Word during a bulk find/replace. Turn it off for
-    ' the run and restore it afterward. (AutoSaveOn errors on older Word builds
-    ' or local files; ignore that.)
+    ' Turn AutoSave off for the run (cloud docs re-sync after every edit).
     Dim prevAutoSave As Boolean: prevAutoSave = False
     On Error Resume Next
     prevAutoSave = oDoc.AutoSaveOn
     oDoc.AutoSaveOn = False
     On Error GoTo ErrH
-    LogStep "autosave off (was " & prevAutoSave & ")"
 
-    ' NOTE: deliberately NO custom UndoRecord. Wrapping every replacement across
-    ' a large document (dozens of terms, each many hits) into one custom undo
-    ' record overflows and crashes Word -- which is why it worked only in small
-    ' batches. Word still records normal (multi-step) undo for each replacement.
-
-    LogStep "replace begin"
+    ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
+    ' document (dozens of terms, each many hits) into one custom undo record
+    ' overflows and crashes Word. Word still records normal (multi-step) undo.
     Dim distinctHits As Long, i As Long
     For i = 1 To nMaps
-        LogStep "map " & i & "/" & nMaps & " fake=[" & maps(i).fake & "] real=[" & maps(i).real & "]"
         If ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real) > 0 Then
             distinctHits = distinctHits + 1
         End If
         If i Mod 5 = 0 Then DoEvents      ' let Word service its queue; avoids overflow
     Next i
-    LogStep "replace done"
 
     On Error Resume Next
     oDoc.AutoSaveOn = prevAutoSave
@@ -117,7 +101,6 @@ Public Sub DeAnonymizeTentative()
     oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
 
-    LogStep "finished"
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s)." & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
@@ -128,7 +111,6 @@ ErrH:
     Dim eD As String: eD = Err.Description
     On Error Resume Next
     Application.ScreenUpdating = True
-    LogStep "ERROR " & eN & ": " & eD
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & eN & ": " & eD, vbExclamation, "De-Anonymize"
 End Sub
@@ -206,7 +188,6 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     On Error GoTo Fail
     nMaps = 0
 
-    LogStep "  xl: acquire"
     Dim xl As Object
     Dim startedXl As Boolean: startedXl = False
     On Error Resume Next
@@ -216,14 +197,11 @@ Private Function ReadPseudonymKey(ByVal path As String, _
         Set xl = CreateObject("Excel.Application")
         startedXl = True
     End If
-    LogStep "  xl: " & IIf(startedXl, "created", "attached")
     xl.Visible = False
     xl.DisplayAlerts = False
 
-    LogStep "  xl: opening " & path
     Dim wb As Object
     Set wb = xl.Workbooks.Open(FileName:=path, ReadOnly:=True, AddToMRU:=False)
-    LogStep "  xl: wb opened"
 
     Dim ws As Object
     Set ws = wb.Worksheets(1)
@@ -231,7 +209,6 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     ' Pull the whole used range into a 2-D variant array in one COM round-trip.
     Dim data As Variant
     data = ws.UsedRange.Value
-    LogStep "  xl: usedrange read"
 
     ' A single-cell used range comes back as a scalar, not an array -> no data.
     If Not IsArray(data) Then GoTo CleanFail
@@ -263,11 +240,9 @@ Private Function ReadPseudonymKey(ByVal path As String, _
         End If
     Next r
 
-    LogStep "  xl: parsed " & nMaps & " maps; closing"
     wb.Close SaveChanges:=False
     If startedXl Then xl.Quit
     Set wb = Nothing: Set xl = Nothing
-    LogStep "  xl: closed"
 
     ReadPseudonymKey = (nMaps > 0)
     Exit Function
@@ -317,11 +292,9 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
 
     ' Main body (caption, party block, and prose are all here in a plain draft).
-    LogStep "  r:body"
     If ReplaceInRange(oDoc.content, findText, replaceText, whole) Then total = total + 1
 
     ' Headers and footers, section by section.
-    LogStep "  r:hf"
     Dim sec As Section
     Dim hf As HeaderFooter
     For Each sec In oDoc.Sections
@@ -340,11 +313,9 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
     On Error Resume Next
     If oDoc.Footnotes.count > 0 Then
-        LogStep "  r:fn"
         If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole) Then total = total + 1
     End If
     If oDoc.Endnotes.count > 0 Then
-        LogStep "  r:en"
         If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole) Then total = total + 1
     End If
     On Error GoTo 0
@@ -407,30 +378,4 @@ Private Sub SortMappingsByFakeLenDesc(ByRef maps() As Mapping, ByVal nMaps As Lo
             End If
         Next j
     Next i
-End Sub
-
-'==============================================================================
-' DIAGNOSTICS  (temporary)
-'==============================================================================
-' Append a step to %TEMP%\deanon_log.txt, closing the file each time so the log
-' survives a hard Word crash. LogReset starts a fresh file per run. Used to
-' pinpoint where DeAnonymizeTentative dies when Word crashes outright.
-Private Function LogPath() As String
-    LogPath = Environ$("TEMP") & "\deanon_log.txt"
-End Function
-
-Private Sub LogReset()
-    On Error Resume Next
-    Dim ff As Integer: ff = FreeFile
-    Open LogPath() For Output As #ff
-    Print #ff, "=== DeAnonymize " & Format$(Now, "yyyy-mm-dd hh:nn:ss") & " ==="
-    Close #ff
-End Sub
-
-Private Sub LogStep(ByVal msg As String)
-    On Error Resume Next
-    Dim ff As Integer: ff = FreeFile
-    Open LogPath() For Append As #ff
-    Print #ff, Format$(Now, "hh:nn:ss") & "  " & msg
-    Close #ff
 End Sub
