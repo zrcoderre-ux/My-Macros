@@ -200,10 +200,6 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     If CheckUnmatchedPairs(Doc, "{", "}", HL_GREEN) Then issues = True
     If CheckUnmatchedPairs(Doc, "(", ")", HL_GREEN) Then issues = True
 
-    ' Placeholder word "blank" (*blank* is exempt and restored after)
-    If HighlightWord(Doc, "blank", HL_CYAN) Then issues = True
-    RestoreIntentionalBlanks Doc
-
     ' Double spaces
     If CheckDoubleSpaces(Doc) Then issues = True
 

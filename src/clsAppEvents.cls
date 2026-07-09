@@ -71,8 +71,7 @@ Private Sub App_DocumentBeforeClose(ByVal Doc As Document, Cancel As Boolean)
         Dim resp As Integer
         resp = MsgBox("Document contains possible issues." & vbCrLf & vbCrLf & _
                       "Highlighted items:" & vbCrLf & vbCrLf & _
-                      "  Green = unmatched punctuation or double space" & vbCrLf & _
-                      "  Cyan  = placeholder word ""blank""" & vbCrLf & vbCrLf & _
+                      "  Green = unmatched punctuation or double space" & vbCrLf & vbCrLf & _
                       "Yes = stay open to review" & vbCrLf & _
                       "No  = close and remove highlights (keep yellow)", _
                       vbExclamation + vbYesNo, "Document Check")
