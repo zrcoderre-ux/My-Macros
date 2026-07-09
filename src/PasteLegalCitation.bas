@@ -56,12 +56,17 @@ Sub PasteLegalQuotation()
     Set oDoc = ActiveDocument
     Set oSel = Selection
 
-    Dim oUndo As UndoRecord
-    Set oUndo = Application.UndoRecord
-    oUndo.StartCustomRecord "Paste Legal Quotation"
+    ' NOTE: This macro deliberately does NOT wrap its work in a custom
+    ' UndoRecord (Application.UndoRecord.StartCustomRecord). A custom undo
+    ' record that spans the hyperlink-field deletions in
+    ' HarvestAndRemoveHyperlinks (Lexis+ pastes always carry a hyperlink)
+    ' destabilises Word's undo stack and hard-crashes the app -- the same
+    ' failure mode that crashed the DeAnonymize macro on large edits. The
+    ' cost of omitting it is that undoing a paste now takes several Ctrl+Z
+    ' presses instead of one; that is an acceptable trade for not crashing.
 
-    ' FIX 1: Wrap entire body in error handler so the undo record
-    '         is always closed, even if a runtime error occurs.
+    ' FIX 1: Wrap entire body in an error handler so an unexpected runtime
+    '         error still lands on CleanUp and reports its phase.
     On Error GoTo CleanUp
     g_Phase = "pre-paste detection & paste"
 
@@ -627,19 +632,18 @@ Sub PasteLegalQuotation()
     FixSurroundingFont oDoc, lStart, lEnd
 
 CleanUp:
-    ' FIX 1 (continued): Always close the undo record, even on error.
+    ' FIX 1 (continued): Report any trapped runtime error and the phase it
+    ' occurred in. (No custom undo record to close -- see note at the top.)
     Dim lErrNum As Long
     Dim sErrDesc As String
     lErrNum = Err.Number
     sErrDesc = Err.Description
-    oUndo.EndCustomRecord
     If lErrNum <> 0 Then
         MsgBox "Error " & lErrNum & ": " & sErrDesc & vbCrLf & vbCrLf & _
                "During: " & g_Phase, vbExclamation, "PasteLegalQuotation"
     End If
 
     Set oRange = Nothing
-    Set oUndo = Nothing
 
 End Sub
 
