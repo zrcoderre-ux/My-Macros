@@ -399,11 +399,18 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     If nameEnd < nameStart Or nameStart > m Then Exit Sub
     If nameEnd > m Then nameEnd = m
 
-    ' Italicize the case-name run as one range. Only when it starts at the very
-    ' first display character do we extend the start one position back into the
-    ' hidden field separator, so the field boundary doesn't absorb the italic on
-    ' that first letter. (Characters(1).Start is the true text position; the
-    ' Range's own .Start points into the field code and must not be used here.)
+    ' Clean slate first: clear italic across the WHOLE display, extending one
+    ' position back into the hidden field separator so the boundary's first
+    ' character is reached too. This removes any stray italic -- e.g. a leading
+    ' "(" left italic by an earlier build or a previous link/unlink cycle -- so
+    ' only the case name ends up italic no matter the document's prior state.
+    ActiveDocument.Range(disp.Characters(1).start - 1, disp.Characters(m).End).Font.Italic = False
+
+    ' Now italicize the case-name run as one range. Only when it starts at the
+    ' very first display character do we extend the start one position back into
+    ' the field separator, so the boundary doesn't absorb the italic on that
+    ' first letter. (Characters(1).Start is the true text position; the Range's
+    ' own .Start points into the field code and must not be used here.)
     Dim startPos As Long
     startPos = disp.Characters(nameStart).start
     If nameStart = 1 Then startPos = startPos - 1
