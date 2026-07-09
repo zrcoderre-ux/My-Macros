@@ -1730,7 +1730,20 @@ Private Function FindQuoteEnd(oRange As Range) As Long
         sPassagePart = Left(sTrimmed, nCitationStart - 1)
         sPassagePart = RTrim(sPassagePart)
         lPassageEnd = oRange.start + Len(sPassagePart)
+    ElseIf nCitationStart = 1 Then
+        ' The citation parenthesis opens at the very first character, so there
+        ' is no quoted passage ahead of it -- this is a citation-only paste.
+        ' Report an empty passage (boundary at the range start) so the
+        ' citation-only branch fires and the passage-only steps do not run
+        ' against the citation itself. In particular, the "replace paragraph
+        ' marks with a pilcrow" step (Step 11e) would otherwise scan the whole
+        ' citation and, when the paste sits at the end of the document, try to
+        ' replace the final paragraph mark -- which raises error 4608 "Value out
+        ' of range" because that mark cannot be deleted.
+        lPassageEnd = oRange.start
     Else
+        ' No parenthetical citation found at all: treat the whole range as the
+        ' passage (unchanged fallback for bare / unparenthesized content).
         lPassageEnd = oRange.End
     End If
 
