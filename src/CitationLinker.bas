@@ -202,6 +202,14 @@ Public Sub AddCitationLinks()
 NextK:
     Next k
 
+    ' Catch subsequent "..., supra, <vol reporter> at p. <pages>" cites the
+    ' bridge left unlinked. This happens when the full cite's short name is set
+    ' by a parenthetical override -- e.g. "... 1251, 1261 (Grand Terrace)" -- that
+    ' the extractor never ties back to "Grand Terrace, supra". We match on the
+    ' reporter volume, which the supra shares verbatim with the full cite, and
+    ' reuse that full cite's URL.
+    LinkOrphanSupraCites doc, keep, added
+
 CleanUp:
     Application.ScreenUpdating = True
     If Err.Number <> 0 Then
@@ -609,6 +617,143 @@ Private Function FindAndLink(ByVal scope As Range, ByVal needle As String, _
 Fail:
     FindAndLink = False
 End Function
+
+
+' After the bridge links are placed, hyperlink any "supra" cite it left behind.
+' A subsequent cite such as "Grand Terrace, supra, 192 Cal.App.3d at pp.
+' 1266-1267" shares its reporter volume ("192 Cal.App.3d") verbatim with the
+' full cite that established the case, so we link the reporter-through-pincite
+' span to that full cite's URL. This is the common miss when the full cite's
+' short name comes from a parenthetical override ("... 1251, 1261 (Grand
+' Terrace)") the extractor never associates with the short form. Best-effort:
+' any failure is swallowed so it can never disturb the links already placed.
+Private Sub LinkOrphanSupraCites(ByVal doc As Document, ByRef keep() As CiteRow, _
+                                 ByRef added As Long)
+    On Error Resume Next
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    ' ", supra, <volume reporter> at p. <pages>"  /  "at pp. <pages>".
+    ' The reporter group is lazy so it stops at " at p"; the page list allows
+    ' digits, commas, spaces, hyphen and en dash (ranges like 1266-1267).
+    re.Pattern = ",\s+supra,\s+(\d{1,4}\s+[A-Za-z][A-Za-z.\d ]*?)\s+at\s+pp?\.\s*\d[\d,\s" _
+                 & ChrW(8211) & "\-]*"
+
+    Dim p As Paragraph
+    For Each p In doc.Paragraphs
+        Dim raw As String
+        raw = ParagraphRawText(p.Range)
+        If Len(raw) = 0 Then GoTo NextPara
+
+        Dim ms As Object
+        Set ms = re.Execute(raw)
+        If ms.Count = 0 Then GoTo NextPara
+
+        Dim mm As Object
+        For Each mm In ms
+            Dim repVol As String
+            repVol = Trim$(mm.SubMatches(0))
+            If Len(repVol) = 0 Then GoTo NextMatch
+
+            Dim url As String
+            url = UrlForReporterVol(repVol, keep)
+            If Len(url) = 0 Then GoTo NextMatch
+
+            ' Link the reporter through the pincite pages -- the whole match with
+            ' the leading ", supra, " connective dropped. Taken from the matched
+            ' text itself so it reproduces the document's exact punctuation.
+            Dim vp As Long
+            vp = InStr(mm.Value, repVol)
+            If vp = 0 Then GoTo NextMatch
+            Dim linkText As String
+            linkText = Mid$(mm.Value, vp)
+
+            LinkTextIfUnlinked p.Range, linkText, url, added
+NextMatch:
+        Next mm
+NextPara:
+    Next p
+End Sub
+
+
+' Return the URL of the linked full cite whose text contains reporter volume
+' repVol (e.g. "192 Cal.App.3d"). Returns "" when none match or when the volume
+' is claimed by two different URLs (ambiguous -- safer to leave it unlinked).
+Private Function UrlForReporterVol(ByVal repVol As String, ByRef keep() As CiteRow) As String
+    On Error GoTo Fail
+    Dim wantUrl As String: wantUrl = ""
+
+    Dim i As Long
+    For i = LBound(keep) To UBound(keep)
+        Dim t As String: t = keep(i).txt
+        If Len(t) = 0 Or Len(keep(i).url) = 0 Then GoTo NextRow
+
+        Dim pos As Long: pos = InStr(1, t, repVol, vbTextCompare)
+        Do While pos > 0
+            ' Require a non-digit (or string start) just before the volume so
+            ' "192 Cal.App.3d" is not matched inside "1192 Cal.App.3d".
+            Dim okLeft As Boolean: okLeft = (pos = 1)
+            If Not okLeft Then okLeft = Not (Mid$(t, pos - 1, 1) Like "#")
+            If okLeft Then
+                If wantUrl = "" Then
+                    wantUrl = keep(i).url
+                ElseIf StrComp(wantUrl, keep(i).url, vbTextCompare) <> 0 Then
+                    UrlForReporterVol = ""       ' ambiguous volume
+                    Exit Function
+                End If
+                Exit Do
+            End If
+            pos = InStr(pos + 1, t, repVol, vbTextCompare)
+        Loop
+NextRow:
+    Next i
+
+    UrlForReporterVol = wantUrl
+    Exit Function
+Fail:
+    UrlForReporterVol = ""
+End Function
+
+
+' Find needle inside scope with Word Find (so field/footnote positions are
+' handled) and hyperlink the first occurrence that is not already linked.
+Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
+                               ByVal url As String, ByRef added As Long)
+    On Error GoTo Done
+    If Len(needle) = 0 Or Len(needle) > 250 Then Exit Sub
+
+    Dim searchStart As Long: searchStart = scope.Start
+    Dim guard As Long: guard = 0
+    Do
+        guard = guard + 1
+        If guard > 50 Then Exit Do
+
+        Dim fr As Range
+        Set fr = ActiveDocument.Range(searchStart, scope.End)
+        With fr.Find
+            .ClearFormatting
+            .text = needle
+            .Forward = True
+            .Wrap = wdFindStop
+            .MatchWildcards = False
+            .MatchCase = True
+            .Execute
+        End With
+        If Not fr.Find.Found Then Exit Do
+
+        If fr.Hyperlinks.Count = 0 Then
+            If AddLink(fr, url, "case") Then added = added + 1
+            Exit Do
+        End If
+
+        ' This occurrence is already linked -- resume past it.
+        searchStart = fr.End
+        If searchStart >= scope.End Then Exit Do
+    Loop
+Done:
+End Sub
 
 
 Private Sub ResetLinkFormatting(ByVal rng As Range)
