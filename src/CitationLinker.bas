@@ -413,9 +413,23 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     ' own .Start points into the field code and must not be used here.)
     Dim startPos As Long
     startPos = disp.Characters(nameStart).start
-    If nameStart = 1 Then startPos = startPos - 1
+    Dim extendedBack As Boolean: extendedBack = (nameStart = 1)
+    If extendedBack Then startPos = startPos - 1
 
     ActiveDocument.Range(startPos, disp.Characters(nameEnd).End).Font.Italic = True
+
+    ' Undo the leak from the back-extension. Extending the italic start one
+    ' position before the first display character also italicizes whatever plain
+    ' character sits immediately before the hyperlink field -- for a citation
+    ' SENTENCE that is the outer "(" (e.g. "(Gutierrez v. Tostado (2025) ...").
+    ' The first display letter's italic is stored on its own character run, so
+    ' clearing italic on just that one preceding character removes the stray
+    ' italic on the "(" without disturbing the case name. Harmless when the
+    ' preceding character is a space (in-text cites): clearing invisible italic
+    ' on a space changes nothing visible.
+    If extendedBack Then
+        ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
+    End If
 End Sub
 
 ' Italicize the short name of a supra cite that sits just BEFORE a linked
