@@ -29,6 +29,15 @@ Private Const REPO_JSON As String = ""                    ' full path to citatio
 Private Const SCREENTIP_PREFIX As String = "CiteLink:: "  ' tag identifying our links
 ' ----------------------------------------------------------------------------
 
+' Provider whose search URLs the links point to: "lexis" or "westlaw".
+' Persisted in the registry (SaveSetting/GetSetting) so it survives Word
+' restarts. Flip it with the ToggleCitationProvider macro -- no code edit
+' needed. New installs default to Westlaw.
+Private Const PROVIDER_APP     As String = "MyMacros"
+Private Const PROVIDER_SECTION As String = "CitationLinker"
+Private Const PROVIDER_KEY     As String = "Provider"
+Private Const PROVIDER_DEFAULT As String = "westlaw"
+
 ' Result of normalizing a paragraph's raw text to the same plain text the
 ' bridge produced, plus a map from each normalized char to its raw index.
 Private Type NormResult
@@ -102,6 +111,8 @@ Public Sub AddCitationLinks()
     cmd = Q(PYTHON_EXE) & " " & Q(SCRIPT_DIR & "\word_cite_bridge.py") & _
           " " & Q(tmpIn) & " " & Q(tmpOut)
     If Len(REPO_JSON) > 0 Then cmd = cmd & " " & Q(REPO_JSON)
+    ' Provider is validated to "lexis"/"westlaw", so it needs no quoting.
+    cmd = cmd & " --provider " & CitationProvider()
 
     Dim rc As Long
     rc = RunAndWait(cmd)
@@ -215,7 +226,8 @@ CleanUp:
     If Err.Number <> 0 Then
         MsgBox "Stopped after an error: " & Err.Description, vbExclamation, "Citation Linker"
     Else
-        MsgBox "Linked " & added & " citation" & IIf(added = 1, "", "s") & ".", _
+        MsgBox "Linked " & added & " citation" & IIf(added = 1, "", "s") & _
+               " (" & ProviderDisplay(CitationProvider()) & ").", _
                vbInformation, "Citation Linker"
     End If
 End Sub
@@ -247,6 +259,36 @@ Public Sub ToggleCitationLinks()
         AddCitationLinks
     End If
 End Sub
+
+
+' Flip the citation-link provider between Westlaw and Lexis+ and remember the
+' choice across Word sessions. Run it again to switch back. Bind it to a
+' shortcut if you switch often. The next AddCitationLinks uses the new provider.
+Public Sub ToggleCitationProvider()
+    Dim cur As String: cur = CitationProvider()
+    Dim nxt As String
+    If cur = "westlaw" Then nxt = "lexis" Else nxt = "westlaw"
+    SaveSetting PROVIDER_APP, PROVIDER_SECTION, PROVIDER_KEY, nxt
+    MsgBox "Citation links now point to " & ProviderDisplay(nxt) & "." & vbCrLf & vbCrLf & _
+           "Run ToggleCitationProvider again to switch back to " & ProviderDisplay(cur) & ".", _
+           vbInformation, "Citation Linker"
+End Sub
+
+
+' The provider whose search URLs the linker builds: "lexis" or "westlaw".
+' Read from the registry each time so a toggle takes effect on the next run;
+' defaults to Westlaw until changed.
+Private Function CitationProvider() As String
+    Dim p As String
+    p = LCase$(Trim$(GetSetting(PROVIDER_APP, PROVIDER_SECTION, PROVIDER_KEY, PROVIDER_DEFAULT)))
+    If p <> "lexis" And p <> "westlaw" Then p = PROVIDER_DEFAULT
+    CitationProvider = p
+End Function
+
+
+Private Function ProviderDisplay(ByVal p As String) As String
+    If LCase$(p) = "lexis" Then ProviderDisplay = "Lexis+" Else ProviderDisplay = "Westlaw"
+End Function
 
 
 Public Sub RemoveAllHyperlinks()
