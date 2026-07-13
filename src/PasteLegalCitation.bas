@@ -2202,18 +2202,26 @@ Private Function DetectPrePasteParenthetical(oDoc As Document, _
 
     Dim i As Long
     i = Len(sScan)
-    Do While i >= 1 And AscW(Mid(sScan, i, 1)) = 32
+    ' Test i before touching Mid: VBA's And is NOT short-circuiting, so when
+    ' i = 0 -- an empty scan at the first paragraph (lStart = 0), or a run of
+    ' only spaces before the cursor -- "Mid(sScan, 0, 1)" would raise error 5
+    ' "Invalid procedure call or argument".
+    Do While i >= 1
+        If AscW(Mid(sScan, i, 1)) <> 32 Then Exit Do
         i = i - 1
     Loop
 
-    If i >= 1 And AscW(Mid(sScan, i, 1)) = 91 Then
-        Dim lDelStart As Long
-        lDelStart = lScanFrom + i - 1
-        oDoc.Range(lDelStart, lStart).Delete
-        lStart = lDelStart
-        DetectPrePasteParenthetical = True
-    Else
-        DetectPrePasteParenthetical = False
+    ' Nested (not "i >= 1 And AscW(...)") so Mid is never called with i = 0 --
+    ' VBA's And evaluates both sides, and Mid(sScan, 0, 1) raises error 5.
+    DetectPrePasteParenthetical = False
+    If i >= 1 Then
+        If AscW(Mid(sScan, i, 1)) = 91 Then
+            Dim lDelStart As Long
+            lDelStart = lScanFrom + i - 1
+            oDoc.Range(lDelStart, lStart).Delete
+            lStart = lDelStart
+            DetectPrePasteParenthetical = True
+        End If
     End If
 
 End Function
@@ -2240,7 +2248,12 @@ Private Function DetectPrePasteTextual(oDoc As Document, _
     ' Strip trailing spaces
     Dim i As Long
     i = Len(sScan)
-    Do While i >= 1 And AscW(Mid(sScan, i, 1)) = 32
+    ' Test i before touching Mid: VBA's And is NOT short-circuiting, so when
+    ' i = 0 -- an empty scan at the first paragraph (lStart = 0), or a run of
+    ' only spaces before the cursor -- "Mid(sScan, 0, 1)" would raise error 5
+    ' "Invalid procedure call or argument".
+    Do While i >= 1
+        If AscW(Mid(sScan, i, 1)) <> 32 Then Exit Do
         i = i - 1
     Loop
     If i < 2 Then Exit Function
@@ -2302,7 +2315,12 @@ Private Sub DetectPrePasteStatutoryTextual(oDoc As Document, _
     ' Strip trailing spaces
     Dim i As Long
     i = Len(sScan)
-    Do While i >= 1 And AscW(Mid(sScan, i, 1)) = 32
+    ' Test i before touching Mid: VBA's And is NOT short-circuiting, so when
+    ' i = 0 -- an empty scan at the first paragraph (lStart = 0), or a run of
+    ' only spaces before the cursor -- "Mid(sScan, 0, 1)" would raise error 5
+    ' "Invalid procedure call or argument".
+    Do While i >= 1
+        If AscW(Mid(sScan, i, 1)) <> 32 Then Exit Do
         i = i - 1
     Loop
     If i < 1 Then Exit Sub
@@ -2622,16 +2640,21 @@ Private Function DetectPrePasteCites(oDoc As Document, _
     Loop
     If iEnd < 4 Then Exit Function
 
-    ' The text up to iEnd must end with "cites" or "cite".
+    ' The text up to iEnd must end with "cites" or "cite". Nested Ifs so Mid is
+    ' never called with a start < 1: iEnd can be exactly 4 here, and
+    ' "iEnd >= 5 And Mid(sScan, iEnd - 4, 5)" would still evaluate Mid at index 0
+    ' (VBA's And is not short-circuiting), raising error 5. iEnd >= 4 is already
+    ' guaranteed above, so the "cite" branch's Mid start (iEnd - 3) is >= 1.
     Dim sVerb As String
     Dim nVerbLen As Integer
-    If iEnd >= 5 And Mid(sScan, iEnd - 4, 5) = "cites" Then
-        nVerbLen = 5
-    ElseIf iEnd >= 4 And Mid(sScan, iEnd - 3, 4) = "cite" Then
-        nVerbLen = 4
-    Else
-        Exit Function
+    nVerbLen = 0
+    If iEnd >= 5 Then
+        If Mid(sScan, iEnd - 4, 5) = "cites" Then nVerbLen = 5
     End If
+    If nVerbLen = 0 Then
+        If Mid(sScan, iEnd - 3, 4) = "cite" Then nVerbLen = 4
+    End If
+    If nVerbLen = 0 Then Exit Function
 
     ' The character before the verb must be a space (word boundary).
     Dim iVerbStart As Long
