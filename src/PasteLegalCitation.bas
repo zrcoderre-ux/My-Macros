@@ -3159,6 +3159,12 @@ Private Sub FormatQuotation(oRange As Range)
         oChar.Font.Name = "Times New Roman"
         oChar.Font.Size = 12
         oChar.Font.Bold = False
+        ' Clear expanded/condensed character spacing and horizontal scaling that
+        ' Lexis/Westlaw text can carry, so no character is left with a phantom
+        ' extra-space effect. (Font.Position is left alone to preserve any
+        ' intentional super/subscript.)
+        oChar.Font.Spacing = 0
+        oChar.Font.Scaling = 100
         If bItalic Then oChar.Font.Italic = True
 
         Set oChar = Nothing
@@ -3680,45 +3686,49 @@ Private Sub WrapInDoubleQuotes(oRange As Range)
     Dim lOpenPos As Long
     Dim oEnd As Range
     Dim oStart As Range
-    Dim sCapFont As String
-    Dim nCapSize As Long
 
     Set oDoc = ActiveDocument
 
-    ' Capture font from the first character of the passage before any insertion.
-    ' This avoids paragraph-mark font inheritance when the paste is at
-    ' paragraph start -- we apply the captured font explicitly after inserting.
-    Set oStart = oDoc.Range(oRange.start, oRange.start + 1)
-    sCapFont = oStart.Font.Name
-    nCapSize = oStart.Font.Size
-    If sCapFont = "" Or sCapFont = "Mixed" Then sCapFont = "Times New Roman"
-    If nCapSize <= 0 Then nCapSize = 12
-    Set oStart = Nothing
-
     ' Insert closing quote first so its position isn't affected by the
-    ' opening insertion that follows
+    ' opening insertion that follows.
     lClosePos = oRange.End
     Set oEnd = oDoc.Range(lClosePos, lClosePos)
     oEnd.InsertAfter ChrW(&H201D)
     Set oEnd = oDoc.Range(lClosePos, lClosePos + 1)
-    oEnd.Font.Name = "Times New Roman"
-    oEnd.Font.Size = 12
-    oEnd.Font.Bold = False
-    oEnd.Font.Italic = False
+    CleanQuoteFont oEnd
     Set oEnd = Nothing
 
-    ' Insert opening quote using the captured font so paragraph-mark
-    ' inheritance cannot affect it.
+    ' Insert opening quote and force clean Times New Roman -- do NOT inherit the
+    ' passage's first-character font. When a Lexis headnote is stripped from the
+    ' start of the copied text, that first character can carry the headnote's
+    ' font AND expanded character spacing; inheriting it put the opening quote in
+    ' the wrong font with a phantom-space effect (looks like an extra space that
+    ' isn't there). Setting the font outright also defeats paragraph-mark
+    ' inheritance at paragraph start.
     lOpenPos = oRange.start
     Set oStart = oDoc.Range(lOpenPos, lOpenPos)
     oStart.InsertBefore ChrW(&H201C)
     Set oStart = oDoc.Range(lOpenPos, lOpenPos + 1)
-    oStart.Font.Name = sCapFont
-    oStart.Font.Size = nCapSize
-    oStart.Font.Bold = False
-    oStart.Font.Italic = False
+    CleanQuoteFont oStart
     Set oStart = Nothing
 
+End Sub
+
+' Normalize a just-inserted quote mark to clean Times New Roman 12pt with no
+' inherited bold/italic and, crucially, no inherited advanced spacing
+' (Spacing/Scaling/Position). A leftover font or expanded character spacing from
+' stripped Lexis headnotes would otherwise leave the quote in the wrong font or
+' produce a phantom-space effect next to it.
+Private Sub CleanQuoteFont(ByVal oQuote As Range)
+    With oQuote.Font
+        .Name = "Times New Roman"
+        .Size = 12
+        .Bold = False
+        .Italic = False
+        .Spacing = 0
+        .Scaling = 100
+        .Position = 0
+    End With
 End Sub
 
 '===========================================================
