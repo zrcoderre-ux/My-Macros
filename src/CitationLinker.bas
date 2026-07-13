@@ -60,7 +60,9 @@ End Type
 ' PUBLIC MACROS
 '==============================================================================
 
-Public Sub AddCitationLinks()
+' Private: driven through ToggleCitationLinks (Ctrl+Shift+H), so it is kept off
+' the Alt+F8 list. Still callable within this module.
+Private Sub AddCitationLinks()
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
@@ -233,7 +235,9 @@ CleanUp:
 End Sub
 
 
-Public Sub RemoveCitationLinks()
+' Private: driven through ToggleCitationLinks (Ctrl+Shift+H), so it is kept off
+' the Alt+F8 list. Still callable within this module.
+Private Sub RemoveCitationLinks()
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
@@ -248,7 +252,11 @@ End Sub
 ' tool's citation links, remove them; otherwise detect and apply them. A
 ' "mixed" document (some cites linked, some not) has citation links present, so
 ' it removes on this press and applies on the next.
-Public Sub ToggleCitationLinks()
+'
+' The unused Optional argument keeps this off the Alt+F8 list (subs that take an
+' argument aren't shown) while it stays fully runnable by the Ctrl+Shift+H key
+' binding, which invokes it by name with the argument omitted.
+Public Sub ToggleCitationLinks(Optional ByVal unused As Long)
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
@@ -291,7 +299,10 @@ Private Function ProviderDisplay(ByVal p As String) As String
 End Function
 
 
-Public Sub RemoveAllHyperlinks()
+' Private so it stays off the Alt+F8 list (rarely needed; use Ctrl+Shift+H for
+' this tool's own links). Run it from the VBE if you ever need the "remove EVERY
+' hyperlink" behavior.
+Private Sub RemoveAllHyperlinks()
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
