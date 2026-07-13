@@ -253,10 +253,11 @@ End Sub
 ' "mixed" document (some cites linked, some not) has citation links present, so
 ' it removes on this press and applies on the next.
 '
-' The unused Optional argument keeps this off the Alt+F8 list (subs that take an
-' argument aren't shown) while it stays fully runnable by the Ctrl+Shift+H key
-' binding, which invokes it by name with the argument omitted.
-Public Sub ToggleCitationLinks(Optional ByVal unused As Long)
+' Must stay a no-argument Public Sub: it is bound to Ctrl+Shift+H via
+' KeyBindings.Add, and a macro that takes an argument cannot be a key-binding
+' target (the binding fails with runtime error 5346). It therefore stays in the
+' Alt+F8 list -- that is the price of being key-bindable.
+Public Sub ToggleCitationLinks()
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub

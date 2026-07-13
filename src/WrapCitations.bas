@@ -1,9 +1,9 @@
 Attribute VB_Name = "WrapCitations"
 Option Explicit
-' Internal: CheckAndWrap / CheckAndWrapEnter run from their key bindings, not the
-' Alt+F8 list. Hide them from the Macros dialog; the bindings still resolve them
-' within the project.
-Option Private Module
+' NOTE: do NOT add Option Private Module here. CheckAndWrap / CheckAndWrapEnter
+' are assigned to the spacebar/return keys via KeyBindings.Add, and a macro in an
+' Option Private Module module cannot be resolved as a key-binding target --
+' RegisterWrapKeyBindings would fail with runtime error 5346.
 
 Private bWrapBusy As Boolean
 

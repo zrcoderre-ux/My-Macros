@@ -1,11 +1,8 @@
 Attribute VB_Name = "ParentheticalAutocomplete"
-' Keep this module's many entry points (key-binding handlers, the OnTime poll
-' callback, registration routines) out of the Alt+F8 macro list. They stay fully
-' callable within the project -- by their key bindings, by the qualified
-' Application.OnTime "ParentheticalAutocomplete.PollTick" call, and by AutoExec /
-' clsAppEvents -- since Option Private Module only hides from the Macros dialog
-' and from other projects.
-Option Private Module
+' NOTE: do NOT add Option Private Module here. Several of this module's macros
+' (OnOpenParen, AcceptOrTab, etc.) are assigned to keys via KeyBindings.Add, and
+' a macro in an Option Private Module module cannot be resolved as a key-binding
+' target -- RegisterParenKeyBindings would fail with runtime error 5346.
 '=============================================================================
 ' ParentheticalAutocomplete.bas
 ' Word VBA Macro -- Legal Citation Autocomplete
