@@ -559,7 +559,7 @@ End Function
 '=============================================================================
 ' DOCUMENT SCANNER  (unchanged from v2)
 '=============================================================================
-Public Sub ScanDocument()
+Private Sub ScanDocument()
     Dim sText    As String
     Dim pos      As Long
     Dim closeP   As Long
@@ -718,7 +718,7 @@ End Function
 '=============================================================================
 ' MATCH LIST  (v3 -- now stores filtered matches in m_Matches array)
 '=============================================================================
-Public Sub RebuildMatches()
+Private Sub RebuildMatches()
     ReDim m_Matches(0 To IIf(m_CiteCount = 0, 0, m_CiteCount - 1))
     m_MatchCount = 0
 
@@ -739,7 +739,7 @@ NextCite:
 End Sub
 
 ' Update the form's label + counter to reflect m_Matches(m_MatchIndex).
-Public Sub RefreshDisplay()
+Private Sub RefreshDisplay()
     On Error Resume Next
     If m_MatchCount = 0 Then
         frmSuggest.lblSuggestion.Caption = ""
@@ -758,7 +758,7 @@ End Sub
 '=============================================================================
 ' POPUP FORM SHOW / HIDE / POSITION
 '=============================================================================
-Public Sub ShowSuggestForm()
+Private Sub ShowSuggestForm()
     ' Order matters here. WS_EX_NOACTIVATE has to be applied to the form's
     ' HWND, which doesn't exist until Show creates it. The first Show() will
     ' steal focus regardless of the ex-style; we accept that and explicitly
@@ -880,7 +880,7 @@ Private Sub ShrinkFormToContents()
     On Error GoTo 0
 End Sub
 
-Public Sub PositionFormAtCaret()
+Private Sub PositionFormAtCaret()
     If m_FormHwnd = 0 Then Exit Sub
 
     ' GetPoint returns the screen-pixel bounding box of the given range.
@@ -1013,13 +1013,13 @@ End Sub
 ' Word's OnTime has no cancel API (unlike Excel's Schedule:=False), so
 ' PollTick guards against orphan ticks by checking m_PollPending on entry.
 '=============================================================================
-Public Sub StartPollTimer()
+Private Sub StartPollTimer()
     ' Belt-and-suspenders: make sure nothing's already scheduled.
     StopPollTimer
     SchedulePoll
 End Sub
 
-Public Sub StopPollTimer()
+Private Sub StopPollTimer()
     On Error Resume Next
     ' Word doesn't expose a cancel mechanism on Application.OnTime the way
     ' Excel does (Excel has Schedule:=False; Word's OnTime has no such
