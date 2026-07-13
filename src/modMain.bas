@@ -1,5 +1,9 @@
 Attribute VB_Name = "modMain"
 Option Explicit
+' Internal plumbing (InitializeAppEvents, shared helpers). Keep it out of the
+' Alt+F8 list; everything stays callable within the project -- including from the
+' clsAppEvents / ThisDocument class modules.
+Option Private Module
 
 Public gAppEvents       As clsAppEvents
 Public gSkipCloseChecks As Boolean          ' Set True by mail merge to suppress checks

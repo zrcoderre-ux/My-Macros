@@ -1,5 +1,9 @@
 Attribute VB_Name = "WrapCitations"
 Option Explicit
+' Internal: CheckAndWrap / CheckAndWrapEnter run from their key bindings, not the
+' Alt+F8 list. Hide them from the Macros dialog; the bindings still resolve them
+' within the project.
+Option Private Module
 
 Private bWrapBusy As Boolean
 

@@ -25,7 +25,8 @@ Sub AutoExec()
 End Sub
 
 ' Can also be run on demand via Alt+F8 to reapply the shortcuts immediately.
-Public Sub ApplyMacroKeyBindings()
+' Private (called only by AutoExec below) so it stays off the Alt+F8 list.
+Private Sub ApplyMacroKeyBindings()
     On Error Resume Next
     CustomizationContext = ThisDocument
 

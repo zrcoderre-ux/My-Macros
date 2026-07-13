@@ -1,5 +1,8 @@
 Attribute VB_Name = "Module4"
 Option Explicit
+' Internal: RegisterWrapKeyBindings is called by AutoExec, never by the user.
+' Hide it from the Alt+F8 list while keeping it callable within the project.
+Option Private Module
 
 ' Spacebar/Return citation-wrapping bindings. Called at startup by AutoExec in
 ' the MacroKeyBindings module. Bound in THIS template's context (not Normal),
