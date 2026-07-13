@@ -2428,7 +2428,10 @@ Private Function BuildSupraStr(signal As String, _
     Dim bn As String: bn = IIf(bracketNote <> "", " " & bracketNote, "")
     Dim core As String
     If pincite <> "" Then
-        Dim pp As String: pp = PageOrPages(pincite)
+        ' Bare (textual) supras spell out "page"/"pages" per CSM; parenthetical
+        ' citation-sentence supras keep the abbreviated "p."/"pp.".
+        Dim pp As String
+        If isBare Then pp = PageWord(pincite) Else pp = PageOrPages(pincite)
         If addPeriod Then core = shortName & ", supra, " & reporter & " at " & pp & " " & pincite & bn & "." _
                      Else core = shortName & ", supra, " & reporter & " at " & pp & " " & pincite & bn
     Else
@@ -3019,6 +3022,16 @@ Private Function PageOrPages(pincite As String) As String
     End If
 End Function
 
+' Spelled-out "page"/"pages" for bare (textual) supra cites, the CSM textual
+' counterpart of PageOrPages' "p."/"pp." for citation-sentence (parenthetical) cites.
+Private Function PageWord(pincite As String) As String
+    If InStr(pincite, "-") > 0 Or InStr(pincite, ",") > 0 Then
+        PageWord = "pages"
+    Else
+        PageWord = "page"
+    End If
+End Function
+
 Private Sub SortRepsDescending(reps() As RepInfo, count As Long)
     Dim i As Long, j As Long, tmp As RepInfo
     For i = 0 To count - 2
@@ -3402,12 +3415,15 @@ Private Function BuildSupraPattern() As String
 End Function
 
 Private Function BuildBareSupraPattern() As String
+    ' Accept both the abbreviated "at p./pp." and the spelled-out "at page/pages"
+    ' so a bare supra the macro itself rewrote to "at page N" is still detected on
+    ' a re-run (otherwise it would be orphaned).
     BuildBareSupraPattern = _
         "((?:See generally |See also |But see |See |Cf\. |Accord |Contra ))?" & _
         "([A-Z][^\n,;()\[\]]*?)" & _
         ",\s+supra,\s+" & _
         "(\d+\s+" & ReporterPattern() & ")" & _
-        "\s+at\s+pp?\.\s+" & _
+        "\s+at\s+(?:pp?\.|pages?)\s+" & _
         "(\d+(?:[-,\s]\d+)*)" & _
         "(\s*\[[\s\S]*?\])?"
 End Function
