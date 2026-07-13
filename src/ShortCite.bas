@@ -3351,13 +3351,32 @@ End Function
 ' REGEX PATTERN BUILDERS
 '==============================================================================
 
+' Reporters recognized in a citation, matched only in the strict
+' California-Style-Manual position "(year) <volume> <reporter> <page>", so even
+' the short bare forms cannot false-match ordinary prose. Federal and
+' out-of-state cases are cited in that same year-first CSM format in California
+' documents, so adding their reporters here is all that is needed for the macro
+' to short-cite them. Within each family the longer forms come first so the
+' alternation never stops at a prefix (e.g. L.Ed.2d before L.Ed.).
 Private Function ReporterPattern() As String
-    ReporterPattern = "(?:Cal\.App\.[2-5]th|Cal\.App\.[23]d|Cal\.App\.|" & _
-                      "Cal\.[2-5]th|Cal\.[23]d|Cal\.|" & _
-                      "Cal\.Rptr\.[23]d|Cal\.Rptr\.|" & _
-                      "U\.S\.|F\.[234]th|F\.[234]d|" & _
-                      "F\.Supp\.[23]d|F\.Supp\.|" & _
-                      "P\.[23]d|A\.[23]d|S\.W\.[23]d|N\.E\.[23]d)"
+    ' Order: within each family the longer forms come first so the alternation
+    ' never stops at a prefix (e.g. L.Ed.2d before L.Ed.).
+    ' California:
+    Dim sCal As String
+    sCal = "Cal\.App\.[2-5]th|Cal\.App\.[23]d|Cal\.App\.|" & _
+           "Cal\.[2-5]th|Cal\.[23]d|Cal\.|" & _
+           "Cal\.Rptr\.[23]d|Cal\.Rptr\."
+    ' Federal:
+    Dim sFed As String
+    sFed = "U\.S\.|S\.Ct\.|L\.Ed\.2d|L\.Ed\.|" & _
+           "F\.[234]th|F\.[234]d|F\.Supp\.[23]d|F\.Supp\.|" & _
+           "B\.R\.|Fed\.Cl\."
+    ' Regional / out-of-state:
+    Dim sReg As String
+    sReg = "P\.[23]d|A\.[23]d|S\.W\.[23]d|N\.E\.[23]d|" & _
+           "N\.W\.2d|N\.W\.|S\.E\.2d|S\.E\.|So\.3d|So\.2d|So\.|" & _
+           "N\.Y\.S\.[23]d|N\.Y\.S\."
+    ReporterPattern = "(?:" & sCal & "|" & sFed & "|" & sReg & ")"
 End Function
 
 Private Function BuildLongCitePattern() As String
