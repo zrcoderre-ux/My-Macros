@@ -326,8 +326,12 @@ Sub PasteLegalQuotation()
         End If
     End If
 
-    ' Step 10e: Detect numeric sub-paragraphs (e.g. (1)...(2)...) after
-    ' a leading letter subdivision has been extracted.
+    ' Step 10e: Normalize numeric sub-paragraphs (e.g. (1)...(2)...) that follow
+    ' an extracted leading letter subdivision -- FixNumericSubParagraphs inserts
+    ' the missing space after each "(N)" so the passage reads "(1) text". The
+    ' bNumericSubParagraphs flag it returns is no longer used to gate the
+    ' citation insertion (that would drop the letter subdivision); it is kept
+    ' only because the sub reports it.
     bNumericSubParagraphs = False
     If bIsStatute And sSubdivision <> "" Then
         lSelEnd = oDoc.content.End - lTailLen
@@ -396,11 +400,18 @@ Sub PasteLegalQuotation()
     ' Step 12: Strip bold from entire block
     oRange.Font.Bold = False
 
-    ' Step 12b: Insert subdivision into the citation sentence.
-    ' Runs after RemoveLexisStatuteParenthetical has cleaned the citation
-    ' and after RemoveBlankParagraphs has merged the block onto one line.
-    ' Skipped when numeric sub-paragraphs are present: citation stays bare subd. (a).
-    If bIsStatute And sSubdivision <> "" And Not bNumericSubParagraphs Then
+    ' Step 12b: Insert the extracted leading subdivision into the citation
+    ' sentence, e.g. "(Code Civ. Proc., § 473, subd. (a).)". Runs after
+    ' RemoveLexisStatuteParenthetical has cleaned the citation and after
+    ' RemoveBlankParagraphs has merged the block onto one line.
+    '
+    ' This runs even when numeric sub-paragraphs ((1), (2), ...) are present:
+    ' those stay in the passage, but the letter subdivision that
+    ' ExtractLeadingSubdivision already removed from the passage must still land
+    ' in the citation -- otherwise "(a)" is eaten without reappearing anywhere.
+    ' (The multi-subsection case (a)...(b)... never reaches here: it leaves
+    ' sSubdivision = "" and keeps every subdivision in the passage.)
+    If bIsStatute And sSubdivision <> "" Then
         lSelEnd = oDoc.content.End - lTailLen
         Set oRange = oDoc.Range(lStart, lSelEnd)
         Dim lQEForSubd As Long
