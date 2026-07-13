@@ -2417,9 +2417,15 @@ Private Sub RestructureAsStatutoryTextual(oDoc As Document, _
     End If
     sCitBody = RTrim(sCitBody)
 
-    ' Code name: before the section sign
+    ' Code name: before the section sign. With no section sign this may be a
+    ' California Rules of Court cite ("... rule N"), which carries no "§" but
+    ' should still restructure under the same "§" pre-paste hint, for
+    ' consistency. Hand it off and stop.
     nSign = InStr(sCitBody, ChrW(&HA7))
-    If nSign = 0 Then Exit Sub
+    If nSign = 0 Then
+        RestructureRuleOfCourtTextual oDoc, lStart, lRangeEnd, sFull, nCitS, sCitBody
+        Exit Sub
+    End If
     sCode = RTrim(Left(sCitBody, nSign - 1))
     If Len(sCode) > 0 Then
         If Right(sCode, 1) = "," Then sCode = RTrim(Left(sCode, Len(sCode) - 1))
@@ -2486,6 +2492,60 @@ Private Sub RestructureAsStatutoryTextual(oDoc As Document, _
 
     Set oRpl = Nothing
     Set oRng = Nothing
+
+End Sub
+
+'===========================================================
+' Restructure a California Rules of Court cite as a textual sentence -- the
+' rule analog of RestructureAsStatutoryTextual, triggered by the same "§"
+' pre-paste hint even though a rule cite carries no section sign.
+'
+'   Input:  "Passage." (Cal. Rules of Court, rule 3.1350(c).)
+'   Output: California Rules of Court, rule 3.1350(c) provides, "Passage."
+'
+' Leaves the block untouched when the citation is not a Rules of Court cite,
+' so a stray "§" hint on some other authority does nothing here. sFull, nCitS
+' and sCitBody are the values the caller already computed (full block text,
+' 1-based index of the citation's opening paren, and the citation body with
+' its outer parens and terminal period already stripped).
+'===========================================================
+Private Sub RestructureRuleOfCourtTextual(oDoc As Document, _
+                                          ByVal lStart As Long, _
+                                          ByRef lRangeEnd As Long, _
+                                          ByVal sFull As String, _
+                                          ByVal nCitS As Long, _
+                                          ByVal sCitBody As String)
+
+    ' Require "Rules of Court" so the "rule N" pattern can't misfire on other
+    ' authorities that happen to contain the word "rule".
+    If InStr(1, sCitBody, "Rules of Court", vbTextCompare) = 0 Then Exit Sub
+
+    Dim nRule As Long
+    nRule = InStr(1, sCitBody, "rule ", vbTextCompare)
+    If nRule = 0 Then Exit Sub
+
+    ' Everything after "rule " is the rule number (with any inline subdivision,
+    ' e.g. "3.1350(c)"). sCitBody already had its terminal period removed; strip
+    ' any stray trailing comma/period defensively.
+    Dim sRule As String
+    sRule = Trim(Mid(sCitBody, nRule + Len("rule ")))
+    Do While Len(sRule) > 0 And (Right(sRule, 1) = "," Or Right(sRule, 1) = ".")
+        sRule = RTrim(Left(sRule, Len(sRule) - 1))
+    Loop
+    If Len(sRule) = 0 Then Exit Sub
+
+    ' Passage: everything before the citation paren.
+    Dim sPass As String
+    sPass = RTrim(Left(sFull, nCitS - 1))
+
+    Dim sOut As String
+    sOut = "California Rules of Court, rule " & sRule & " provides, " & sPass
+
+    Dim oRpl As Range
+    Set oRpl = oDoc.Range(lStart, lStart + Len(sFull))
+    oRpl.text = sOut
+    lRangeEnd = lStart + Len(sOut)
+    Set oRpl = Nothing
 
 End Sub
 
