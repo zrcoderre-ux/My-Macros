@@ -154,6 +154,25 @@ Sub PasteLegalQuotation()
     Dim lTailLen As Long
     lTailLen = oDoc.content.End - lSelEnd
 
+    ' If the paste landed as a NEW paragraph -- a paragraph mark now sits at the
+    ' very start of the pasted block, separating it from the pre-existing text --
+    ' advance lStart past that mark so the pipeline processes only the pasted
+    ' content. Without this, FindQuoteEndByParagraph also sees the pre-existing
+    ' paragraph and can return a passage boundary BEFORE lStart, making
+    ' Range(lStart, lQuoteEnd) throw "Value out of range" (error 4608); it would
+    ' also fold the separating mark into the passage as a visible pilcrow.
+    Do While lStart < lSelEnd
+        Dim oLeadChk As Range
+        Set oLeadChk = oDoc.Range(lStart, lStart + 1)
+        Dim nLead As Long: nLead = AscW(oLeadChk.text)
+        Set oLeadChk = Nothing
+        If nLead = 13 Or nLead = 11 Then
+            lStart = lStart + 1
+        Else
+            Exit Do
+        End If
+    Loop
+
     Dim oRange As Range
     lSelEnd = oDoc.content.End - lTailLen
     Set oRange = oDoc.Range(lStart, lSelEnd)
@@ -363,6 +382,10 @@ Sub PasteLegalQuotation()
     ' citation is still on its own paragraph here, most reliable boundary
     Dim lQuoteEnd As Long
     lQuoteEnd = FindQuoteEndByParagraph(oRange)
+    ' Defensive: never let the passage boundary fall before the pasted block
+    ' (would make Range(lStart, lQuoteEnd) throw error 4608). Fall back to the
+    ' paren-depth boundary, which is measured within the pasted content.
+    If lQuoteEnd < lStart Then lQuoteEnd = FindQuoteEnd(oRange)
 
     ' Step 11b: Remove Lexis+ publisher parenthetical   statutes only
     ' e.g. "(Deering, Lexis Advance through Ch. 6 ...)"
