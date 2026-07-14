@@ -23,10 +23,10 @@ Private Const CITE_PYTHON_EXE  As String = "python"  ' or full path to python.ex
 ' larger document the custom UndoRecord that spans the paste's hyperlink-field
 ' deletions can destabilise Word's undo stack and hard-crash it, so above this
 ' size the paste runs without the record (undo then takes several presses, but
-' no crash). Roughly ~1,500 chars per double-spaced page, so 50,000 ~= 30 pages.
+' no crash). Roughly ~1,500 chars per double-spaced page, so 15,000 ~= 10 pages.
 ' Lower it if a large document still crashes; raise it if undo is off on
 ' documents you consider short.
-Private Const MAX_UNDO_DOC_CHARS As Long = 50000
+Private Const MAX_UNDO_DOC_CHARS As Long = 15000
 
 ' Session-level flag: True once we have confirmed the server is reachable
 ' (or have exhausted the one startup attempt).  Prevents repeated delays.
