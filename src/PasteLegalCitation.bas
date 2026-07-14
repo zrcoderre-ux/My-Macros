@@ -18,6 +18,16 @@ Private Const CITE_APP_PATH    As String = _
     "Research Attorney and Law Clerk Unit - Zachary Coderre\app.py"
 Private Const CITE_PYTHON_EXE  As String = "python"  ' or full path to python.exe
 
+' Single-step undo (one Ctrl+Z unwinds the whole paste) is restored only on
+' documents at or below this size -- character count of the main story. On a
+' larger document the custom UndoRecord that spans the paste's hyperlink-field
+' deletions can destabilise Word's undo stack and hard-crash it, so above this
+' size the paste runs without the record (undo then takes several presses, but
+' no crash). Roughly ~1,500 chars per double-spaced page, so 50,000 ~= 30 pages.
+' Lower it if a large document still crashes; raise it if undo is off on
+' documents you consider short.
+Private Const MAX_UNDO_DOC_CHARS As Long = 50000
+
 ' Session-level flag: True once we have confirmed the server is reachable
 ' (or have exhausted the one startup attempt).  Prevents repeated delays.
 Private g_ServerVerified As Boolean
@@ -56,14 +66,20 @@ Sub PasteLegalQuotation()
     Set oDoc = ActiveDocument
     Set oSel = Selection
 
-    ' NOTE: This macro deliberately does NOT wrap its work in a custom
-    ' UndoRecord (Application.UndoRecord.StartCustomRecord). A custom undo
-    ' record that spans the hyperlink-field deletions in
-    ' HarvestAndRemoveHyperlinks (Lexis+ pastes always carry a hyperlink)
-    ' destabilises Word's undo stack and hard-crashes the app -- the same
-    ' failure mode that crashed the DeAnonymize macro on large edits. The
-    ' cost of omitting it is that undoing a paste now takes several Ctrl+Z
-    ' presses instead of one; that is an acceptable trade for not crashing.
+    ' Restore single-step undo (one Ctrl+Z unwinds the whole paste) -- but only
+    ' when the document is small enough to be safe. A custom UndoRecord spanning
+    ' this macro's edits (including the hyperlink-field deletions in
+    ' HarvestAndRemoveHyperlinks) can destabilise Word's undo stack and hard-crash
+    ' the app on a large document. So we open the record only under
+    ' MAX_UNDO_DOC_CHARS; above that, the paste runs without it -- undo takes
+    ' several presses, but no crash. The record is always closed in CleanUp.
+    Dim bUseUndo As Boolean
+    bUseUndo = (oDoc.content.End <= MAX_UNDO_DOC_CHARS)
+    Dim oUndo As UndoRecord
+    If bUseUndo Then
+        Set oUndo = Application.UndoRecord
+        oUndo.StartCustomRecord "Paste Legal Quotation"
+    End If
 
     ' FIX 1: Wrap entire body in an error handler so an unexpected runtime
     '         error still lands on CleanUp and reports its phase.
@@ -643,18 +659,25 @@ Sub PasteLegalQuotation()
     FixSurroundingFont oDoc, lStart, lEnd
 
 CleanUp:
-    ' FIX 1 (continued): Report any trapped runtime error and the phase it
-    ' occurred in. (No custom undo record to close -- see note at the top.)
+    ' FIX 1 (continued): capture the error first, then close the custom undo
+    ' record if we opened one (small-document case), then report the error and
+    ' the phase it occurred in.
     Dim lErrNum As Long
     Dim sErrDesc As String
     lErrNum = Err.Number
     sErrDesc = Err.Description
+    If bUseUndo Then
+        On Error Resume Next
+        oUndo.EndCustomRecord
+        On Error GoTo 0
+    End If
     If lErrNum <> 0 Then
         MsgBox "Error " & lErrNum & ": " & sErrDesc & vbCrLf & vbCrLf & _
                "During: " & g_Phase, vbExclamation, "PasteLegalQuotation"
     End If
 
     Set oRange = Nothing
+    Set oUndo = Nothing
 
 End Sub
 
