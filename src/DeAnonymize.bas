@@ -534,12 +534,14 @@ End Function
 ' True if at least one replacement was made.
 '
 ' We deliberately do NOT use .Replacement.Text + wdReplaceAll. With
-' .MatchCase = False, Word applies "smart case" to the replacement: when the
-' found text is ALL CAPS (party names in a legal caption are typically set in
-' all caps), Word rewrites the replacement in ALL CAPS too, so a name like
-' "Anderson" comes back as "ANDERSON". Instead we find each match and assign its
-' Range.Text directly -- a plain assignment inserts replaceText verbatim, in the
-' exact case stored in the key, regardless of the matched text's case.
+' .MatchCase = False, Word applies its own "smart case" to the replacement,
+' which mangles it (e.g. a title-case name matched in an all-caps caption comes
+' back all caps, or a two-word replacement loses the second word's capital).
+' Instead we find each match and assign its Range.Text directly, mirroring the
+' casing of the *matched* fake text onto the replacement: an all-caps caption
+' match gets an all-caps real name, a title-case prose match keeps the key's
+' stored casing. This matters because the pseudonym key carries both all-caps
+' and title-case variants of the same name.
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
@@ -560,9 +562,9 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .MatchWildcards = False
             If Not .Execute Then Exit Do
         End With
-        ' scan now spans the matched text; assign directly so Word does not
-        ' smart-case the replacement to match the found text's capitalization.
-        scan.text = replaceText
+        ' scan now spans the matched text; assign directly (no smart-case) after
+        ' matching the replacement's casing to that of the found fake text.
+        scan.text = MatchCasing(scan.text, replaceText)
         madeChange = True
         ' Continue after the replacement, out to the (live) end of the range.
         scan.Collapse Direction:=wdCollapseEnd
@@ -570,6 +572,25 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         If scan.start >= rng.End Then Exit Do
     Loop
     ReplaceInRange = madeChange
+End Function
+
+' Return replaceText recased to mirror the casing of the matched fake text:
+' all-caps found -> all-caps replacement, all-lowercase found -> lowercase
+' replacement, anything else (title/mixed case, or no cased letters) -> the
+' key's stored casing untouched.
+Private Function MatchCasing(ByVal matched As String, _
+                              ByVal replaceText As String) As String
+    Dim u As String: u = UCase$(matched)
+    Dim l As String: l = LCase$(matched)
+    If u = l Then                       ' no cased letters (e.g. a case number)
+        MatchCasing = replaceText
+    ElseIf matched = u Then             ' ALL CAPS
+        MatchCasing = UCase$(replaceText)
+    ElseIf matched = l Then             ' all lowercase
+        MatchCasing = LCase$(replaceText)
+    Else                                ' title / mixed case
+        MatchCasing = replaceText
+    End If
 End Function
 
 ' Whole-word matching is safe (and wanted) only for single alphanumeric tokens
