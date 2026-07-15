@@ -533,15 +533,20 @@ End Function
 ' Replace every occurrence of findText with replaceText in one range. Returns
 ' True if at least one replacement was made.
 '
-' We deliberately do NOT use .Replacement.Text + wdReplaceAll. With
-' .MatchCase = False, Word applies its own "smart case" to the replacement,
-' which mangles it (e.g. a title-case name matched in an all-caps caption comes
-' back all caps, or a two-word replacement loses the second word's capital).
-' Instead we find each match and assign its Range.Text directly, mirroring the
-' casing of the *matched* fake text onto the replacement: an all-caps caption
-' match gets an all-caps real name, a title-case prose match keeps the key's
-' stored casing. This matters because the pseudonym key carries both all-caps
-' and title-case variants of the same name.
+' Two things guard the casing here:
+'
+'  1. .MatchCase = True. The pseudonym key carries both all-caps and title-case
+'     variants of a name as separate rows, each mapping to a correspondingly
+'     cased real value. Case-insensitive matching let the all-caps row
+'     (ROBERT ANDERSON -> JOHN SMITH) also match a title-case "Robert Anderson"
+'     in prose and stamp it all caps. Exact-case matching keeps each variant to
+'     its own occurrences.
+'
+'  2. We do NOT use .Replacement.Text + wdReplaceAll. With MatchCase off Word
+'     applies its own "smart case" to the replacement, mangling it. Instead we
+'     find each match and assign its Range.Text directly, then MatchCasing
+'     mirrors the found fake text's casing onto the replacement as a safety net
+'     for any key row whose real value casing doesn't match its fake variant.
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
@@ -557,7 +562,7 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .Replacement.text = ""
             .Forward = True
             .Wrap = wdFindStop
-            .MatchCase = False
+            .MatchCase = True
             .MatchWholeWord = whole
             .MatchWildcards = False
             If Not .Execute Then Exit Do
