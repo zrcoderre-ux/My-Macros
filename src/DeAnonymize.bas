@@ -533,20 +533,18 @@ End Function
 ' Replace every occurrence of findText with replaceText in one range. Returns
 ' True if at least one replacement was made.
 '
-' Two things guard the casing here:
+' Casing is handled in two parts:
 '
-'  1. .MatchCase = True. The pseudonym key carries both all-caps and title-case
-'     variants of a name as separate rows, each mapping to a correspondingly
-'     cased real value. Case-insensitive matching let the all-caps row
-'     (ROBERT ANDERSON -> JOHN SMITH) also match a title-case "Robert Anderson"
-'     in prose and stamp it all caps. Exact-case matching keeps each variant to
-'     its own occurrences.
+'  1. .MatchCase = False, so we catch every occurrence of the name regardless of
+'     the casing it appears in -- including casings the key has no row for (e.g.
+'     an all-caps caption when the key only carries the title-case variant).
 '
 '  2. We do NOT use .Replacement.Text + wdReplaceAll. With MatchCase off Word
-'     applies its own "smart case" to the replacement, mangling it. Instead we
-'     find each match and assign its Range.Text directly, then MatchCasing
-'     mirrors the found fake text's casing onto the replacement as a safety net
-'     for any key row whose real value casing doesn't match its fake variant.
+'     applies its own "smart case" to the replacement, mangling it (a title-case
+'     name matched in an all-caps caption comes back all caps; a two-word
+'     replacement loses the second word's capital). Instead we find each match
+'     and assign its Range.Text directly, then MatchCasing recases the
+'     replacement to mirror the casing the fake actually appeared in.
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
@@ -562,13 +560,13 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .Replacement.text = ""
             .Forward = True
             .Wrap = wdFindStop
-            .MatchCase = True
+            .MatchCase = False
             .MatchWholeWord = whole
             .MatchWildcards = False
             If Not .Execute Then Exit Do
         End With
         ' scan now spans the matched text; assign directly (no smart-case) after
-        ' matching the replacement's casing to that of the found fake text.
+        ' recasing the replacement to the casing the fake appeared in.
         scan.text = MatchCasing(scan.text, replaceText)
         madeChange = True
         ' Continue after the replacement, out to the (live) end of the range.
@@ -579,10 +577,17 @@ Private Function ReplaceInRange(ByVal rng As Range, _
     ReplaceInRange = madeChange
 End Function
 
-' Return replaceText recased to mirror the casing of the matched fake text:
-' all-caps found -> all-caps replacement, all-lowercase found -> lowercase
-' replacement, anything else (title/mixed case, or no cased letters) -> the
-' key's stored casing untouched.
+' Recase replaceText to mirror the casing of the matched fake text, so a name is
+' substituted in whatever casing it appeared in -- even a casing the key has no
+' dedicated row for:
+'   ALL CAPS found (e.g. a caption)   -> all-caps replacement
+'   all lowercase found               -> lowercase replacement
+'   title/mixed found                 -> title case, but only recovered when the
+'                                        stored value is itself mono-case (so an
+'                                        all-caps key row can still yield "John
+'                                        Smith"); an already-mixed stored value
+'                                        like "McDonald" is left untouched.
+'   no cased letters (e.g. a number)  -> stored value untouched
 Private Function MatchCasing(ByVal matched As String, _
                               ByVal replaceText As String) As String
     Dim u As String: u = UCase$(matched)
@@ -594,8 +599,39 @@ Private Function MatchCasing(ByVal matched As String, _
     ElseIf matched = l Then             ' all lowercase
         MatchCasing = LCase$(replaceText)
     Else                                ' title / mixed case
-        MatchCasing = replaceText
+        Dim ru As String: ru = UCase$(replaceText)
+        Dim rl As String: rl = LCase$(replaceText)
+        If replaceText = ru Or replaceText = rl Then
+            ' Stored value is mono-case (ALL CAPS or all lowercase): rebuild
+            ' title case so an all-caps key row still reads as a proper name.
+            MatchCasing = ProperCase(replaceText)
+        Else
+            ' Already mixed (e.g. "McDonald", "John Smith") -- leave as authored.
+            MatchCasing = replaceText
+        End If
     End If
+End Function
+
+' Capitalize the first letter of each word and lowercase the rest. Word breaks
+' are spaces, hyphens, and apostrophes, so "O'BRIEN" -> "O'Brien" and
+' "SMITH-JONES" -> "Smith-Jones". Intercaps like "McDonald" cannot be recovered
+' from an all-caps source and become "Mcdonald"; those are rare and only occur
+' in the un-keyed-casing fallback.
+Private Function ProperCase(ByVal s As String) As String
+    Dim result As String
+    Dim i As Long
+    Dim atStart As Boolean: atStart = True
+    For i = 1 To Len(s)
+        Dim ch As String: ch = Mid$(s, i, 1)
+        If ch Like "[A-Za-z]" Then
+            If atStart Then result = result & UCase$(ch) Else result = result & LCase$(ch)
+            atStart = False
+        Else
+            result = result & ch
+            atStart = (ch = " " Or ch = "-" Or ch = "'" Or ch = ChrW$(8217))
+        End If
+    Next i
+    ProperCase = result
 End Function
 
 ' Whole-word matching is safe (and wanted) only for single alphanumeric tokens
