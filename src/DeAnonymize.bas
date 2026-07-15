@@ -530,27 +530,46 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     ReplaceEverywhere = total
 End Function
 
-' Replace every occurrence of findText with replaceText in one range, in a
-' single pass. Returns True if at least one replacement was made. Execute with
-' wdReplaceAll returns that flag directly, so no counting loop is needed.
+' Replace every occurrence of findText with replaceText in one range. Returns
+' True if at least one replacement was made.
+'
+' We deliberately do NOT use .Replacement.Text + wdReplaceAll. With
+' .MatchCase = False, Word applies "smart case" to the replacement: when the
+' found text is ALL CAPS (party names in a legal caption are typically set in
+' all caps), Word rewrites the replacement in ALL CAPS too, so a name like
+' "Anderson" comes back as "ANDERSON". Instead we find each match and assign its
+' Range.Text directly -- a plain assignment inserts replaceText verbatim, in the
+' exact case stored in the key, regardless of the matched text's case.
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
                                  ByVal whole As Boolean) As Boolean
     On Error Resume Next
-    Dim r As Range: Set r = rng.Duplicate
-    With r.Find
-        .ClearFormatting
-        .Replacement.ClearFormatting
-        .text = findText
-        .Replacement.text = replaceText
-        .Forward = True
-        .Wrap = wdFindStop
-        .MatchCase = False
-        .MatchWholeWord = whole
-        .MatchWildcards = False
-        ReplaceInRange = .Execute(Replace:=wdReplaceAll)
-    End With
+    Dim scan As Range: Set scan = rng.Duplicate
+    Dim madeChange As Boolean
+    Do
+        With scan.Find
+            .ClearFormatting
+            .Replacement.ClearFormatting
+            .text = findText
+            .Replacement.text = ""
+            .Forward = True
+            .Wrap = wdFindStop
+            .MatchCase = False
+            .MatchWholeWord = whole
+            .MatchWildcards = False
+            If Not .Execute Then Exit Do
+        End With
+        ' scan now spans the matched text; assign directly so Word does not
+        ' smart-case the replacement to match the found text's capitalization.
+        scan.text = replaceText
+        madeChange = True
+        ' Continue after the replacement, out to the (live) end of the range.
+        scan.Collapse Direction:=wdCollapseEnd
+        scan.End = rng.End
+        If scan.start >= rng.End Then Exit Do
+    Loop
+    ReplaceInRange = madeChange
 End Function
 
 ' Whole-word matching is safe (and wanted) only for single alphanumeric tokens
