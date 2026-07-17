@@ -44,10 +44,10 @@ Option Explicit
 ' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
 Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 
-' Highlight color for leftover pseudonym-pool words flagged after de-anonymize.
+' Leftover pseudonym-pool words are flagged in pink (wdPink) after de-anonymize.
 ' Pink is distinct from the close-review's green/turquoise (which get auto-
-' cleared) and from the user's own yellow, so these leak flags stand out.
-Private Const PSEUDONYM_FLAG_COLOR As Long = wdPink
+' cleared) and from the user's own yellow, so these leak flags stand out. Used
+' directly at the highlight site; a wd* enum member isn't a valid Const value.
 
 ' Document variables (persisted inside the .docx) that gate the automatic
 ' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
@@ -832,7 +832,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
         .MatchWholeWord = False        ' flag the word even inside a larger word
         .MatchWildcards = False
         Do While .Execute
-            r.HighlightColorIndex = PSEUDONYM_FLAG_COLOR
+            r.HighlightColorIndex = wdPink
             n = n + 1
         Loop
     End With
