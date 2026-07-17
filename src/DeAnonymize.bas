@@ -326,14 +326,11 @@ End Sub
 ' KEY-FILE LOCATION
 '==============================================================================
 ' Look in the active document's own folder for the newest pseudonym_key*.xlsx
-' (the key travels with the document -- often Downloads, but not always).
+' (the key travels with the document -- Downloads, a case folder, wherever).
 ' Fall back to a file picker, starting in that folder, if none is found.
 Private Function ResolveKeyPath(ByVal oDoc As Document) As String
     Dim docFolder As String
-    docFolder = ""
-    On Error Resume Next
-    docFolder = oDoc.Path          ' "" if the document has never been saved
-    On Error GoTo 0
+    docFolder = DocFolderLocal(oDoc)   ' local path even for OneDrive/SharePoint
 
     If Len(docFolder) > 0 Then
         ResolveKeyPath = MostRecentKeyInFolder(docFolder)
@@ -381,6 +378,90 @@ Private Function MostRecentKeyInFolder(ByVal folderPath As String) As String
 
     MostRecentKeyInFolder = bestPath
 Done:
+End Function
+
+' Return the document's folder as a local filesystem path. For a document opened
+' from a synced OneDrive / SharePoint library (common at work), Word reports its
+' Path as an "https://...sharepoint.com/..." URL, which FileSystemObject cannot
+' enumerate -- so the key sitting right next to the document went unseen and the
+' user got the picker. Map such URLs to the local synced folder; return an
+' ordinary local/UNC path unchanged, or "" for an unsaved document.
+Private Function DocFolderLocal(ByVal oDoc As Document) As String
+    Dim p As String
+    p = ""
+    On Error Resume Next
+    p = oDoc.Path                  ' "" if the document has never been saved
+    On Error GoTo 0
+    If Len(p) = 0 Then Exit Function
+
+    If LCase$(Left$(p, 7)) = "http://" Or LCase$(Left$(p, 8)) = "https://" Then
+        DocFolderLocal = MapUrlToLocalFolder(p)
+    Else
+        DocFolderLocal = p         ' already local (incl. C:\...\OneDrive\...)
+    End If
+End Function
+
+' Map a OneDrive / SharePoint folder URL to the local synced folder that mirrors
+' it. Everything after ".../Documents/" (personal libraries) or
+' ".../Shared Documents/" (team sites) is the path relative to the local sync
+' root; try that tail under each OneDrive sync root the shell exposes via
+' environment variables. Returns "" if no matching local folder exists.
+Private Function MapUrlToLocalFolder(ByVal url As String) As String
+    On Error GoTo Done
+
+    Dim rel As String
+    Dim marker As Long
+    marker = InStr(1, url, "/Documents/", vbTextCompare)
+    If marker > 0 Then
+        rel = Mid$(url, marker + Len("/Documents/"))
+    Else
+        marker = InStr(1, url, "/Shared Documents/", vbTextCompare)
+        If marker > 0 Then
+            rel = Mid$(url, marker + Len("/Shared Documents/"))
+        Else
+            ' Unknown layout: keep only the trailing folder segment.
+            rel = Mid$(url, InStrRev(url, "/") + 1)
+        End If
+    End If
+
+    rel = Replace(URLDecode(rel), "/", "\")
+
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim roots(1 To 3) As String
+    roots(1) = Environ$("OneDriveCommercial")
+    roots(2) = Environ$("OneDrive")
+    roots(3) = Environ$("OneDriveConsumer")
+
+    Dim i As Long, cand As String
+    For i = 1 To 3
+        If Len(roots(i)) > 0 Then
+            If Len(rel) > 0 Then cand = roots(i) & "\" & rel Else cand = roots(i)
+            If fso.FolderExists(cand) Then
+                MapUrlToLocalFolder = cand
+                Exit Function
+            End If
+        End If
+    Next i
+Done:
+End Function
+
+' Decode the %XX escapes (chiefly %20 for a space) that appear in SharePoint
+' folder URLs, so the reconstructed local path matches the real folder name.
+Private Function URLDecode(ByVal s As String) As String
+    Dim i As Long, ch As String, res As String
+    i = 1
+    Do While i <= Len(s)
+        ch = Mid$(s, i, 1)
+        If ch = "%" And i + 2 <= Len(s) Then
+            res = res & ChrW$(CLng("&H" & Mid$(s, i + 1, 2)))
+            i = i + 3
+        Else
+            res = res & ch
+            i = i + 1
+        End If
+    Loop
+    URLDecode = res
 End Function
 
 '==============================================================================
