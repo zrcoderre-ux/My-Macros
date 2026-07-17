@@ -47,7 +47,7 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 ' Highlight color for leftover pseudonym-pool words flagged after de-anonymize.
 ' Pink is distinct from the close-review's green/turquoise (which get auto-
 ' cleared) and from the user's own yellow, so these leak flags stand out.
-Private Const PSEUDONYM_FLAG_COLOR As WdColorIndex = wdPink
+Private Const PSEUDONYM_FLAG_COLOR As Long = wdPink
 
 ' Document variables (persisted inside the .docx) that gate the automatic
 ' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
