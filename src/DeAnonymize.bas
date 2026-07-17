@@ -44,6 +44,11 @@ Option Explicit
 ' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
 Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 
+' Highlight color for leftover pseudonym-pool words flagged after de-anonymize.
+' Pink is distinct from the close-review's green/turquoise (which get auto-
+' cleared) and from the user's own yellow, so these leak flags stand out.
+Private Const PSEUDONYM_FLAG_COLOR As WdColorIndex = wdPink
+
 ' Document variables (persisted inside the .docx) that gate the automatic
 ' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
 ' REANON_CREATED marks a document produced by the re-anonymize macro, which must
@@ -117,12 +122,24 @@ Public Sub DeAnonymizeTentative()
     oDoc.AutoSaveOn = prevAutoSave
     On Error GoTo ErrH
     oDoc.TrackRevisions = prevTrack
+
+    ' Safety net: flag any pseudonym-pool word still present (even inside a
+    ' larger word) in pink, so a fake the key missed doesn't slip through.
+    Dim nFlags As Long
+    nFlags = HighlightResidualPseudonyms(oDoc)
+
     Application.ScreenUpdating = True
 
     SetDocFlag oDoc, DEANON_DONE_VAR      ' don't auto-run again on close
 
+    Dim sFlagLine As String
+    If nFlags > 0 Then
+        sFlagLine = vbCrLf & vbCrLf & "Highlighted " & nFlags & " leftover " & _
+                    "pseudonym word(s) in pink -- review each in case a fake " & _
+                    "slipped through."
+    End If
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
-           " pseudonym(s)." & vbCrLf & vbCrLf & _
+           " pseudonym(s)." & sFlagLine & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -731,6 +748,97 @@ Private Function ShouldWholeWord(ByVal s As String) As Boolean
         End If
     Next i
     ShouldWholeWord = True
+End Function
+
+'==============================================================================
+' RESIDUAL PSEUDONYM HIGHLIGHTING  (leak safety net)
+'==============================================================================
+' The pseudonymizer draws every fake from a fixed pool of ~140 words. After
+' de-anonymize has swapped the keyed fakes back to real values, highlight any
+' pool word STILL present in the document -- even embedded inside a larger word
+' -- so a fake the key missed (an odd inflection, a stray occurrence) can't slip
+' through unnoticed. Returns the number of occurrences highlighted.
+'
+' Substring matching (MatchWholeWord = False) is intentional and per the user's
+' request; it can flag ordinary prose (e.g. "Cedar", "Granite"), which is fine
+' for a review aid -- the user clears false positives by eye.
+Private Function HighlightResidualPseudonyms(ByVal oDoc As Document) As Long
+    Dim pool As Variant: pool = PseudonymPool()
+    Dim total As Long: total = 0
+
+    ' Main body.
+    total = total + HighlightPoolInRange(oDoc.content, pool)
+
+    ' Headers and footers, section by section.
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then total = total + HighlightPoolInRange(hf.Range, pool)
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then total = total + HighlightPoolInRange(hf.Range, pool)
+        Next hf
+    Next sec
+
+    ' Footnotes / endnotes, only when present.
+    On Error Resume Next
+    If oDoc.Footnotes.count > 0 Then _
+        total = total + HighlightPoolInRange(oDoc.StoryRanges(wdFootnotesStory), pool)
+    If oDoc.Endnotes.count > 0 Then _
+        total = total + HighlightPoolInRange(oDoc.StoryRanges(wdEndnotesStory), pool)
+    On Error GoTo 0
+
+    HighlightResidualPseudonyms = total
+End Function
+
+' Highlight every occurrence of every pool word in one range. Returns the count.
+Private Function HighlightPoolInRange(ByVal rng As Range, ByVal pool As Variant) As Long
+    Dim total As Long, k As Long
+    For k = LBound(pool) To UBound(pool)
+        total = total + HighlightWordInRange(rng, CStr(pool(k)))
+    Next k
+    HighlightPoolInRange = total
+End Function
+
+' Highlight every occurrence of one word in a range (case-insensitive, matching
+' even inside larger words). Returns the number of occurrences highlighted.
+Private Function HighlightWordInRange(ByVal rng As Range, ByVal word As String) As Long
+    On Error Resume Next
+    Dim r As Range: Set r = rng.Duplicate
+    Dim n As Long: n = 0
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .text = word
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = False
+        .MatchWholeWord = False        ' flag the word even inside a larger word
+        .MatchWildcards = False
+        Do While .Execute
+            r.HighlightColorIndex = PSEUDONYM_FLAG_COLOR
+            n = n + 1
+        Loop
+    End With
+    HighlightWordInRange = n
+End Function
+
+' The fixed pool of fake words the pseudonymizer assigns: person surnames,
+' entity/company words, street names, and city/locality names. Built in chunks
+' (each under VBA's line-length limit) and split on spaces. Juniper and Larkspur
+' appear in more than one category upstream; listed once here.
+Private Function PseudonymPool() As Variant
+    Dim s As String
+    ' Person surnames
+    s = "Ashford Bennett Calder Danforth Ellery Fenwick Garrick Halloran Ingram Jarrett Keswick Langley Marlowe Nash Orwell Prescott Quill Radley Sable Thorne Underwood Vance Whitlock Yardley"
+    s = s & " Ashby Brandt Corwin Delacroix Everts Fairfax Grantham Holloway Isley Jennings Kingsley Lathrop Merrick Norwood Ackerly Bramble Colfax Denning Emmett Forsythe Gable Hendry Ivers Joplin Kessler Lorne Mabry Nolan Ondine Pruett Renwick Sterling Tolliver Ursin Verity Waverly Alden Beaumont Carrow Delane"
+    ' Entity / company words
+    s = s & " Aldrin Brightwater Cascadia Dunmore Everline Foxglen Granite Havenwood Ironbridge Juniper Kestrel Lumen Meridian Northgate Oakmont Pinnacle Quarry Redwood Silverpeak Torchlight Umbra Vantage Westmark Zephyr Ambrose Beacon Cobalt Drayton Emberly Falcon Gladstone Harborview Ivory Jetstream Kaldor Larkspur Monarch Nimbus Orion Pembroke"
+    ' Street names
+    s = s & " Cedar Birch Willow Aspen Laurel Poplar Hawthorn Linden Chestnut Sequoia Cypress Alder Dogwood Hickory Rosewood Foxglove Tamarack Sorrel"
+    ' City / locality names
+    s = s & " Fairview Brookfield Rosedale Elmwood Kingsbury Northvale Westbrook Clearwater Havenport Stonebridge Marlow Redhill Glenmore Oakhurst Bridgeton"
+    PseudonymPool = Split(s)
 End Function
 
 '==============================================================================
