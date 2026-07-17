@@ -760,8 +760,11 @@ End Function
 ' through unnoticed. Returns the number of occurrences highlighted.
 '
 ' Substring matching (MatchWholeWord = False) is intentional and per the user's
-' request; it can flag ordinary prose (e.g. "Cedar", "Granite"), which is fine
-' for a review aid -- the user clears false positives by eye.
+' request. Matching is case-sensitive: only a first-capital form ("Nash") or an
+' all-caps form ("NASH") is flagged, so a lowercase occurrence -- whether a
+' stray "nash" or the "vance" buried in "advance" -- is left alone. Capitalized
+' prose that happens to be a pool word (e.g. "Cedar", "Granite") can still be
+' flagged, which is fine for a review aid -- the user clears those by eye.
 Private Function HighlightResidualPseudonyms(ByVal oDoc As Document) As Long
     Dim pool As Variant: pool = PseudonymPool()
     Dim total As Long: total = 0
@@ -800,19 +803,32 @@ Private Function HighlightPoolInRange(ByVal rng As Range, ByVal pool As Variant)
     HighlightPoolInRange = total
 End Function
 
-' Highlight every occurrence of one word in a range (case-insensitive, matching
-' even inside larger words). Returns the number of occurrences highlighted.
+' Highlight occurrences of one pool word in a range, case-sensitively, in either
+' its stored first-capital form ("Nash") or an all-caps form ("NASH"); a
+' lowercase occurrence is not flagged. Still matches inside larger words.
+' Returns the number of occurrences highlighted.
 Private Function HighlightWordInRange(ByVal rng As Range, ByVal word As String) As Long
+    Dim n As Long
+    n = HighlightExact(rng, word)                   ' first-capital form, e.g. "Nash"
+    If UCase$(word) <> word Then
+        n = n + HighlightExact(rng, UCase$(word))    ' all-caps form, e.g. "NASH"
+    End If
+    HighlightWordInRange = n
+End Function
+
+' One case-sensitive highlight pass for an exact term, matching even inside a
+' larger word. Returns the number of occurrences highlighted.
+Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Long
     On Error Resume Next
     Dim r As Range: Set r = rng.Duplicate
     Dim n As Long: n = 0
     With r.Find
         .ClearFormatting
         .Replacement.ClearFormatting
-        .text = word
+        .text = term
         .Forward = True
         .Wrap = wdFindStop
-        .MatchCase = False
+        .MatchCase = True
         .MatchWholeWord = False        ' flag the word even inside a larger word
         .MatchWildcards = False
         Do While .Execute
@@ -820,7 +836,7 @@ Private Function HighlightWordInRange(ByVal rng As Range, ByVal word As String) 
             n = n + 1
         Loop
     End With
-    HighlightWordInRange = n
+    HighlightExact = n
 End Function
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,
