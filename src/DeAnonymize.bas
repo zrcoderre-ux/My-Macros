@@ -29,6 +29,12 @@ Attribute VB_Name = "DeAnonymize"
 '   - De-anonymize replaces longest fakes first, re-anonymize replaces longest
 '     real values first, so a bare-surname token never rewrites part of a
 '     longer full name.
+'   - Re-anonymize leaves names inside italic text alone: cited case names in a
+'     brief are italicized, so a party surname that also names a published case
+'     (e.g. "Nash v. Superior Court") is preserved rather than rewritten. This
+'     mirrors PDF-Linker's rule -- renaming a cited decision is worse than
+'     leaving a party name in -- and its caption exemption (the own caption/prose
+'     aren't italic, so the current parties are still replaced).
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
 '   - AUTOMATIC ON CLOSE: RunDeAnonymizeOnClose (called from the close-review in
@@ -214,11 +220,13 @@ Public Sub ReAnonymizeTentative()
     oDoc.AutoSaveOn = False
     On Error GoTo ErrH
 
-    ' Reverse direction: replace each real value with its fake. No custom undo
-    ' record (it overflows and crashes Word on large documents).
+    ' Reverse direction: replace each real value with its fake. protectCitations
+    ' leaves names inside italic cited authorities alone, so a party surname that
+    ' also names a published case isn't rewritten in the shared copy. No custom
+    ' undo record (it overflows and crashes Word on large documents).
     Dim distinctHits As Long, i As Long
     For i = 1 To nMaps
-        If ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake) > 0 Then
+        If ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake, True) > 0 Then
             distinctHits = distinctHits + 1
         End If
         If i Mod 5 = 0 Then DoEvents
@@ -241,6 +249,10 @@ Public Sub ReAnonymizeTentative()
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
            " value(s)." & vbCrLf & vbCrLf & _
+           "Names inside italic cited case names were left as-is so a party " & _
+           "surname that also names a published case wasn't rewritten -- check " & _
+           "any italicized cites if a real party name should have been replaced." & _
+           vbCrLf & vbCrLf & _
            "Saved a metadata-free copy to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
            "This window is now that copy; the original file is unchanged.", _
            vbInformation, "Re-Anonymize"
@@ -588,16 +600,24 @@ End Function
 ' frames): enumerating that collection while doing wdReplaceAll inside the loop
 ' can destabilize and crash Word. The collections below stay valid across text
 ' replacement, so iterating them is safe.
+' protectCitations (re-anonymize only): leave any match that sits in italic text
+' untouched, so a real party name that also appears inside a cited case name
+' (e.g. "Nash v. Superior Court") is not rewritten in the shared copy. This
+' mirrors the PDF-Linker pseudonymizer's cardinal invariant -- renaming a cited
+' decision is a worse failure than leaving a party name in -- and its caption
+' exemption: a brief italicizes cited authorities but not its own caption/prose,
+' so the current parties still get replaced while published cites are preserved.
 Private Function ReplaceEverywhere(ByVal oDoc As Document, _
                                     ByVal findText As String, _
-                                    ByVal replaceText As String) As Long
+                                    ByVal replaceText As String, _
+                                    Optional ByVal protectCitations As Boolean = False) As Long
     Dim total As Long: total = 0
     If Len(findText) = 0 Then Exit Function
 
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
 
     ' Main body (caption, party block, and prose are all here in a plain draft).
-    If ReplaceInRange(oDoc.content, findText, replaceText, whole) Then total = total + 1
+    If ReplaceInRange(oDoc.content, findText, replaceText, whole, protectCitations) Then total = total + 1
 
     ' Headers and footers, section by section.
     Dim sec As Section
@@ -605,12 +625,12 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     For Each sec In oDoc.Sections
         For Each hf In sec.Headers
             If hf.Exists Then
-                If ReplaceInRange(hf.Range, findText, replaceText, whole) Then total = total + 1
+                If ReplaceInRange(hf.Range, findText, replaceText, whole, protectCitations) Then total = total + 1
             End If
         Next hf
         For Each hf In sec.Footers
             If hf.Exists Then
-                If ReplaceInRange(hf.Range, findText, replaceText, whole) Then total = total + 1
+                If ReplaceInRange(hf.Range, findText, replaceText, whole, protectCitations) Then total = total + 1
             End If
         Next hf
     Next sec
@@ -618,10 +638,10 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
     On Error Resume Next
     If oDoc.Footnotes.count > 0 Then
-        If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole) Then total = total + 1
+        If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole, protectCitations) Then total = total + 1
     End If
     If oDoc.Endnotes.count > 0 Then
-        If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole) Then total = total + 1
+        If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole, protectCitations) Then total = total + 1
     End If
     On Error GoTo 0
 
@@ -646,7 +666,8 @@ End Function
 Private Function ReplaceInRange(ByVal rng As Range, _
                                  ByVal findText As String, _
                                  ByVal replaceText As String, _
-                                 ByVal whole As Boolean) As Boolean
+                                 ByVal whole As Boolean, _
+                                 Optional ByVal protectCitations As Boolean = False) As Boolean
     On Error Resume Next
     Dim scan As Range: Set scan = rng.Duplicate
     Dim madeChange As Boolean
@@ -663,11 +684,16 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .MatchWildcards = False
             If Not .Execute Then Exit Do
         End With
-        ' scan now spans the matched text; assign directly (no smart-case) after
-        ' recasing the replacement to the casing the fake appeared in.
-        scan.text = MatchCasing(scan.text, replaceText)
-        madeChange = True
-        ' Continue after the replacement, out to the (live) end of the range.
+        ' scan now spans the matched text. Skip it (leave the real name in place)
+        ' when it sits in a cited authority -- italic text -- so re-anonymize
+        ' never rewrites a published case name that shares a party's surname.
+        If Not (protectCitations And scan.Font.Italic = True) Then
+            ' assign directly (no smart-case) after recasing the replacement
+            ' to the casing the fake appeared in.
+            scan.text = MatchCasing(scan.text, replaceText)
+            madeChange = True
+        End If
+        ' Continue after this match, out to the (live) end of the range.
         scan.Collapse Direction:=wdCollapseEnd
         scan.End = rng.End
         If scan.start >= rng.End Then Exit Do
