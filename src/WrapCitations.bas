@@ -94,6 +94,14 @@ Private Sub DoCheckAndWrap()
     Dim oPar As Paragraph: Set oPar = Selection.Paragraphs(1)
     If oPar Is Nothing Then Exit Sub
 
+    ' Skip paragraphs containing fields (hyperlinks, PAGE, cross-refs): a
+    ' range's .Text omits the hidden field-code characters while .Start/.End
+    ' count them, so the string-offset-to-document-position math below lands
+    ' the parens mid-word. CitationLinker's own hyperlinks are the common
+    ' case -- keep typing in a linked paragraph and the wrap corrupted it.
+    ' (Same discrepancy CitationLinker itself guards against.)
+    If oPar.Range.Fields.count > 0 Then Exit Sub
+
     ' 1. STRICT PARAGRAPH BOUNDARY: The macro cannot see previous paragraphs
     Dim lParStart As Long: lParStart = oPar.Range.start
     Dim lCursor As Long: lCursor = Selection.Range.start
