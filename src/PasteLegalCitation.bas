@@ -497,7 +497,7 @@ Sub PasteLegalQuotation()
     sPassageText = oDoc.Range(lStart, lQuoteEnd).text
 
     Dim sPassageStripped As String
-    Dim iChar As Integer
+    Dim iChar As Long
     Dim sTestChar As String
     sPassageStripped = ""
     For iChar = 1 To Len(sPassageText)
@@ -1325,6 +1325,12 @@ Private Sub RemoveParallelCitationsManual(oRange As Range, ByVal lRangeStart As 
                     j = j + 1
                 Loop
 
+                ' Unmatched "[" (a selection cut mid-bracket): the scan ran to
+                ' the end of the block, so sBracket would span from the stray
+                ' bracket THROUGH THE CITATION, and any reporter string in
+                ' that tail deleted the whole span. Skip it instead.
+                If nDepth <> 0 Then GoTo NextBracketScan
+
                 Dim sBracket As String
                 sBracket = Mid(sText, i, j - i)
 
@@ -1348,6 +1354,7 @@ Private Sub RemoveParallelCitationsManual(oRange As Range, ByVal lRangeStart As 
                     Exit For
                 End If
             End If
+NextBracketScan:
         Next i
 
         If Not bFound Then Exit Do
@@ -1853,7 +1860,7 @@ Private Function FindQuoteEndByParagraph(oRange As Range) As Long
         Dim sParaText As String
         sParaText = oPara.Range.text
 
-        Dim nStrip As Integer
+        Dim nStrip As Long
         nStrip = Len(sParaText)
         Do While nStrip > 0
             Dim nLast As Long
@@ -1884,7 +1891,7 @@ Private Function FindQuoteEndByParagraph(oRange As Range) As Long
     Dim sLast As String
     sLast = oLastPassagePara.Range.text
 
-    Dim nStripL As Integer
+    Dim nStripL As Long
     nStripL = Len(sLast)
     Do While nStripL > 0
         Dim nLastL As Long
@@ -2958,7 +2965,7 @@ Private Sub FixNumericSubParagraphs(oDoc As Document, _
 
     Dim oPara As Paragraph
     Dim sParaText As String
-    Dim nStrip As Integer
+    Dim nStrip As Long
     Dim nTailC As Long
     Dim nFirst As Long
     Dim nMid As Long
@@ -3042,7 +3049,7 @@ Private Function DetectMultiSubsection(oRange As Range) As Boolean
     Dim nFirst As Long
     Dim nMid As Long
     Dim nThird As Long
-    Dim nStrip As Integer
+    Dim nStrip As Long
     Dim nTail As Long
 
     nLastLetter = 0
@@ -3097,7 +3104,7 @@ Private Function DetectStatutePaste(oRange As Range) As Boolean
         Dim sParaText As String
         sParaText = oPara.Range.text
 
-        Dim nStrip As Integer
+        Dim nStrip As Long
         nStrip = Len(sParaText)
         Do While nStrip > 0
             Dim nLast As Long
@@ -3198,9 +3205,18 @@ Private Sub EnsureSpacingAroundQuotes(oDoc As Document, oRange As Range)
             Dim nAfter As Long
             nAfter = AscW(Mid(sText, i + 1, 1))
             Dim bAfterExempt As Boolean
+            ' Exempt trailing punctuation as well as quotes/brackets/space:
+            ' a comma, period, semicolon, colon, question/exclamation mark,
+            ' or dash directly after a closing quote is correct typography
+            ' ("rule",  "rule".  "rule"--) and was getting a spurious space
+            ' inserted before it ("rule" ,).
             bAfterExempt = (nAfter = &H201D Or nAfter = &H2019 _
                             Or nAfter = 93 Or nAfter = 41 _
-                            Or nAfter = 32 Or nAfter = 160)
+                            Or nAfter = 32 Or nAfter = 160 _
+                            Or nAfter = 44 Or nAfter = 46 _
+                            Or nAfter = 59 Or nAfter = 58 _
+                            Or nAfter = 63 Or nAfter = 33 _
+                            Or nAfter = 45 Or nAfter = &H2013 Or nAfter = &H2014)
             ' Apostrophe exemption: U+2019 followed by s/S then space
             ' (possessive: association's ...) -- do not insert space.
             ' Requires space after s/S so a word starting with s is not triggered.
@@ -3221,9 +3237,12 @@ Private Sub EnsureSpacingAroundQuotes(oDoc As Document, oRange As Range)
             Dim nBefore As Long
             nBefore = AscW(Mid(sText, i - 1, 1))
             Dim bBeforeExempt As Boolean
+            ' A dash before an opening quote ("--\"rule\"") is also correct
+            ' typography; only genuine word-glued quotes need the space.
             bBeforeExempt = (nBefore = &H201C Or nBefore = &H2018 _
                              Or nBefore = 91 Or nBefore = 40 _
-                             Or nBefore = 32 Or nBefore = 160)
+                             Or nBefore = 32 Or nBefore = 160 _
+                             Or nBefore = 45 Or nBefore = &H2013 Or nBefore = &H2014)
             If Not bBeforeExempt Then
                 aIns(nIns) = oRange.start + i - 1
                 nIns = nIns + 1
@@ -3597,6 +3616,21 @@ Private Sub WrapWestlawCitation(oDoc As Document, oRange As Range)
     Dim lParaStart As Long
     Dim lParaEnd As Long
     lParaStart = oLastPara.Range.start
+    ' The Trim above stripped leading spaces from the MEASURED string but not
+    ' from the range anchor; advance the anchor to match, or the ".)" lands
+    ' short by the number of leading spaces and "(" goes before them.
+    Dim sWWRaw As String
+    sWWRaw = oLastPara.Range.text
+    Dim nWWLead As Long
+    nWWLead = 0
+    Do While nWWLead < Len(sWWRaw)
+        If AscW(Mid(sWWRaw, nWWLead + 1, 1)) = 32 Then
+            nWWLead = nWWLead + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    lParaStart = lParaStart + nWWLead
     lParaEnd = lParaStart + Len(sParaText)
 
     Dim oEnd As Range
@@ -4533,6 +4567,21 @@ Private Sub NormalizeLexisStatuteCitation(oDoc As Document, oRange As Range, _
     If sNew <> sCit Then
         Dim lParaStart As Long
         lParaStart = oLastPara.Range.start
+        ' The Trim above stripped leading spaces from the MEASURED string but
+        ' not from the range anchor; advance the anchor to match, or the
+        ' replacement covers the spaces and drops the citation's last chars.
+        Dim sNLRaw As String
+        sNLRaw = oLastPara.Range.text
+        Dim nNLLead As Long
+        nNLLead = 0
+        Do While nNLLead < Len(sNLRaw)
+            If AscW(Mid(sNLRaw, nNLLead + 1, 1)) = 32 Then
+                nNLLead = nNLLead + 1
+            Else
+                Exit Do
+            End If
+        Loop
+        lParaStart = lParaStart + nNLLead
         Dim oReplace As Range
         Set oReplace = oDoc.Range(lParaStart, lParaStart + Len(sCit))
         oReplace.text = sNew
