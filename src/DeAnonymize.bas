@@ -209,24 +209,24 @@ Public Sub ReAnonymizeTentative()
 
     Application.ScreenUpdating = False
 
-    ' Save the current document AS the new file first, so all edits and the
-    ' metadata strip happen on a fresh file (no inherited version history) and
-    ' the original file is never written to.
-    oDoc.SaveAs2 FileName:=savePath, FileFormat:=wdFormatXMLDocument, _
-                 AddToRecentFiles:=False
-    ' oDoc is now bound to savePath.
-
-    ' Mark this file as re-anonymize output so the close hook never tries to
-    ' de-anonymize it back to real names.
-    SetDocFlag oDoc, REANON_CREATED_VAR
-
+    ' ORDER MATTERS: every scrub below runs IN MEMORY on the open document,
+    ' and only then is the result written out via SaveAs2. Saving first meant
+    ' version 1 of "Anonymized Draft.docx" hit the disk -- and any synced
+    ' OneDrive/SharePoint folder's server-side version history -- with every
+    ' real name still in it, where RemoveDocumentInformation can't reach.
+    ' The original FILE is still never written: AutoSave is disabled before
+    ' the first edit, and the only saves target savePath.
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
     Dim prevAutoSave As Boolean: prevAutoSave = False
     On Error Resume Next
     prevAutoSave = oDoc.AutoSaveOn
-    oDoc.AutoSaveOn = False
-    On Error GoTo ErrH
+    oDoc.AutoSaveOn = False              ' must precede edits: AutoSave would
+    On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
+
+    ' Clear any pink residual-pseudonym flags a prior de-anonymize left: they
+    ' mark exactly which tokens were fakes, which the shared copy must not show.
+    ClearResidualFlags oDoc
 
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
@@ -245,11 +245,20 @@ Public Sub ReAnonymizeTentative()
     ApplyCourtIdentity oDoc, False
 
     ' Strip metadata: comments, revisions, versions, and personal/document
-    ' information. Combined with the new file, this leaves no trail back to the
-    ' real matter.
+    ' information. Combined with the fresh file below, this leaves no trail back
+    ' to the real matter.
     On Error Resume Next
     oDoc.RemoveDocumentInformation wdRDIAll
     On Error GoTo ErrH
+
+    ' Mark as re-anonymize output so the close hook never tries to de-anonymize
+    ' it back to real names. Set before the save so it rides into the new file.
+    SetDocFlag oDoc, REANON_CREATED_VAR
+
+    ' First and only disk write: the fully scrubbed content.
+    oDoc.SaveAs2 FileName:=savePath, FileFormat:=wdFormatXMLDocument, _
+                 AddToRecentFiles:=False
+    ' oDoc is now bound to savePath; the original file was never written.
 
     oDoc.TrackRevisions = prevTrack
     On Error Resume Next
@@ -277,7 +286,11 @@ ErrH:
     On Error Resume Next
     Application.ScreenUpdating = True
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
-           "Error " & reN & ": " & reD, vbExclamation, "Re-Anonymize"
+           "Error " & reN & ": " & reD & vbCrLf & vbCrLf & _
+           "If the error happened before the save, this window holds partial " & _
+           "re-anonymize edits that were NOT saved anywhere -- close it " & _
+           "WITHOUT saving to get back to the untouched original.", _
+           vbExclamation, "Re-Anonymize"
 End Sub
 
 ' Ask where to save the anonymized copy. Defaults to the document's folder with
@@ -323,7 +336,10 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     If HasDocFlag(Doc, DEANON_DONE_VAR) Then Exit Sub
     If HasDocFlag(Doc, REANON_CREATED_VAR) Then Exit Sub
 
-    Dim folder As String: folder = Doc.path
+    ' DocFolderLocal, not Doc.Path: for a synced OneDrive/SharePoint document
+    ' Doc.Path is an https URL that FolderExists can't read, which silently
+    ' disabled this hook for exactly the dated-OneDrive tentatives it targets.
+    Dim folder As String: folder = DocFolderLocal(Doc)
     If Len(folder) = 0 Then Exit Sub
     Dim keyPath As String: keyPath = MostRecentKeyInFolder(folder)
     If Len(keyPath) = 0 Then Exit Sub
@@ -529,12 +545,30 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     If xl Is Nothing Then
         Set xl = CreateObject("Excel.Application")
         startedXl = True
+        ' Hide and silence only OUR private instance. Never touch a running
+        ' Excel the user already has open: setting Visible=False there hides
+        ' their own workbooks in a background process.
+        xl.Visible = False
+        xl.DisplayAlerts = False
     End If
-    xl.Visible = False
-    xl.DisplayAlerts = False
 
+    ' If the key is already open in that instance (user eyeballing mappings),
+    ' read the open copy and leave it open rather than closing it under them.
     Dim wb As Object
-    Set wb = xl.Workbooks.Open(FileName:=path, ReadOnly:=True, AddToMRU:=False)
+    Dim wasOpen As Boolean: wasOpen = False
+    On Error Resume Next
+    Set wb = xl.Workbooks(Mid$(path, InStrRev(path, "\") + 1))
+    If Not wb Is Nothing Then
+        If StrComp(wb.FullName, path, vbTextCompare) = 0 Then
+            wasOpen = True
+        Else
+            Set wb = Nothing
+        End If
+    End If
+    On Error GoTo Fail
+    If wb Is Nothing Then
+        Set wb = xl.Workbooks.Open(FileName:=path, ReadOnly:=True, AddToMRU:=False)
+    End If
 
     Dim ws As Object
     Set ws = wb.Worksheets(1)
@@ -573,7 +607,7 @@ Private Function ReadPseudonymKey(ByVal path As String, _
         End If
     Next r
 
-    wb.Close SaveChanges:=False
+    If Not wasOpen Then wb.Close SaveChanges:=False
     If startedXl Then xl.Quit
     Set wb = Nothing: Set xl = Nothing
 
@@ -582,7 +616,7 @@ Private Function ReadPseudonymKey(ByVal path As String, _
 
 CleanFail:
     On Error Resume Next
-    wb.Close SaveChanges:=False
+    If Not wasOpen Then wb.Close SaveChanges:=False
     If startedXl Then xl.Quit
     On Error GoTo 0
     ReadPseudonymKey = False
@@ -590,7 +624,9 @@ CleanFail:
 
 Fail:
     On Error Resume Next
-    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    If Not wb Is Nothing Then
+        If Not wasOpen Then wb.Close SaveChanges:=False
+    End If
     If startedXl And Not xl Is Nothing Then xl.Quit
     On Error GoTo 0
     ReadPseudonymKey = False
@@ -609,13 +645,14 @@ End Function
 ' REPLACEMENT
 '==============================================================================
 ' Replace findText with replaceText across the document's stable stories: the
-' main body, each section's headers/footers, and footnotes/endnotes when
-' present. Returns the number of those ranges in which a replacement was made.
+' main body, each section's headers/footers, footnotes/endnotes when present,
+' and each shape's own text frame. Returns the number of those ranges in which
+' a replacement was made.
 '
-' This deliberately does NOT walk StoryRanges/NextStoryRange (including text
-' frames): enumerating that collection while doing wdReplaceAll inside the loop
-' can destabilize and crash Word. The collections below stay valid across text
-' replacement, so iterating them is safe.
+' This deliberately does NOT walk StoryRanges/NextStoryRange: enumerating that
+' chain while replacing inside the loop can destabilize and crash Word. The
+' collections below (Sections, Footnotes, Shapes with per-shape TextRange) stay
+' valid across text replacement, so iterating them is safe.
 ' protectCitations (re-anonymize only): leave any match that sits in italic text
 ' untouched, so a real party name that also appears inside a cited case name
 ' (e.g. "Nash v. Superior Court") is not rewritten in the shared copy. This
@@ -659,6 +696,19 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
     If oDoc.Endnotes.count > 0 Then
         If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole, protectCitations) Then total = total + 1
     End If
+    On Error GoTo 0
+
+    ' Text boxes / shapes, each one's own text frame directly. (Walking the
+    ' wdTextFrameStory NextStoryRange chain is what crashes Word; touching each
+    ' shape's TextRange individually is stable.) Without this, a name in a
+    ' text box survived re-anonymize into the shared copy.
+    On Error Resume Next
+    Dim shp As Shape
+    For Each shp In oDoc.Shapes
+        If shp.TextFrame.HasText Then
+            If ReplaceInRange(shp.TextFrame.TextRange, findText, replaceText, whole, protectCitations) Then total = total + 1
+        End If
+    Next shp
     On Error GoTo 0
 
     ReplaceEverywhere = total
@@ -963,6 +1013,53 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
     End With
     HighlightExact = n
 End Function
+
+' Remove every pink residual-pseudonym flag from the document (body, headers/
+' footers, notes, text boxes). Run at the start of re-anonymize: surviving pink
+' highlights in the shared copy would advertise exactly which tokens were fakes.
+' Uses a highlight-seeking Find (fast) rather than walking Characters (O(n) COM
+' calls). Other highlight colors -- the user's yellow, the close-review's green/
+' turquoise -- are left alone.
+Private Sub ClearResidualFlags(ByVal oDoc As Document)
+    On Error Resume Next
+    ClearPinkInRange oDoc.content
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then ClearPinkInRange hf.Range
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then ClearPinkInRange hf.Range
+        Next hf
+    Next sec
+
+    If oDoc.Footnotes.count > 0 Then ClearPinkInRange oDoc.StoryRanges(wdFootnotesStory)
+    If oDoc.Endnotes.count > 0 Then ClearPinkInRange oDoc.StoryRanges(wdEndnotesStory)
+
+    Dim shp As Shape
+    For Each shp In oDoc.Shapes
+        If shp.TextFrame.HasText Then ClearPinkInRange shp.TextFrame.TextRange
+    Next shp
+End Sub
+
+Private Sub ClearPinkInRange(ByVal rng As Range)
+    On Error Resume Next
+    Dim r As Range: Set r = rng.Duplicate
+    With r.Find
+        .ClearFormatting
+        .text = ""
+        .Highlight = True
+        .Forward = True
+        .Wrap = wdFindStop
+        Do While .Execute
+            If r.HighlightColorIndex = wdPink Then r.HighlightColorIndex = wdNoHighlight
+            If r.End >= rng.End Then Exit Do
+            r.Collapse Direction:=wdCollapseEnd
+            r.End = rng.End
+        Loop
+    End With
+End Sub
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,
 ' entity/company words, street names, and city/locality names. Built in chunks
