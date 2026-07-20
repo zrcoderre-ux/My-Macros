@@ -1,4 +1,10 @@
 Attribute VB_Name = "ShortCite"
+' Sentinel stored in snToKey / rpToKey when two DIFFERENT cases claim the same
+' short name or the same reporter volume. LookupKey treats it as a miss, so an
+' ambiguous cite is left unconverted instead of silently bound to whichever
+' case happened to be scanned first (a wrong-authority miscitation).
+Private Const AMBIG_KEY As String = "*AMBIGUOUS*"
+
 '==============================================================================
 ' USER-DEFINED TYPES  (must appear before all Subs/Functions in VBA)
 '==============================================================================
@@ -298,6 +304,22 @@ Private Sub PreScanDocument(Doc As Document, _
         For Each mBS2 In msBS2
             Dim bss2 As Long: bss2 = mBS2.FirstIndex + 1
             Dim bsl2 As Long: bsl2 = mBS2.length
+
+            ' Same absorbed-prose trim as the FindExistingShortCites bare scan;
+            ' see TrimBareSupraName.
+            Dim bs2RawNm As String: bs2RawNm = Trim(mBS2.SubMatches(1))
+            Dim bs2Nm As String: bs2Nm = bs2RawNm
+            If Len(Trim("" & mBS2.SubMatches(0))) = 0 Then
+                bs2Nm = TrimBareSupraName(bs2RawNm)
+                If bs2Nm <> bs2RawNm And Len(bs2Nm) > 0 And _
+                   Right(bs2RawNm, Len(bs2Nm)) = bs2Nm Then
+                    bss2 = bss2 + (Len(bs2RawNm) - Len(bs2Nm))
+                    bsl2 = bsl2 - (Len(bs2RawNm) - Len(bs2Nm))
+                Else
+                    bs2Nm = bs2RawNm
+                End If
+            End If
+
             If bss2 > 1 Then
                 If Mid(pt, bss2 - 1, 1) = "(" Then GoTo PSNextBS
                 Dim bss2Back As Long: bss2Back = bss2 - 2
@@ -306,14 +328,14 @@ Private Sub PreScanDocument(Doc As Document, _
                     bss2Back = bss2Back - 1
                 Loop
                 If bss2Back >= 1 Then
-                    If Mid(pt, bss2Back, 1) = "," Then GoTo PSNextBS
+                    If Mid(pt, bss2Back, 1) = "," Or Mid(pt, bss2Back, 1) = ";" Then GoTo PSNextBS
                 End If
             End If
             If IsInsideQuote(bss2, bsl2, qm) Then GoTo PSNextBS
             Dim bsdc As DocCite
             bsdc.citeType = "supra"
             bsdc.signal = Trim(mBS2.SubMatches(0))
-            bsdc.shortName = Trim(mBS2.SubMatches(1))
+            bsdc.shortName = bs2Nm
             bsdc.reporter = Trim(mBS2.SubMatches(2))
             bsdc.pincite = CleanPincite(Trim(mBS2.SubMatches(3)))
             bsdc.absStart = PARA.Range.start + bss2 - 1
@@ -337,8 +359,19 @@ PSNextPara:
         Dim lSN As String: lSN = allLong(i).shortName
         If Not occCount.Exists(lk) Then
             occCount.Add lk, 1
-            If Not snToKey.Exists(LCase(lSN)) Then snToKey.Add LCase(lSN), lk
-            If Not rpToKey.Exists(LCase(allLong(i).reporter)) Then rpToKey.Add LCase(allLong(i).reporter), lk
+            ' Poison, don't first-win: a second DIFFERENT case claiming the same
+            ' short name or reporter volume makes that key ambiguous, and every
+            ' later lookup (via LookupKey) must miss rather than miscite.
+            If Not snToKey.Exists(LCase(lSN)) Then
+                snToKey.Add LCase(lSN), lk
+            ElseIf snToKey(LCase(lSN)) <> lk Then
+                snToKey(LCase(lSN)) = AMBIG_KEY
+            End If
+            If Not rpToKey.Exists(LCase(allLong(i).reporter)) Then
+                rpToKey.Add LCase(allLong(i).reporter), lk
+            ElseIf rpToKey(LCase(allLong(i).reporter)) <> lk Then
+                rpToKey(LCase(allLong(i).reporter)) = AMBIG_KEY
+            End If
         Else
             occCount(lk) = occCount(lk) + 1
             If Not multiDict.Exists(lk) Then multiDict.Add lk, True
@@ -400,9 +433,8 @@ PSNextPara:
     For i = 0 To asc - 1
         Dim ssnl As String: ssnl = LCase(allSupra(i).shortName)
         Dim srpl As String: srpl = LCase(allSupra(i).reporter)
-        Dim sNK  As String: sNK = ""
-        If snToKey.Exists(ssnl) Then sNK = snToKey(ssnl)
-        If sNK = "" And rpToKey.Exists(srpl) Then sNK = rpToKey(srpl)
+        Dim sNK  As String: sNK = LookupKey(snToKey, ssnl)
+        If sNK = "" Then sNK = LookupKey(rpToKey, srpl)
         If sNK = "" Then sNK = TryResolveByParty(ssnl, srpl, altPartyToKey, preScanInfo)
 
         If sNK <> "" And Not snToKey.Exists(ssnl) Then
@@ -870,11 +902,8 @@ Private Sub ProcessInQuoteCompletions(Doc As Document, _
                 If hIdx >= 0 Then
                     b1HL = hintLines(hIdx): b1UsedHint = True
                 Else
-                    Dim b1NK As String: b1NK = ""
-                    If rpToKey.Exists(LCase(Trim(bRep))) Then b1NK = rpToKey(LCase(Trim(bRep)))
-                    If b1NK = "" Then
-                        If snToKey.Exists(LCase(Trim(bName))) Then b1NK = snToKey(LCase(Trim(bName)))
-                    End If
+                    Dim b1NK As String: b1NK = LookupKey(rpToKey, LCase(Trim(bRep)))
+                    If b1NK = "" Then b1NK = LookupKey(snToKey, LCase(Trim(bName)))
                     If b1NK <> "" And preScanInfo.Exists(b1NK) Then
                         b1HL = HintLineFromNormKey(b1NK, preScanInfo)
                     Else
@@ -1078,8 +1107,8 @@ Private Function PerformSwaps(Doc As Document, _
             If sNK = "" Then
                 Dim snl As String: snl = LCase(docCites(i).shortName)
                 Dim rpl As String: rpl = LCase(docCites(i).reporter)
-                If snToKey.Exists(snl) Then sNK = snToKey(snl)
-                If sNK = "" And rpToKey.Exists(rpl) Then sNK = rpToKey(rpl)
+                sNK = LookupKey(snToKey, snl)
+                If sNK = "" Then sNK = LookupKey(rpToKey, rpl)
                 docCites(i).normKey = sNK
             End If
             If sNK <> "" And Not seenLong.Exists(sNK) Then
@@ -1214,8 +1243,16 @@ Private Sub ProcessParagraph(PARA As Paragraph, _
                 caseDict.Add nk, regSN & "|" & cit.reporter & "|" & cit.initialPage & _
                                   "|" & cit.year & "|" & cit.caseName
 
-                If Not snToKey.Exists(LCase(regSN)) Then snToKey.Add LCase(regSN), nk
-                If Not rpToKey.Exists(LCase(cit.reporter)) Then rpToKey.Add LCase(cit.reporter), nk
+                If Not snToKey.Exists(LCase(regSN)) Then
+                    snToKey.Add LCase(regSN), nk
+                ElseIf snToKey(LCase(regSN)) <> nk And snToKey(LCase(regSN)) <> AMBIG_KEY Then
+                    snToKey(LCase(regSN)) = AMBIG_KEY
+                End If
+                If Not rpToKey.Exists(LCase(cit.reporter)) Then
+                    rpToKey.Add LCase(cit.reporter), nk
+                ElseIf rpToKey(LCase(cit.reporter)) <> nk And rpToKey(LCase(cit.reporter)) <> AMBIG_KEY Then
+                    rpToKey(LCase(cit.reporter)) = AMBIG_KEY
+                End If
 
                 If multiDict.Exists(nk) And cit.shortNameOverride = "" And needsShortName.Exists(nk) Then
                     Dim sigLenF As Long: sigLenF = IIf(cit.signal <> "", Len(cit.signal) + 1, 0)
@@ -1302,9 +1339,8 @@ Private Sub ProcessParagraph(PARA As Paragraph, _
 
             If sC.inQuote Then
                 If sC.citeType = "supra" Then
-                    Dim iqNK As String: iqNK = ""
-                    If snToKey.Exists(LCase(sC.shortName)) Then iqNK = snToKey(LCase(sC.shortName))
-                    If iqNK = "" And rpToKey.Exists(LCase(sC.reporter)) Then iqNK = rpToKey(LCase(sC.reporter))
+                    Dim iqNK As String: iqNK = LookupKey(snToKey, LCase(sC.shortName))
+                    If iqNK = "" Then iqNK = LookupKey(rpToKey, LCase(sC.reporter))
                     If iqNK = "" Or Not caseDict.Exists(iqNK) Then
                         ApplyHighlight PARA, sC.startChar, sC.citLength
                         orphanCount = orphanCount + 1
@@ -1334,8 +1370,8 @@ Private Sub ProcessParagraph(PARA As Paragraph, _
             Select Case sC.citeType
 
                 Case "supra"
-                    If snToKey.Exists(LCase(sC.shortName)) Then scNK = snToKey(LCase(sC.shortName))
-                    If scNK = "" And rpToKey.Exists(LCase(sC.reporter)) Then scNK = rpToKey(LCase(sC.reporter))
+                    scNK = LookupKey(snToKey, LCase(sC.shortName))
+                    If scNK = "" Then scNK = LookupKey(rpToKey, LCase(sC.reporter))
 
                     If scNK = "" Then
                         scNK = TryResolveByParty(LCase(sC.shortName), LCase(sC.reporter), _
@@ -2245,6 +2281,26 @@ NextSupra:
     For Each mBS In msBS
         Dim bss As Long: bss = mBS.FirstIndex + 1
         Dim bsl As Long: bsl = mBS.length
+
+        ' Reclaim capitalized prose the unanchored name group absorbed
+        ' ("The Supreme Court in Smith, supra, ..."): trim the name to its
+        ' name-like tail and advance the match to where the trimmed name
+        ' starts, so the rewrite never touches the preceding words. Only when
+        ' no signal was captured -- a signal precedes the name inside the
+        ' match, so a front-trim is only valid when the match IS the name.
+        Dim bsRawNm As String: bsRawNm = Trim(mBS.SubMatches(1))
+        Dim bsNm As String: bsNm = bsRawNm
+        If Len(Trim("" & mBS.SubMatches(0))) = 0 Then
+            bsNm = TrimBareSupraName(bsRawNm)
+            If bsNm <> bsRawNm And Len(bsNm) > 0 And _
+               Right(bsRawNm, Len(bsNm)) = bsNm Then
+                bss = bss + (Len(bsRawNm) - Len(bsNm))
+                bsl = bsl - (Len(bsRawNm) - Len(bsNm))
+            Else
+                bsNm = bsRawNm
+            End If
+        End If
+
         If bss > 1 Then
             If Mid(pt, bss - 1, 1) = "(" Then GoTo NextBS
             Dim bssBack As Long: bssBack = bss - 2
@@ -2253,14 +2309,18 @@ NextSupra:
                 bssBack = bssBack - 1
             Loop
             If bssBack >= 1 Then
-                If Mid(pt, bssBack, 1) = "," Then GoTo NextBS
+                ' Skip after "," (an interior segment of a larger cite) and
+                ' after ";" (the second entry of a compound parenthetical,
+                ' which the compound handling owns -- matching it here too
+                ' produced overlapping replacements in the same paragraph).
+                If Mid(pt, bssBack, 1) = "," Or Mid(pt, bssBack, 1) = ";" Then GoTo NextBS
             End If
         End If
         If IsInsideQuote(bss, bsl, qm) Then GoTo NextBS
         If scC > UBound(scs) - 1 Then ReDim Preserve scs(0 To UBound(scs) + 20)
         scs(scC).citeType = "supra"
         scs(scC).signal = Trim(mBS.SubMatches(0))
-        scs(scC).shortName = Trim(mBS.SubMatches(1))
+        scs(scC).shortName = bsNm
         scs(scC).reporter = Trim(mBS.SubMatches(2))
         scs(scC).pincite = CleanPincite(Trim(mBS.SubMatches(3)))
         Dim bsBN As String
@@ -3404,9 +3464,14 @@ Private Function BuildLongCitePattern() As String
 End Function
 
 Private Function BuildSupraPattern() As String
+    ' The name group excludes ";" as well as ")": in a compound parenthetical
+    ' "(Smith, supra, ... p. 100; Jones, supra, ... p. 200.)" a name group that
+    ' could span the semicolon let the engine swallow the whole compound as one
+    ' cite whose "name" was everything through "; Jones" -- and the rewrite then
+    ' deleted the Smith cite.
     BuildSupraPattern = _
         "\((?:(See generally |See also |But see |See |Cf\. |Accord |Contra ))?" & _
-        "([A-Z][^)]*?),\s+supra,\s+" & _
+        "([A-Z][^);]*?),\s+supra,\s+" & _
         "(\d+\s+" & ReporterPattern() & ")" & _
         "\s+at\s+pp?\.\s+" & _
         "(\d[\d\-,\s]*?)" & _
@@ -3426,6 +3491,86 @@ Private Function BuildBareSupraPattern() As String
         "\s+at\s+(?:pp?\.|pages?)\s+" & _
         "(\d+(?:[-,\s]\d+)*)" & _
         "(\s*\[[\s\S]*?\])?"
+End Function
+
+' A bare supra's name group has no left boundary the regex can enforce
+' (VBScript.RegExp has no lookbehind), so the leftmost match can absorb
+' preceding capitalized prose: "The Supreme Court in Smith, supra, ..."
+' captures "The Supreme Court in Smith", and rewriting that span would delete
+' the prose from the sentence. Trim the captured name down to the trailing
+' chain of name-like words: walking backward, keep words that start with a
+' capital or are connectors that occur inside case short names (of, the, re,
+' ex, rel., v., &); stop at the first lowercase prose word ("in", "held").
+' Then strip a leading capitalized sentence-starter -- "In Smith" becomes
+' "Smith", while "In re Smith" is kept intact.
+Private Function TrimBareSupraName(ByVal rawName As String) As String
+    TrimBareSupraName = Trim(rawName)
+    Dim words() As String: words = Split(TrimBareSupraName, " ")
+    Dim hi As Long: hi = UBound(words)
+    If hi < 0 Then Exit Function
+
+    Dim lo As Long: lo = hi
+    Do While lo > 0
+        Dim w As String: w = words(lo - 1)
+        Dim keep As Boolean: keep = False
+        If Len(w) > 0 Then
+            If Left(w, 1) Like "[A-Z]" Then
+                keep = True
+            Else
+                Select Case LCase(w)
+                    Case "of", "the", "re", "ex", "rel.", "v.", "&", "de", "la", "del"
+                        keep = True
+                End Select
+            End If
+        End If
+        If Not keep Then Exit Do
+        lo = lo - 1
+    Loop
+
+    ' Leading sentence-starters that are capitalized (so the backward walk kept
+    ' them) but are prose, not part of the case name.
+    Do While lo < hi
+        Dim firstW As String: firstW = LCase(words(lo))
+        Dim nextW As String: nextW = LCase(words(lo + 1))
+        If firstW = "in" And nextW <> "re" Then
+            lo = lo + 1
+        ElseIf firstW = "the" And nextW <> "people" Then
+            lo = lo + 1
+        ElseIf firstW = "under" Or firstW = "see" Or firstW = "but" Or _
+               firstW = "and" Or firstW = "or" Or firstW = "thus" Or _
+               firstW = "however" Or firstW = "accordingly" Or firstW = "also" Or _
+               firstW = "as" Or firstW = "because" Or firstW = "although" Or _
+               firstW = "though" Or firstW = "while" Or firstW = "when" Or _
+               firstW = "since" Or firstW = "compare" Or firstW = "if" Then
+            lo = lo + 1
+        Else
+            Exit Do
+        End If
+    Loop
+
+    If lo = 0 Then Exit Function
+    Dim res As String
+    Dim i As Long
+    For i = lo To hi
+        If Len(res) > 0 Then res = res & " "
+        res = res & words(i)
+    Next i
+    TrimBareSupraName = res
+End Function
+
+' Dictionary lookup that treats the ambiguity sentinel as a miss. snToKey /
+' rpToKey used to be first-wins: with two cases sharing a surname or a
+' reporter volume, every fallback lookup silently bound to whichever case was
+' scanned first -- a miscitation that looks perfectly correct on the page.
+' Ambiguous keys are now poisoned with AMBIG_KEY at registration, and every
+' lookup routes through here so an ambiguous key resolves to "no match"
+' (leaving the cite unconverted) instead of the wrong case.
+Private Function LookupKey(ByVal dict As Object, ByVal k As String) As String
+    LookupKey = ""
+    If dict.Exists(k) Then
+        Dim v As String: v = CStr(dict(k))
+        If v <> AMBIG_KEY Then LookupKey = v
+    End If
 End Function
 
 Private Function HasPrecedingFullCiteInQuote(pt As String, _
