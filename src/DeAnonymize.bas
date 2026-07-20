@@ -29,6 +29,10 @@ Attribute VB_Name = "DeAnonymize"
 '   - De-anonymize replaces longest fakes first, re-anonymize replaces longest
 '     real values first, so a bare-surname token never rewrites part of a
 '     longer full name.
+'   - Court identity (Department 515, Judge Honorable Alison Mackenzie, Judicial
+'     Assistant Steve Temblador, Courtroom Assistant Nancy Quintanilla) lives in
+'     the header. De-anonymize fills it in; re-anonymize blanks it (keeping the
+'     labels). See ApplyCourtIdentity.
 '   - Re-anonymize leaves names inside italic text alone: cited case names in a
 '     brief are italicized, so a party surname that also names a published case
 '     (e.g. "Nash v. Superior Court") is preserved rather than rewritten. This
@@ -129,6 +133,9 @@ Public Sub DeAnonymizeTentative()
     On Error GoTo ErrH
     oDoc.TrackRevisions = prevTrack
 
+    ' Restore the court-identity header (Department 515, judge, courtroom staff).
+    ApplyCourtIdentity oDoc, True
+
     ' Safety net: flag any pseudonym-pool word still present (even inside a
     ' larger word) in pink, so a fake the key missed doesn't slip through.
     Dim nFlags As Long
@@ -145,7 +152,8 @@ Public Sub DeAnonymizeTentative()
                     "slipped through."
     End If
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
-           " pseudonym(s)." & sFlagLine & vbCrLf & vbCrLf & _
+           " pseudonym(s), and filled in the court-identity header " & _
+           "(department, judge, staff)." & sFlagLine & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -232,6 +240,10 @@ Public Sub ReAnonymizeTentative()
         If i Mod 5 = 0 Then DoEvents
     Next i
 
+    ' Blank the court-identity header (Department 515, judge, courtroom staff) so
+    ' the shared copy doesn't reveal them.
+    ApplyCourtIdentity oDoc, False
+
     ' Strip metadata: comments, revisions, versions, and personal/document
     ' information. Combined with the new file, this leaves no trail back to the
     ' real matter.
@@ -248,7 +260,8 @@ Public Sub ReAnonymizeTentative()
     Application.ScreenUpdating = True
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-           " value(s)." & vbCrLf & vbCrLf & _
+           " value(s). The court-identity header (department, judge, staff) " & _
+           "was blanked." & vbCrLf & vbCrLf & _
            "Names inside italic cited case names were left as-is so a party " & _
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
@@ -332,6 +345,9 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
         ReplaceEverywhere Doc, maps(i).fake, maps(i).real
         If i Mod 5 = 0 Then DoEvents
     Next i
+
+    ' Restore the court-identity header (Department 515, judge, courtroom staff).
+    ApplyCourtIdentity Doc, True
 
     Doc.AutoSaveOn = prevAutoSave
     Doc.TrackRevisions = prevTrack
@@ -774,6 +790,89 @@ Private Function ShouldWholeWord(ByVal s As String) As Boolean
         End If
     Next i
     ShouldWholeWord = True
+End Function
+
+'==============================================================================
+' COURT IDENTITY  (Department / Judge / courtroom staff header block)
+'==============================================================================
+' The tentative's header names Department 515, the judge, and the courtroom
+' staff. These are fixed court facts, not matter-specific, so they live here as
+' constants rather than in the pseudonym key. A shared copy must not reveal them:
+'   de-anonymize (restore = True)  fills them back in  (blank -> real)
+'   re-anonymize (restore = False) blanks them out     (real  -> blank)
+' Each field is a (real, blank) pair; the blank keeps the label/anchor so the
+' header layout is preserved and the toggle round-trips exactly.
+Private Sub ApplyCourtIdentity(ByVal oDoc As Document, ByVal restore As Boolean)
+    SwapCourtField oDoc, restore, "Courthouse, Department 515", "Courthouse, Department"
+    SwapCourtField oDoc, restore, "Judge: Honorable Alison Mackenzie", "Judge:"
+    SwapCourtField oDoc, restore, "Judicial Assistant: Steve Temblador", "Judicial Assistant:"
+    SwapCourtField oDoc, restore, "Courtroom Assistant: Nancy Quintanilla", "Courtroom Assistant:"
+End Sub
+
+' Toggle one court-identity field across the body and headers/footers.
+'   restore = True  (de-anonymize): blank -> real, but only where the real value
+'                   isn't already present, so re-running never doubles it.
+'   restore = False (re-anonymize): real -> blank; idempotent on its own.
+Private Sub SwapCourtField(ByVal oDoc As Document, ByVal restore As Boolean, _
+                            ByVal realText As String, ByVal blankText As String)
+    Dim findText As String, replText As String
+    If restore Then
+        findText = blankText: replText = realText
+    Else
+        findText = realText: replText = blankText
+    End If
+
+    CourtSwapInRange oDoc.content, findText, replText, restore, realText
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then CourtSwapInRange hf.Range, findText, replText, restore, realText
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then CourtSwapInRange hf.Range, findText, replText, restore, realText
+        Next hf
+    Next sec
+End Sub
+
+' One field swap in one range. On restore, skip when realText is already present:
+' blankText is a prefix of realText, so replacing then would double the value.
+Private Sub CourtSwapInRange(ByVal rng As Range, ByVal findText As String, _
+                              ByVal replText As String, ByVal restore As Boolean, _
+                              ByVal realText As String)
+    On Error Resume Next
+    If restore Then
+        If RangeContains(rng, realText) Then Exit Sub
+    End If
+    Dim r As Range: Set r = rng.Duplicate
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .text = findText
+        .Replacement.text = replText
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = True
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        .Execute Replace:=wdReplaceAll
+    End With
+End Sub
+
+' True if s occurs in rng (case-sensitive).
+Private Function RangeContains(ByVal rng As Range, ByVal s As String) As Boolean
+    On Error Resume Next
+    Dim r As Range: Set r = rng.Duplicate
+    With r.Find
+        .ClearFormatting
+        .text = s
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = True
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        RangeContains = .Execute
+    End With
 End Function
 
 '==============================================================================
