@@ -7,7 +7,14 @@ Option Explicit
 
 Private bWrapBusy As Boolean
 
+' Both key handlers run under On Error Resume Next for their whole body: they
+' fire on EVERY space/Enter in EVERY document, so an error must never (a) throw
+' a dialog at the user mid-keystroke -- in a read-only or protected document the
+' TypeText itself errors where native typing would just refuse -- or (b) skip
+' the bWrapBusy reset, which would silently kill wrapping for the session (e.g.
+' StartCustomRecord raises if a crashed macro left a custom record open).
 Public Sub CheckAndWrap()
+    On Error Resume Next
     If bWrapBusy Then
         Selection.TypeText " "
         Exit Sub
@@ -16,11 +23,7 @@ Public Sub CheckAndWrap()
     bWrapBusy = True
     Dim oUndo As UndoRecord: Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "Auto Wrap Citation"
-
-    On Error Resume Next
     DoCheckAndWrap
-    On Error GoTo 0
-
     oUndo.EndCustomRecord
     bWrapBusy = False
     Selection.TypeText " "
@@ -28,6 +31,7 @@ Public Sub CheckAndWrap()
 End Sub
 
 Public Sub CheckAndWrapEnter()
+    On Error Resume Next
     If bWrapBusy Then
         Selection.TypeParagraph
         Exit Sub
@@ -36,11 +40,7 @@ Public Sub CheckAndWrapEnter()
     bWrapBusy = True
     Dim oUndo As UndoRecord: Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "Auto Wrap Citation"
-
-    On Error Resume Next
     DoCheckAndWrap
-    On Error GoTo 0
-
     oUndo.EndCustomRecord
     bWrapBusy = False
     Selection.TypeParagraph
@@ -79,6 +79,18 @@ End Sub
 
 Private Sub DoCheckAndWrap()
     If Selection.Type <> wdSelectionIP Then Exit Sub
+
+    ' Main body only: Selection offsets in a footnote/header/text box are
+    ' story-relative, but every range below goes through ActiveDocument.Range
+    ' (the main text story) -- wrapping there would insert parens into an
+    ' unrelated spot in the body. The caller still types the space/paragraph.
+    If Selection.StoryType <> wdMainTextStory Then Exit Sub
+
+    ' Skip while Track Changes is on: revision-marked deletions still appear in
+    ' Range.Text, so the paragraph-prefix analysis would run on text that is no
+    ' longer really there. The keystroke itself still goes through.
+    If ActiveDocument.TrackRevisions Then Exit Sub
+
     Dim oPar As Paragraph: Set oPar = Selection.Paragraphs(1)
     If oPar Is Nothing Then Exit Sub
 

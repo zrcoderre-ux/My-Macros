@@ -66,6 +66,24 @@ Sub PasteLegalQuotation()
     Set oDoc = ActiveDocument
     Set oSel = Selection
 
+    ' Main body only. Selection.Start in a footnote/header/text box is an offset
+    ' into THAT story, but the whole pipeline addresses oDoc.Range -- the main
+    ' text story -- so running anywhere else would read and mutate body text at
+    ' unrelated offsets (the pre-paste detectors DELETE characters there).
+    If oSel.StoryType <> wdMainTextStory Then
+        MsgBox "PasteLegalQuotation only works in the main body of the " & _
+               "document, not in a footnote, header/footer, or text box.", _
+               vbInformation, "PasteLegalQuotation"
+        Exit Sub
+    End If
+
+    ' Track Changes off for the run, restored in CleanUp. With revisions on,
+    ' deletions don't shrink the story, so the lTailLen invariant and every
+    ' snapshot offset drift and the output lands garbled.
+    Dim bPrevTrack As Boolean
+    bPrevTrack = oDoc.TrackRevisions
+    oDoc.TrackRevisions = False
+
     ' Restore single-step undo (one Ctrl+Z unwinds the whole paste) -- but only
     ' when the document is small enough to be safe. A custom UndoRecord spanning
     ' this macro's edits (including the hyperlink-field deletions in
@@ -689,6 +707,9 @@ CleanUp:
     Dim sErrDesc As String
     lErrNum = Err.Number
     sErrDesc = Err.Description
+    On Error Resume Next
+    oDoc.TrackRevisions = bPrevTrack
+    On Error GoTo 0
     If bUseUndo Then
         On Error Resume Next
         oUndo.EndCustomRecord
