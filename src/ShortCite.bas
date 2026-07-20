@@ -742,17 +742,24 @@ End Function
 
 '------------------------------------------------------------------------------
 ' True when a parenthetical's text is a subsequent-history / explanatory note
-' (e.g. "disapproved on other grounds ...", "overruled by ...") rather than a
-' case short name. Such parentheticals must never be treated as the short-name
-' override. Match is on the opening word only, case-insensitive; no case short
-' name begins with any of these words, so this cannot suppress a real one.
+' (e.g. "disapproved on other grounds ...", "overruled by ...") or an
+' opinion-type note ("conc. opn. of Mosk, J.", "lead opn.", "per curiam")
+' rather than a case short name. Such parentheticals must never be treated as
+' the short-name override -- an opinion parenthetical captured as the override
+' propagated into EVERY later short cite for that case ("(conc. opn. of Mosk,
+' J., supra, 23 Cal.4th at p. N.)"). Match is on the opening word only,
+' case-insensitive; no case short name begins with any of these words, so this
+' cannot suppress a real one.
 '------------------------------------------------------------------------------
 Private Function IsExplanatoryParenthetical(ByVal s As String) As Boolean
     Dim t As String: t = LCase(Trim(s))
     If Len(t) = 0 Then Exit Function
 
     Dim leads As Variant
-    leads = Array("disapproved", "overruled", "abrogated", "superseded")
+    leads = Array("disapproved", "overruled", "abrogated", "superseded", _
+                  "conc.", "dis.", "lead", "plur.", "maj.", "per", "en", _
+                  "opn.", "concurring", "dissenting", "italics", "fn.", _
+                  "emphasis", "citations", "internal", "ellipsis")
 
     Dim i As Long
     For i = LBound(leads) To UBound(leads)
@@ -3037,6 +3044,12 @@ Private Function NormalizeSpaces(s As String) As String
     r = Replace(r, ChrW(8239), Chr(32))
     r = Replace(r, ChrW(8201), Chr(32))
     r = Replace(r, ChrW(8202), Chr(32))
+    ' En dash -> hyphen (same length, so positions stay aligned with the
+    ' document). Word auto-formats "105-107" to an en dash, and the pincite
+    ' character classes only accept "-": the long-cite match then ended at
+    ' "105" and the rewrite left a dangling fragment like "(Id. at p.
+    ' 105.)-107.)" behind. Normalizing here lets every pattern see a hyphen.
+    r = Replace(r, ChrW(8211), "-")
     NormalizeSpaces = r
 End Function
 
@@ -3434,9 +3447,13 @@ End Function
 Private Function ReporterPattern() As String
     ' Order: within each family the longer forms come first so the alternation
     ' never stops at a prefix (e.g. L.Ed.2d before L.Ed.).
-    ' California:
+    ' California. The appellate-division "Supp." forms must come before their
+    ' plain counterparts: without them, "82 Cal.App.4th Supp. 1" matched
+    ' "Cal.App." and then took the "4" of "4th" as the page number, recording
+    ' a bogus reporter and leaving "th Supp. 1.)" dangling on conversion.
     Dim sCal As String
-    sCal = "Cal\.App\.[2-5]th|Cal\.App\.[23]d|Cal\.App\.|" & _
+    sCal = "Cal\.App\.[2-5]th Supp\.|Cal\.App\.[23]d Supp\.|Cal\.App\. Supp\.|" & _
+           "Cal\.App\.[2-5]th|Cal\.App\.[23]d|Cal\.App\.|" & _
            "Cal\.[2-5]th|Cal\.[23]d|Cal\.|" & _
            "Cal\.Rptr\.[23]d|Cal\.Rptr\."
     ' Federal:
