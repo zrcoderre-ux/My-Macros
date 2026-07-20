@@ -207,11 +207,6 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Double spaces
     If CheckDoubleSpaces(Doc) Then issues = True
 
-    ' Placeholder word "blank" (cyan). HighlightWord skips *blank* (asterisk
-    ' markers = intentional use, left untouched). The helper existed but was
-    ' never wired in, so a leftover "blank" sailed through the close review.
-    If HighlightWord(Doc, "blank", HL_CYAN) Then issues = True
-
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc
 
