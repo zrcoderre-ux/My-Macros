@@ -129,6 +129,7 @@ Public Sub DeAnonymizeTentative()
     prevAutoSave = oDoc.AutoSaveOn
     oDoc.AutoSaveOn = False
     On Error GoTo ErrH
+    Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
 
     ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
     ' document (dozens of terms, each many hits) into one custom undo record
@@ -174,6 +175,12 @@ ErrH:
     Dim eN As Long: eN = Err.Number
     Dim eD As String: eD = Err.Description
     On Error Resume Next
+    ' Restore what the run changed (only if it got far enough to save state):
+    ' errors used to leave TrackRevisions and AutoSave silently off.
+    If bStateSaved Then
+        oDoc.TrackRevisions = prevTrack
+        oDoc.AutoSaveOn = prevAutoSave
+    End If
     Application.ScreenUpdating = True
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & eN & ": " & eD, vbExclamation, "De-Anonymize"
@@ -236,6 +243,7 @@ Public Sub ReAnonymizeTentative()
     prevAutoSave = oDoc.AutoSaveOn
     oDoc.AutoSaveOn = False              ' must precede edits: AutoSave would
     On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
+    Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
 
     ' Clear any pink residual-pseudonym flags a prior de-anonymize left: they
     ' mark exactly which tokens were fakes, which the shared copy must not show.
@@ -304,12 +312,18 @@ ErrH:
     Dim reN As Long: reN = Err.Number
     Dim reD As String: reD = Err.Description
     On Error Resume Next
+    ' Restore TrackRevisions (errors used to leave it silently off). AutoSave
+    ' is deliberately NOT re-enabled here: the window may hold partial
+    ' real->fake edits, and re-enabling AutoSave would push them to the
+    ' original cloud file before the user can close without saving.
+    If bStateSaved Then oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & reN & ": " & reD & vbCrLf & vbCrLf & _
            "If the error happened before the save, this window holds partial " & _
            "re-anonymize edits that were NOT saved anywhere -- close it " & _
-           "WITHOUT saving to get back to the untouched original.", _
+           "WITHOUT saving to get back to the untouched original. (AutoSave " & _
+           "was left off for the same reason.)", _
            vbExclamation, "Re-Anonymize"
 End Sub
 
