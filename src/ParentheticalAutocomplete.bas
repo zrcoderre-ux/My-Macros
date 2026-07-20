@@ -299,8 +299,14 @@ End Sub
 '=============================================================================
 Public Sub OnOpenParen()
     Selection.TypeText "("
-    
- If IsSentenceEndSpaceBehindParen() Then
+
+    ' Main body only: the session records Selection offsets but reads them
+    ' back through ActiveDocument.Range (the main text story), so a session
+    ' begun in a footnote/header/text box narrowed against unrelated BODY
+    ' text and an accept deleted the wrong characters.
+    If Selection.StoryType <> wdMainTextStory Then Exit Sub
+
+    If IsSentenceEndSpaceBehindParen() Then
         ScanDocument
         If m_CiteCount > 0 Then
             BeginSession MODE_OPEN
@@ -317,6 +323,9 @@ Public Sub OnSemicolon()
     ' unwanted space. Anchor still sits after the space in trigger context,
     ' so accepting a suggestion inserts cleanly into "...; <cite> ".
     Selection.TypeText ";"
+
+    ' Main body only -- same story-offset mismatch as OnOpenParen.
+    If Selection.StoryType <> wdMainTextStory Then Exit Sub
 
     If IsInsideOpenParen() Then
         Selection.TypeText " "

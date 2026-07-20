@@ -106,6 +106,19 @@ Private Sub AddCitationLinks()
     tmpIn = Environ$("TEMP") & "\citelink_in.html"
     tmpOut = Environ$("TEMP") & "\citelink_out.tsv"
 
+    ' Arm the handler for the whole shell/IO/parse phase, not just the linking
+    ' loop: Python missing (Shell raises), an unwritable TEMP, a bridge that
+    ' exits 0 without writing tmpOut, or a malformed TSV row all previously
+    ' surfaced as raw unhandled runtime-error dialogs.
+    On Error GoTo CleanUp
+
+    ' Delete last run's output BEFORE running the bridge. If the bridge fails
+    ' without writing, a stale TSV from a DIFFERENT document would otherwise be
+    ' read back and its offsets applied to this one.
+    On Error Resume Next
+    Kill tmpOut
+    On Error GoTo CleanUp
+
     WriteUtf8File tmpIn, docHtml
 
     ' Run the bridge and wait.
@@ -132,7 +145,11 @@ Private Sub AddCitationLinks()
         Exit Sub
     End If
 
-    ' Parse rows.
+    ' Parse rows. Normalize CRLF first: a bridge writing in Windows text mode
+    ' would otherwise leave a trailing CR on every row's last field, breaking
+    ' the Find fallback that searches for that text verbatim.
+    tsv = Replace(tsv, vbCrLf, vbLf)
+    tsv = Replace(tsv, vbCr, vbLf)
     Dim lines() As String
     lines = Split(tsv, vbLf)
 
@@ -224,9 +241,21 @@ NextK:
     LinkOrphanSupraCites doc, keep, added
 
 CleanUp:
+    ' Capture the error before any On Error statement clears it.
+    Dim lErrN As Long, sErrD As String
+    lErrN = Err.Number
+    sErrD = Err.Description
+    On Error Resume Next
+    Kill tmpIn
+    Kill tmpOut
     Application.ScreenUpdating = True
-    If Err.Number <> 0 Then
-        MsgBox "Stopped after an error: " & Err.Description, vbExclamation, "Citation Linker"
+    On Error GoTo 0
+    If lErrN <> 0 Then
+        MsgBox "Citation Linker stopped after an error:" & vbCrLf & vbCrLf & _
+               "Error " & lErrN & ": " & sErrD & vbCrLf & vbCrLf & _
+               "If this mentions a missing file or path, check PYTHON_EXE and " & _
+               "SCRIPT_DIR at the top of the module.", _
+               vbExclamation, "Citation Linker"
     Else
         MsgBox "Linked " & added & " citation" & IIf(added = 1, "", "s") & _
                " (" & ProviderDisplay(CitationProvider()) & ").", _
@@ -690,10 +719,13 @@ Private Sub LinkOrphanSupraCites(ByVal doc As Document, ByRef keep() As CiteRow,
     re.Global = True
     re.IgnoreCase = True
     ' ", supra, <volume reporter> at p. <pages>"  /  "at pp. <pages>".
-    ' The reporter group is lazy so it stops at " at p"; the page list allows
-    ' digits, commas, spaces, hyphen and en dash (ranges like 1266-1267).
-    re.Pattern = ",\s+supra,\s+(\d{1,4}\s+[A-Za-z][A-Za-z.\d ]*?)\s+at\s+pp?\.\s*\d[\d,\s" _
-                 & ChrW(8211) & "\-]*"
+    ' The reporter group is lazy so it stops at " at p". The page tail accepts
+    ' one page or one hyphen/en-dash range and then STOPS: the old open class
+    ' [\d,\s-]* ran through commas and spaces, so "at p. 982, 30 days later"
+    ' linked through ", 30" and "pp. 1266-1267, and" carried a trailing comma
+    ' into the hyperlink.
+    re.Pattern = ",\s+supra,\s+(\d{1,4}\s+[A-Za-z][A-Za-z.\d ]*?)\s+at\s+pp?\.\s*" _
+                 & "\d+(?:\s*[" & ChrW(8211) & "\-]\s*\d+)?"
 
     Dim p As Paragraph
     For Each p In doc.Paragraphs
