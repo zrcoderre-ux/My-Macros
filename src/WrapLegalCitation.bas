@@ -3,7 +3,7 @@ Attribute VB_Name = "WrapLegalCitation"
 ' WrapLegalCitation  (integrated with WrapCitations patterns)
 ' Wraps California legal citations in parentheses.
 '
-' PASS 1 — ITALIC-ANCHOR CITATIONS (original WrapLegalCitation logic)
+' PASS 1 ï¿½ ITALIC-ANCHOR CITATIONS (original WrapLegalCitation logic)
 '   [italic case name] [non-italic: (year) volume Cal./Cal.App.Xth page.]
 '   e.g.  Smith v. Jones (2000) 123 Cal.App.4th 456.
 '
@@ -15,9 +15,9 @@ Attribute VB_Name = "WrapLegalCitation"
 '     ( -> [    ) -> ]    punct before closing quote is removed
 '     citation ) goes after ]
 '
-' PASS 2 — TEXT-PATTERN CITATIONS (from WrapCitations / DoCheckAndWrap)
+' PASS 2 ï¿½ TEXT-PATTERN CITATIONS (from WrapCitations / DoCheckAndWrap)
 '   Handles citations that may lack an italic case name anchor:
-'     a) Pilcrow / section-symbol (§ / ¶) statutes
+'     a) Pilcrow / section-symbol (ï¿½ / ï¿½) statutes
 '     b) U.S. reporter citations
 '     c) "at p." / "at pp." pin-cite citations
 '     d) Exhibit references  (Ex. A.)
@@ -27,7 +27,7 @@ Attribute VB_Name = "WrapLegalCitation"
 '   boundary logic used by the live keystroke macro so that the two are
 '   consistent.  Already-wrapped citations are skipped.
 '
-' PASS 3 — EDITORIAL / QUOTED PARENTHETICAL CLEANUP
+' PASS 3 ï¿½ EDITORIAL / QUOTED PARENTHETICAL CLEANUP
 '   Inside already-wrapped citations, converts trailing parentheticals to
 '   California-style brackets.  Two kinds are converted:
 '     a) Recognized editorial phrases, e.g.:
@@ -787,15 +787,29 @@ Sub WrapLegalCitation()
     Dim oUndo    As UndoRecord
 
     Set oDoc = ActiveDocument
+
+    ' Track Changes off for the run, restored in CleanUp: with revisions on,
+    ' deletions stay in the position stream and every hard-coded offset
+    ' adjustment in the passes lands wrong.
+    Dim bPrevTrack As Boolean
+    bPrevTrack = oDoc.TrackRevisions
+    oDoc.TrackRevisions = False
+
     Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "Wrap Legal Citations"
+
+    ' Any runtime error must still land on CleanUp: otherwise ScreenUpdating
+    ' stays off and the custom undo record stays open -- and an open record
+    ' makes the next spacebar press fail inside CheckAndWrap, silently killing
+    ' citation wrapping for the rest of the session.
+    On Error GoTo CleanUp
 
     nDocEnd = oDoc.content.End - 1
     Application.ScreenUpdating = False
     nWrapped = 0
 
     ' =========================================================================
-    '  PASS 1 — ITALIC-ANCHOR SWEEP  (original logic, unchanged)
+    '  PASS 1 ï¿½ ITALIC-ANCHOR SWEEP  (original logic, unchanged)
     ' =========================================================================
 
     Set oSearch = oDoc.content
@@ -1121,7 +1135,7 @@ Sub WrapLegalCitation()
     Loop
 
     ' =========================================================================
-    '  PASS 2 — TEXT-PATTERN SWEEP  (ported from WrapCitations / DoCheckAndWrap)
+    '  PASS 2 ï¿½ TEXT-PATTERN SWEEP  (ported from WrapCitations / DoCheckAndWrap)
     ' =========================================================================
 
     Dim nPass2 As Long
@@ -1129,7 +1143,7 @@ Sub WrapLegalCitation()
     nWrapped = nWrapped + nPass2
 
     ' =========================================================================
-    '  PASS 3 — EDITORIAL / QUOTED PARENTHETICAL BRACKET CONVERSION
+    '  PASS 3 ï¿½ EDITORIAL / QUOTED PARENTHETICAL BRACKET CONVERSION
     '  Runs after Pass 1 & 2 so all citations are already wrapped before we
     '  look for inner parentheticals to convert.
     ' =========================================================================
@@ -1137,14 +1151,27 @@ Sub WrapLegalCitation()
     Dim nPass3 As Long
     nPass3 = RunPass3(oDoc)
 
+CleanUp:
+    Dim lErrNum As Long, sErrDesc As String
+    lErrNum = Err.Number
+    sErrDesc = Err.Description
+    On Error Resume Next
     oUndo.EndCustomRecord
-
+    oDoc.TrackRevisions = bPrevTrack
     Application.ScreenUpdating = True
-    MsgBox "Done." & vbCrLf & _
-           "  Pass 1 (italic-anchor):      " & (nWrapped - nPass2) & " citation(s) wrapped" & vbCrLf & _
-           "  Pass 2 (text-pattern):       " & nPass2 & " citation(s) wrapped" & vbCrLf & _
-           "  Pass 3 (bracket conversion): " & nPass3 & " parenthetical(s) converted", _
-           vbInformation, "Wrap Legal Citations"
+    On Error GoTo 0
+
+    If lErrNum <> 0 Then
+        MsgBox "Wrap Legal Citations hit an error and stopped:" & vbCrLf & vbCrLf & _
+               "Error " & lErrNum & ": " & sErrDesc, _
+               vbExclamation, "Wrap Legal Citations"
+    Else
+        MsgBox "Done." & vbCrLf & _
+               "  Pass 1 (italic-anchor):      " & (nWrapped - nPass2) & " citation(s) wrapped" & vbCrLf & _
+               "  Pass 2 (text-pattern):       " & nPass2 & " citation(s) wrapped" & vbCrLf & _
+               "  Pass 3 (bracket conversion): " & nPass3 & " parenthetical(s) converted", _
+               vbInformation, "Wrap Legal Citations"
+    End If
 
 End Sub
 
