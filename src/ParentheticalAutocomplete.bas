@@ -310,11 +310,16 @@ End Sub
 
 
 Public Sub OnSemicolon()
-    ' v3: type both ";" and " " before triggering. Anchor sits after the space,
+    ' Type the bare ";" first and add the trailing space ONLY in trigger
+    ' context (inside an open parenthetical). The old version always typed
+    ' "; ", which made it impossible to type a bare semicolon anywhere --
+    ' end of line, before a close paren, "id.;" -- without deleting the
+    ' unwanted space. Anchor still sits after the space in trigger context,
     ' so accepting a suggestion inserts cleanly into "...; <cite> ".
-    Selection.TypeText "; "
+    Selection.TypeText ";"
 
     If IsInsideOpenParen() Then
+        Selection.TypeText " "
         ScanDocument
         If m_CiteCount > 0 Then
             CollectExistingCites
@@ -1064,10 +1069,23 @@ Public Sub PollTick()
     m_PollPending = False
 
     If m_Mode = MODE_NONE Then Exit Sub
+
+    ' A tick can fire after the document is gone (user closed the last window
+    ' before the pending OnTime callback ran). Unguarded, Selection.Start
+    ' raised an unhandled runtime-error dialog AND left the session alive with
+    ' the popup orphaned -- pressing Enter in the NEXT document then injected
+    ' the stale suggestion into it. Any failure here tears the session down.
+    On Error GoTo Dead
+    If Documents.count = 0 Then GoTo Dead
     ProcessSelectionUpdate
     ' ProcessSelectionUpdate may have dismissed the session (e.g. no matches);
     ' check again before re-arming.
     If m_Mode <> MODE_NONE Then SchedulePoll
+    Exit Sub
+
+Dead:
+    On Error Resume Next
+    DismissSuggest
 End Sub
 
 '=============================================================================
@@ -1075,6 +1093,15 @@ End Sub
 ' v3: takes no argument; reads the currently-displayed match.
 '=============================================================================
 Public Sub AcceptCurrentMatch()
+    ' Sync the typed prefix FIRST. m_TypedSoFar is normally updated by the
+    ' poll timer, whose real granularity is ~1 second -- typing "Sm" and
+    ' hitting Tab inside that window meant deleteLen was computed from a
+    ' stale prefix and the raw "Sm" stayed in front of the inserted
+    ' suggestion ("(SmSmith Decl. ..."). ProcessSelectionUpdate brings
+    ' m_TypedSoFar current (and may legitimately dismiss the session).
+    ProcessSelectionUpdate
+    If m_Mode = MODE_NONE Then Exit Sub
+
     If m_MatchCount = 0 Then
         DismissSuggest
         Exit Sub
