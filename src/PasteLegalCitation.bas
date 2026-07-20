@@ -826,10 +826,15 @@ Private Sub EnsureCiteServer()
         Exit Sub
     End If
 
-    ' Server not running -- attempt to launch it
+    ' Server not running -- attempt to launch it. Build the quoted command with
+    ' Chr(34): the previous doubled-quote literal was malformed (an odd quote
+    ' run left the string open), so CITE_APP_PATH was passed as literal text
+    ' and the server never actually launched.
+    Dim sLaunchCmd As String
+    sLaunchCmd = Chr(34) & CITE_PYTHON_EXE & Chr(34) & " " & _
+                 Chr(34) & CITE_APP_PATH & Chr(34)
     On Error Resume Next
-    Shell """" & CITE_PYTHON_EXE & """" & " " & _
-          """"" & CITE_APP_PATH & """"", vbHide
+    Shell sLaunchCmd, vbHide
     On Error GoTo 0
 
     ' Wait 2 seconds for it to start
