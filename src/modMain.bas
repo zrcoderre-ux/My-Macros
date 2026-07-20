@@ -207,6 +207,11 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Double spaces
     If CheckDoubleSpaces(Doc) Then issues = True
 
+    ' Placeholder word "blank" (cyan). HighlightWord skips *blank* (asterisk
+    ' markers = intentional use, left untouched). The helper existed but was
+    ' never wired in, so a leftover "blank" sailed through the close review.
+    If HighlightWord(Doc, "blank", HL_CYAN) Then issues = True
+
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc
 
@@ -253,6 +258,13 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
             .Wrap = wdFindStop
             .text = opener
             Do While .Execute
+                ' Clamp to this paragraph: after a hit, Range.Find keeps
+                ' going to the END OF THE STORY, so without this an opener
+                ' here paired with a closer 40 paragraphs later and the
+                ' cross-paragraph strays this checker exists to catch were
+                ' never flagged (and every paragraph rescanned the rest of
+                ' the document).
+                If oRng.start >= paraRng.End Then Exit Do
                 count = count + 1
                 ReDim Preserve positions(count)
                 ReDim Preserve types(count)
@@ -271,6 +283,7 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
             .Wrap = wdFindStop
             .text = closer
             Do While .Execute
+                If cRng.start >= paraRng.End Then Exit Do   ' clamp (see opener loop)
                 count = count + 1
                 ReDim Preserve positions(count)
                 ReDim Preserve types(count)
@@ -350,6 +363,13 @@ Private Function FindFirstUnmatchedPair(Doc As Document, opener As String, _
             .Wrap = wdFindStop
             .text = opener
             Do While .Execute
+                ' Clamp to this paragraph: after a hit, Range.Find keeps
+                ' going to the END OF THE STORY, so without this an opener
+                ' here paired with a closer 40 paragraphs later and the
+                ' cross-paragraph strays this checker exists to catch were
+                ' never flagged (and every paragraph rescanned the rest of
+                ' the document).
+                If oRng.start >= paraRng.End Then Exit Do
                 count = count + 1
                 ReDim Preserve positions(count)
                 ReDim Preserve types(count)
@@ -368,6 +388,7 @@ Private Function FindFirstUnmatchedPair(Doc As Document, opener As String, _
             .Wrap = wdFindStop
             .text = closer
             Do While .Execute
+                If cRng.start >= paraRng.End Then Exit Do   ' clamp (see opener loop)
                 count = count + 1
                 ReDim Preserve positions(count)
                 ReDim Preserve types(count)
@@ -648,19 +669,41 @@ End Sub
 
 ' ============================================================
 ' APOSTROPHE CONVERSION
-' Converts all straight apostrophes (Chr 39) to curly/right
-' single quotation marks (ChrW 8217). Always runs on every
-' close attempt regardless of whether issues were found.
+' Converts straight single quotes (Chr 39) to their curly
+' forms, direction-aware: a quote at the start of a story or
+' after whitespace/opening punctuation is an OPENING quote
+' (ChrW 8216); everything else -- possessives, contractions,
+' closers -- is a closing/apostrophe mark (ChrW 8217). The old
+' blanket 8217 replacement turned 'quoted term' into two
+' closing quotes. (Elisions like 'tis after a space still get
+' 8216; that rarity is accepted.) Always runs on every close
+' attempt regardless of whether issues were found.
 ' ============================================================
 Private Sub ConvertStraightApostrophes(Doc As Document)
-    With Doc.content.Find
+    Dim rng As Range: Set rng = Doc.content
+    With rng.Find
         .ClearFormatting
-        .Replacement.ClearFormatting
         .text = Chr(39)
-        .Replacement.text = ChrW(8217)
         .MatchWildcards = False
-        .Wrap = wdFindContinue
-        .Execute Replace:=wdReplaceAll
+        .Wrap = wdFindStop
+        .Forward = True
+        Do While .Execute
+            Dim bOpen As Boolean: bOpen = False
+            If rng.start = 0 Then
+                bOpen = True
+            Else
+                Select Case Doc.Range(rng.start - 1, rng.start).text
+                    Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
+                        bOpen = True
+                End Select
+            End If
+            If bOpen Then
+                rng.text = ChrW(8216)
+            Else
+                rng.text = ChrW(8217)
+            End If
+            rng.Collapse Direction:=wdCollapseEnd
+        Loop
     End With
 End Sub
 

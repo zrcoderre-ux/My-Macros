@@ -2,7 +2,7 @@ Attribute VB_Name = "SummarizeWorkups"
 Option Explicit
 
 ' ============================================================
-'  CONFIGURATION — edit these before running
+'  CONFIGURATION ï¿½ edit these before running
 ' ============================================================
 Private Const API_KEY            As String = "API KEY"
 Private Const MODEL              As String = "claude-haiku-4-5-20251001"
@@ -14,7 +14,7 @@ Private Const DELAY_SECONDS      As Long = 5         ' seconds between API calls
 Private Const RATE_LIMIT_RETRIES As Long = 3         ' retries on rate-limit error
 
 ' ============================================================
-'  WINDOWS API — for Sleep
+'  WINDOWS API ï¿½ for Sleep
 ' ============================================================
 Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As LongPtr)
 
@@ -27,7 +27,13 @@ Public Sub SummarizeWorkups()
 
     On Error GoTo FatalError
 
-    ' Suppress all Word dialogs and macro prompts for unattended runs
+    ' Suppress all Word dialogs and macro prompts for unattended runs.
+    ' gSkipCloseChecks matters most: every oDoc.Close below fires the
+    ' close-review in clsAppEvents, whose VBA MsgBox is NOT suppressed by
+    ' wdAlertsNone -- without the flag, a dated OneDrive workup blocked the
+    ' unattended batch on a modal "Review document before closing?" prompt
+    ' (and ran the de-anonymize close hook on it).
+    modMain.gSkipCloseChecks = True
     Application.DisplayAlerts = wdAlertsNone
     Application.AutomationSecurity = msoAutomationSecurityForceDisable
 
@@ -42,6 +48,7 @@ FatalError:
     Call AppendLog("FATAL ERROR: " & Err.Number & " - " & Err.Description)
 
 CleanUp:
+    modMain.gSkipCloseChecks = False
     Application.DisplayAlerts = wdAlertsAll
     Application.AutomationSecurity = msoAutomationSecurityByUI
     Call AppendLog("=== DONE | Processed: " & lProcessed & " | Skipped: " & lSkipped & " | Errors: " & lErrors & " ===")
@@ -158,7 +165,7 @@ Private Sub ProcessFile(sPath As String, lProcessed As Long, lSkipped As Long, l
     End If
 
     ' --- Sanitize text: convert Word smart characters to plain ASCII
-    '     This prevents garbled â€" style output in summaries
+    '     This prevents garbled ï¿½" style output in summaries
     sText = NormalizeSmartChars(sText)
 
     ' --- Call API (with rate-limit retry)
@@ -169,7 +176,7 @@ Private Sub ProcessFile(sPath As String, lProcessed As Long, lSkipped As Long, l
 
         If Left(sSummary, 11) = "RATE_LIMIT:" Then
             If nAttempt <= RATE_LIMIT_RETRIES Then
-                Call AppendLog("Rate limit hit for " & sFile & " — waiting 60s (attempt " & nAttempt & ")")
+                Call AppendLog("Rate limit hit for " & sFile & " ï¿½ waiting 60s (attempt " & nAttempt & ")")
                 Sleep 60000
             Else
                 Call AppendLog("ERROR (rate limit, all retries exhausted): " & sFile)
@@ -205,7 +212,7 @@ Private Sub ProcessFile(sPath As String, lProcessed As Long, lSkipped As Long, l
     Exit Sub
 
 OpenError:
-    Call AppendLog("ERROR (could not open): " & sFile & " — " & Err.Description)
+    Call AppendLog("ERROR (could not open): " & sFile & " ï¿½ " & Err.Description)
     lErrors = lErrors + 1
 End Sub
 
@@ -384,7 +391,7 @@ Private Function EscapeJSON(s As String) As String
     For i = 1 To Len(s)
         c = Mid(s, i, 1)
         If c = "\" Then
-            ' Already escaped — include backslash and next char together
+            ' Already escaped ï¿½ include backslash and next char together
             sOut = sOut & c
         Else
             nAsc = asc(c)

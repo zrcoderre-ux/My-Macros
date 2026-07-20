@@ -21,11 +21,6 @@ Attribute App.VB_VarHelpID = -1
 '=============================================================================
 Private Sub App_WindowSelectionChange(ByVal sel As Selection)
     On Error Resume Next
-    Debug.Print "WSC: mode=" & ParentheticalAutocomplete.m_Mode & _
-                " anchor=" & ParentheticalAutocomplete.m_AnchorPos & _
-                " last=" & ParentheticalAutocomplete.m_LastSeenPos & _
-                " curPos=" & Selection.start & _
-                " typed=[" & ParentheticalAutocomplete.m_TypedSoFar & "]"
     OnSelectionChanged
     On Error GoTo 0
 End Sub
