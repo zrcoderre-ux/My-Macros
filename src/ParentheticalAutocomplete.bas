@@ -368,8 +368,13 @@ Public Sub AcceptOrEnter()
     If m_Mode <> MODE_NONE And m_MatchCount > 0 Then
         AcceptCurrentMatch
     Else
-        ' Default Enter behavior: new paragraph.
-        Selection.TypeParagraph
+        ' Delegate to the WrapCitations Enter handler, NOT a bare
+        ' TypeParagraph. Only one macro can own the Return key binding, and
+        ' this module registers after Module4's RegisterWrapKeyBindings at
+        ' startup, so this binding wins -- a bare TypeParagraph here silently
+        ' killed citation-wrap-on-Enter for the whole session. CheckAndWrapEnter
+        ' runs the wrap check and then types the paragraph itself.
+        WrapCitations.CheckAndWrapEnter
     End If
 End Sub
 
