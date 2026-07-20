@@ -165,16 +165,16 @@ Function PreProcessText(ByVal s As String) As String
     ' Detect format and measure sequential run from 1.
     ' fmtCode: 0=none 1="N. " 2="N." 3="N) " 4="(N) "
     ' -------------------------------------------------------
-    Dim fmtCode As Integer
+    Dim fmtCode As Long
     fmtCode = 0
-    Dim seqCount As Integer
+    Dim seqCount As Long
     seqCount = 0
 
-    Dim fmt As Integer
+    Dim fmt As Long
     For fmt = 1 To 4
-        Dim runLen As Integer
+        Dim runLen As Long
         runLen = 0
-        Dim n As Integer
+        Dim n As Long
         For n = 1 To 29
             If ListItemExists(s, n, fmt) Then
                 runLen = runLen + 1
@@ -199,7 +199,7 @@ Function PreProcessText(ByVal s As String) As String
     ' Replace largest numbers first to avoid substring collisions
     ' (e.g. replacing "1." before "10." would corrupt "10.").
     ' -------------------------------------------------------
-    Dim i As Integer
+    Dim i As Long
 
     If fmtCode <> 4 Then
         For n = seqCount To 1 Step -1
@@ -210,7 +210,7 @@ Function PreProcessText(ByVal s As String) As String
             Do
                 p = FindListItem(s, n, fmtCode, p)
                 If p = 0 Then Exit Do
-                Dim oldLen As Integer
+                Dim oldLen As Long
                 oldLen = ListItemLen(n, fmtCode)
                 s = Left(s, p - 1) & newMark & Mid(s, p + oldLen)
                 p = p + Len(newMark)
@@ -224,7 +224,7 @@ Function PreProcessText(ByVal s As String) As String
     ' -------------------------------------------------------
     Dim sepPositions() As Long
     ReDim sepPositions(seqCount - 2)
-    Dim sepCount As Integer
+    Dim sepCount As Long
     sepCount = 0
 
     For n = 2 To seqCount
@@ -239,7 +239,7 @@ Function PreProcessText(ByVal s As String) As String
     Next n
 
     ' Sort ascending (bubble sort — small array)
-    Dim j As Integer
+    Dim j As Long
     Dim tmp As Long
     For i = 0 To sepCount - 2
         For j = i + 1 To sepCount - 1
@@ -288,7 +288,7 @@ End Function
 '
 ' fmt: 1="N. "  2="N." (non-space after)  3="N) "  4="(N) "
 ' ============================================================
-Function ListItemExists(s As String, n As Integer, fmt As Integer) As Boolean
+Function ListItemExists(s As String, n As Long, fmt As Long) As Boolean
     ListItemExists = (FindListItem(s, n, fmt, 1) > 0)
 End Function
 
@@ -298,11 +298,11 @@ End Function
 ' at or after position [startPos] in [s].
 ' Returns the 1-based start position, or 0 if not found.
 ' ============================================================
-Function FindListItem(s As String, n As Integer, fmt As Integer, startPos As Long) As Long
+Function FindListItem(s As String, n As Long, fmt As Long, startPos As Long) As Long
     FindListItem = 0
     Dim numStr As String
     numStr = CStr(n)
-    Dim nLen As Integer
+    Dim nLen As Long
     nLen = Len(numStr)
 
     Dim srch As String
@@ -359,8 +359,8 @@ End Function
 ' Returns the character length of a list item marker for
 ' format [fmt] and number [n] (used during replacement).
 ' ============================================================
-Function ListItemLen(n As Integer, fmt As Integer) As Integer
-    Dim nLen As Integer
+Function ListItemLen(n As Long, fmt As Long) As Long
+    Dim nLen As Long
     nLen = Len(CStr(n))
     Select Case fmt
         Case 1: ListItemLen = nLen + 2   ' "N. "
@@ -488,9 +488,9 @@ Function TitleCaseString(inputText As String) As String
     Dim tokens() As String
     tokens = SplitPreserveAll(workText)
 
-    Dim i As Integer
-    Dim wordIndex As Integer
-    Dim totalWords As Integer
+    Dim i As Long
+    Dim wordIndex As Long
+    Dim totalWords As Long
 
     ' Count total word tokens to identify the last word
     totalWords = 0
@@ -514,11 +514,11 @@ Function TitleCaseString(inputText As String) As String
     Dim trailPunct As String
     Dim afterHyphen As Boolean
     Dim nextIsAct As Boolean
-    Dim ki As Integer
+    Dim ki As Long
     Dim kBare As String, klp As String, ktp As String
     Dim bwParts() As String
-    Dim bwIdx As Integer
-    Dim hypPos As Integer
+    Dim bwIdx As Long
+    Dim hypPos As Long
 
     For i = 0 To UBound(tokens)
         tok = tokens(i)
@@ -616,10 +616,10 @@ End Function
 Function SplitPreserveAll(s As String) As String()
     Dim result() As String
     ReDim result(0)
-    Dim count As Integer
+    Dim count As Long
     count = 0
 
-    Dim i As Integer
+    Dim i As Long
     Dim ch As String
     Dim current As String
     Dim inWhitespace As Boolean
@@ -676,7 +676,7 @@ End Function
 ' Returns True if the entire token is whitespace
 ' ============================================================
 Function IsWhitespaceToken(tok As String) As Boolean
-    Dim i As Integer
+    Dim i As Long
     For i = 1 To Len(tok)
         If Not IsWhitespaceChar(Mid(tok, i, 1)) Then
             IsWhitespaceToken = False
@@ -723,11 +723,11 @@ End Function
 ' ============================================================
 Function IsDottedAcronym(tok As String) As Boolean
     IsDottedAcronym = False
-    Dim n As Integer
+    Dim n As Long
     n = Len(tok)
     If n < 3 Then Exit Function  ' minimum: "A." or "A.B"
 
-    Dim i As Integer
+    Dim i As Long
     For i = 1 To n
         Dim ch As String
         ch = Mid(tok, i, 1)
@@ -767,7 +767,7 @@ Function IsAfterHyphen(tok As String, bareWord As String) As Boolean
     IsAfterHyphen = False
     If Len(bareWord) = 0 Then Exit Function
 
-    Dim pos As Integer
+    Dim pos As Long
     pos = InStr(LCase(tok), LCase(bareWord))
     If pos <= 1 Then Exit Function
 
@@ -807,7 +807,7 @@ End Function
 ' returns the canonical all-caps form; otherwise returns "".
 ' ============================================================
 Function MatchAcronym(word As String, lst() As String) As String
-    Dim i As Integer
+    Dim i As Long
     For i = 0 To UBound(lst)
         If LCase(word) = LCase(lst(i)) Then
             MatchAcronym = lst(i)
@@ -822,7 +822,7 @@ End Function
 ' Returns True if word (already lowercased) is in the array
 ' ============================================================
 Function IsInList(word As String, lst() As String) As Boolean
-    Dim i As Integer
+    Dim i As Long
     For i = 0 To UBound(lst)
         If word = lst(i) Then
             IsInList = True

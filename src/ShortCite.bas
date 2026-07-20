@@ -1312,7 +1312,11 @@ Private Sub ProcessParagraph(PARA As Paragraph, _
                     End If
                 Else
                     If cit.isCompound Then
-                        newTxt = "(" & BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, True, True, cit.bracketNote)
+                        ' isBare:=True only to suppress the wrapping parens
+                        ' (this caller adds its own); spellPages:=0 keeps the
+                        ' abbreviated "p." -- this is inside a citation
+                        ' parenthetical, not a textual bare supra.
+                        newTxt = "(" & BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, True, True, cit.bracketNote, 0)
                     Else
                         newTxt = BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, cit.isMidSentence, cit.isBare, cit.bracketNote)
                     End If
@@ -1535,7 +1539,12 @@ SCSupraDone:
                     scItWd = "Id."
                 End If
             Else
-                scNewTxt = BuildSupraStr(sC.signal, scSN, scRep, scPincite, sC.isMidSentence, sC.isBare, sC.bracketNote)
+                ' A compound entry carries isBare=True only to suppress the
+                ' wrapping parens; it sits INSIDE a citation parenthetical, so
+                ' force the abbreviated "p." (spellPages:=0) rather than the
+                ' textual "page" that true bare supras get.
+                scNewTxt = BuildSupraStr(sC.signal, scSN, scRep, scPincite, sC.isMidSentence, sC.isBare, sC.bracketNote, _
+                                          IIf(sC.isCompound, 0, -1))
                 scItWd = "supra"
             End If
 
@@ -2484,21 +2493,29 @@ Private Function BuildIdStr(pincite As String, isMidSentence As Boolean, Optiona
     BuildIdStr = "(" & core & ")"
 End Function
 
+' spellPages: -1 = follow isBare (default), 0 = force "p."/"pp.", 1 = force
+' "page"/"pages". Needed because isBare does double duty -- it suppresses the
+' wrapping parens AND selects the spelled-out page word. A compound entry
+' inside a citation parenthetical needs parens suppressed (the caller supplies
+' its own) but must keep the abbreviated "p." per CSM.
 Private Function BuildSupraStr(signal As String, _
                                 shortName As String, _
                                 reporter As String, _
                                 pincite As String, _
                                 isMidSentence As Boolean, _
                                 Optional isBare As Boolean = False, _
-                                Optional bracketNote As String = "") As String
+                                Optional bracketNote As String = "", _
+                                Optional spellPages As Integer = -1) As String
     Dim addPeriod As Boolean: addPeriod = (Not isMidSentence)
     Dim bn As String: bn = IIf(bracketNote <> "", " " & bracketNote, "")
     Dim core As String
     If pincite <> "" Then
         ' Bare (textual) supras spell out "page"/"pages" per CSM; parenthetical
         ' citation-sentence supras keep the abbreviated "p."/"pp.".
+        Dim bSpell As Boolean
+        If spellPages = -1 Then bSpell = isBare Else bSpell = (spellPages = 1)
         Dim pp As String
-        If isBare Then pp = PageWord(pincite) Else pp = PageOrPages(pincite)
+        If bSpell Then pp = PageWord(pincite) Else pp = PageOrPages(pincite)
         If addPeriod Then core = shortName & ", supra, " & reporter & " at " & pp & " " & pincite & bn & "." _
                      Else core = shortName & ", supra, " & reporter & " at " & pp & " " & pincite & bn
     Else
@@ -3490,7 +3507,7 @@ Private Function BuildSupraPattern() As String
         "\((?:(See generally |See also |But see |See |Cf\. |Accord |Contra ))?" & _
         "([A-Z][^);]*?),\s+supra,\s+" & _
         "(\d+\s+" & ReporterPattern() & ")" & _
-        "\s+at\s+pp?\.\s+" & _
+        "\s+at\s+(?:pp?\.|pages?)\s+" & _
         "(\d[\d\-,\s]*?)" & _
         "(\s*\[[\s\S]*?\])?" & _
         "(\.?)\)"
