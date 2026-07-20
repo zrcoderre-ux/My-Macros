@@ -100,6 +100,19 @@ Public Sub DeAnonymizeTentative()
     ' longer fake like "Barry Thorne" before that longer one is handled.
     SortMappingsByLenDesc maps, nMaps, True
 
+    ' Accidental-target check: de-anonymizing RE-anonymize output would put
+    ' the real names back into the shared clean copy. The automatic close
+    ' hook refuses such documents outright; the manual macro warns loudly
+    ' and defaults to No.
+    If LooksReAnonymized(oDoc) Then
+        If MsgBox("This document looks like RE-ANONYMIZE OUTPUT (the shared " & _
+                  "clean copy). De-anonymizing it will put the real names " & _
+                  "back into it." & vbCrLf & vbCrLf & _
+                  "Are you sure you want to continue?", _
+                  vbYesNo + vbExclamation + vbDefaultButton2, _
+                  "De-Anonymize") <> vbYes Then Exit Sub
+    End If
+
     If MsgBox("Restore real names using " & nMaps & " mapping(s) from:" & vbCrLf & vbCrLf & _
               keyPath & vbCrLf & vbCrLf & _
               "This replaces every pseudonym throughout the document with its " & _
@@ -265,6 +278,13 @@ Public Sub ReAnonymizeTentative()
     oDoc.AutoSaveOn = prevAutoSave
     On Error GoTo ErrH
 
+    ' Re-assert the output marker before the final save. It was already set
+    ' before SaveAs2, but this flag is the primary guard that keeps the close
+    ' hook from ever de-anonymizing this file -- if anything in between
+    ' (metadata stripping, a future edit to this Sub) wiped it, this puts it
+    ' back in the saved copy.
+    SetDocFlag oDoc, REANON_CREATED_VAR
+
     oDoc.Save
     Application.ScreenUpdating = True
 
@@ -334,7 +354,14 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     On Error Resume Next
     If Doc Is Nothing Then Exit Sub
     If HasDocFlag(Doc, DEANON_DONE_VAR) Then Exit Sub
-    If HasDocFlag(Doc, REANON_CREATED_VAR) Then Exit Sub
+
+    ' Re-anonymize output must NEVER be auto-restored: un-anonymizing the
+    ' shared clean copy on close would put real names back into the one file
+    ' that exists to not have them. LooksReAnonymized combines the document-
+    ' variable flag with flag-independent backstops (filename, blanked court
+    ' header), because RemoveDocumentInformation and non-Word round trips can
+    ' strip document variables.
+    If LooksReAnonymized(Doc) Then Exit Sub
 
     ' DocFolderLocal, not Doc.Path: for a synced OneDrive/SharePoint document
     ' Doc.Path is an https URL that FolderExists can't read, which silently
@@ -371,6 +398,49 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
 
     SetDocFlag Doc, DEANON_DONE_VAR
 End Sub
+
+' True when the document is (or very likely is) re-anonymize output. Three
+' independent signals, any one of which suffices:
+'   1. The MM_ReAnonymizeCreated document variable -- the primary marker.
+'   2. The filename contains "anonym" (the save dialog defaults to
+'      "Anonymized Draft.docx") -- survives even if the variables were
+'      stripped by RemoveDocumentInformation or a non-Word round trip.
+'   3. The court-identity header is BLANKED: a header that carries the
+'      "Judge:" label without the judge's name only comes out of
+'      re-anonymize's ApplyCourtIdentity blanking; the real template always
+'      has the name on the label. Content-based, so it survives any amount
+'      of metadata stripping or renaming.
+Private Function LooksReAnonymized(ByVal Doc As Document) As Boolean
+    On Error GoTo Assume                        ' fail CLOSED: unsure = re-anon
+    LooksReAnonymized = False
+
+    If HasDocFlag(Doc, REANON_CREATED_VAR) Then
+        LooksReAnonymized = True
+        Exit Function
+    End If
+
+    If InStr(1, Doc.name, "anonym", vbTextCompare) > 0 Then
+        LooksReAnonymized = True
+        Exit Function
+    End If
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In Doc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then
+                Dim t As String: t = hf.Range.text
+                If InStr(t, "Judge:") > 0 And InStr(t, "Alison Mackenzie") = 0 Then
+                    LooksReAnonymized = True    ' blanked header -> re-anon output
+                    Exit Function
+                End If
+            End If
+        Next hf
+    Next sec
+    Exit Function
+
+Assume:
+    LooksReAnonymized = True
+End Function
 
 ' --- Document flags, persisted as document variables inside the .docx --------
 Private Function HasDocFlag(ByVal Doc As Document, ByVal name As String) As Boolean
