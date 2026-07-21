@@ -66,6 +66,13 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 Private Const DEANON_DONE_VAR    As String = "MM_DeAnonymizeDone"
 Private Const REANON_CREATED_VAR As String = "MM_ReAnonymizeCreated"
 
+' Session latch: once re-anonymize runs, the automatic de-anonymize-on-close is
+' disabled for the REST OF THE WORD SESSION -- every document, no heuristics.
+' Per-document flags can in principle be stripped by metadata cleanup or a
+' non-Word round trip; this latch cannot, so the shared clean copy can never be
+' un-anonymized by a close in the same session that produced it.
+Private g_ReAnonThisSession As Boolean
+
 Private Type Mapping
     real As String
     fake As String
@@ -227,6 +234,10 @@ Public Sub ReAnonymizeTentative()
               "The original document on disk is left unchanged.", _
               vbYesNo + vbQuestion, "Re-Anonymize") <> vbYes Then Exit Sub
 
+    ' From this point on, no automatic de-anonymize for the rest of the Word
+    ' session (set even if the run errors out partway -- fail safe).
+    g_ReAnonThisSession = True
+
     Application.ScreenUpdating = False
 
     ' ORDER MATTERS: every scrub below runs IN MEMORY on the open document,
@@ -371,10 +382,12 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
 
     ' Re-anonymize output must NEVER be auto-restored: un-anonymizing the
     ' shared clean copy on close would put real names back into the one file
-    ' that exists to not have them. LooksReAnonymized combines the document-
-    ' variable flag with flag-independent backstops (filename, blanked court
-    ' header), because RemoveDocumentInformation and non-Word round trips can
-    ' strip document variables.
+    ' that exists to not have them. Two gates:
+    '   1. The session latch -- once re-anonymize has run in this Word
+    '      session, auto-restore is off for EVERY close until Word restarts.
+    '   2. LooksReAnonymized -- the per-document flag plus the filename, for
+    '      re-anonymize output opened in a LATER session.
+    If g_ReAnonThisSession Then Exit Sub
     If LooksReAnonymized(Doc) Then Exit Sub
 
     ' DocFolderLocal, not Doc.Path: for a synced OneDrive/SharePoint document
@@ -413,17 +426,16 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     SetDocFlag Doc, DEANON_DONE_VAR
 End Sub
 
-' True when the document is (or very likely is) re-anonymize output. Three
-' independent signals, any one of which suffices:
+' True when the document is re-anonymize output. Two EXACT signals only:
 '   1. The MM_ReAnonymizeCreated document variable -- the primary marker.
 '   2. The filename contains "anonym" (the save dialog defaults to
 '      "Anonymized Draft.docx") -- survives even if the variables were
 '      stripped by RemoveDocumentInformation or a non-Word round trip.
-'   3. The court-identity header is BLANKED: a header that carries the
-'      "Judge:" label without the judge's name only comes out of
-'      re-anonymize's ApplyCourtIdentity blanking; the real template always
-'      has the name on the label. Content-based, so it survives any amount
-'      of metadata stripping or renaming.
+' A blanked-header content heuristic used to be a third signal, but it false-
+' positived on ordinary documents (header text layout varies) and tripped the
+' manual-macro warning on every run, so it was removed. Same-session safety no
+' longer depends on this function at all -- g_ReAnonThisSession switches the
+' close hook off for the whole session the moment re-anonymize runs.
 Private Function LooksReAnonymized(ByVal Doc As Document) As Boolean
     On Error GoTo Assume                        ' fail CLOSED: unsure = re-anon
     LooksReAnonymized = False
@@ -435,21 +447,7 @@ Private Function LooksReAnonymized(ByVal Doc As Document) As Boolean
 
     If InStr(1, Doc.name, "anonym", vbTextCompare) > 0 Then
         LooksReAnonymized = True
-        Exit Function
     End If
-
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In Doc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then
-                Dim t As String: t = hf.Range.text
-                If InStr(t, "Judge:") > 0 And InStr(t, "Alison Mackenzie") = 0 Then
-                    LooksReAnonymized = True    ' blanked header -> re-anon output
-                    Exit Function
-                End If
-            End If
-        Next hf
-    Next sec
     Exit Function
 
 Assume:
