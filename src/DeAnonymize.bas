@@ -17,9 +17,12 @@ Attribute VB_Name = "DeAnonymize"
 '   DeAnonymizeTentative - locate the key, then replace every fake with its
 '                          real value throughout the document (in place).
 '   ReAnonymizeTentative - the reverse: replace every real value with its fake,
-'                          then save a metadata-free copy as a NEW document
-'                          (fresh file = no version history) so it is safe to
-'                          share. The original file is left unchanged.
+'                          then export the anonymized text as a NEW Markdown
+'                          (.md) file so it is safe to share. Nothing is ever
+'                          written back to the Word document: the real->fake
+'                          scrub runs in memory only (so italic cited authorities
+'                          can be detected), the body is read out as Markdown, and
+'                          the window is then reloaded from the untouched original.
 '
 ' NOTES:
 '   - The draft is a regular document (no live mail-merge fields): every value
@@ -194,7 +197,7 @@ ErrH:
 End Sub
 
 '==============================================================================
-' RE-ANONYMIZE  (reverse: real -> fake, saved as a clean new document)
+' RE-ANONYMIZE  (reverse: real -> fake, exported as a clean Markdown file)
 '==============================================================================
 Public Sub ReAnonymizeTentative()
     On Error GoTo ErrH
@@ -222,43 +225,37 @@ Public Sub ReAnonymizeTentative()
     ' longer full name before that longer one is handled.
     SortMappingsByLenDesc maps, nMaps, False
 
-    ' Choose where to save the clean copy BEFORE changing anything, so the run
-    ' can be cancelled with nothing touched. Give it a neutral default name so
-    ' the real party names are never carried in the filename.
+    ' Choose where to write the Markdown file BEFORE changing anything, so the
+    ' run can be cancelled with nothing touched. Give it a neutral default name
+    ' so the real party names are never carried in the filename.
     Dim savePath As String
     savePath = PickReAnonSavePath(oDoc)
     If Len(savePath) = 0 Then Exit Sub
 
-    If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save a " & _
-              "metadata-free copy to:" & vbCrLf & vbCrLf & savePath & vbCrLf & vbCrLf & _
-              "The original document on disk is left unchanged.", _
+    If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save an " & _
+              "anonymized Markdown file to:" & vbCrLf & vbCrLf & savePath & vbCrLf & vbCrLf & _
+              "The Word document is left unchanged -- only the .md file is written.", _
               vbYesNo + vbQuestion, "Re-Anonymize") <> vbYes Then Exit Sub
 
     ' From this point on, no automatic de-anonymize for the rest of the Word
-    ' session (set even if the run errors out partway -- fail safe).
+    ' session (set even if the run errors out partway -- fail safe). This also
+    ' keeps the close hook from firing when we discard the scratch edits below.
     g_ReAnonThisSession = True
 
     Application.ScreenUpdating = False
 
-    ' ORDER MATTERS: every scrub below runs IN MEMORY on the open document,
-    ' and only then is the result written out via SaveAs2. Saving first meant
-    ' version 1 of "Anonymized Draft.docx" hit the disk -- and any synced
-    ' OneDrive/SharePoint folder's server-side version history -- with every
-    ' real name still in it, where RemoveDocumentInformation can't reach.
-    ' The original FILE is still never written: AutoSave is disabled before
-    ' the first edit, and the only saves target savePath.
+    ' The real->fake scrub runs IN MEMORY on the open document ONLY -- so italic
+    ' cited authorities can be detected and preserved -- and the result is then
+    ' read out as Markdown. The Word file itself is NEVER written: AutoSave is
+    ' disabled before the first edit, no Save/SaveAs is ever issued, and the
+    ' in-memory edits are discarded at the end (the window is reloaded from the
+    ' untouched original on disk).
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
-    Dim prevAutoSave As Boolean: prevAutoSave = False
     On Error Resume Next
-    prevAutoSave = oDoc.AutoSaveOn
     oDoc.AutoSaveOn = False              ' must precede edits: AutoSave would
     On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
     Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
-
-    ' Clear any pink residual-pseudonym flags a prior de-anonymize left: they
-    ' mark exactly which tokens were fakes, which the shared copy must not show.
-    ClearResidualFlags oDoc
 
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
@@ -273,50 +270,58 @@ Public Sub ReAnonymizeTentative()
     Next i
 
     ' Blank the court-identity header (Department 515, judge, courtroom staff) so
-    ' the shared copy doesn't reveal them.
+    ' the shared copy doesn't reveal them. ApplyCourtIdentity also scrubs the
+    ' body, which is what the Markdown export reads.
     ApplyCourtIdentity oDoc, False
 
-    ' Strip metadata: comments, revisions, versions, and personal/document
-    ' information. Combined with the fresh file below, this leaves no trail back
-    ' to the real matter.
+    ' Read the now-anonymized body out as Markdown and write it to disk (UTF-8,
+    ' no BOM). This is the only file the macro writes.
+    Dim md As String
+    md = DocToMarkdown(oDoc)
+    WriteUtf8NoBom savePath, md
+
+    ' Discard the in-memory fake edits: reload the window from the untouched
+    ' original so the user is back on the real-names document and a stray Ctrl+S
+    ' can never push fakes into it. If the document was never saved to disk
+    ' (no path to reopen), leave the scratch window in place with AutoSave off
+    ' and warn instead.
+    Dim origPath As String: origPath = ""
     On Error Resume Next
-    oDoc.RemoveDocumentInformation wdRDIAll
+    If Len(oDoc.path) > 0 Then origPath = oDoc.FullName
     On Error GoTo ErrH
 
-    ' Mark as re-anonymize output so the close hook never tries to de-anonymize
-    ' it back to real names. Set before the save so it rides into the new file.
-    SetDocFlag oDoc, REANON_CREATED_VAR
-
-    ' First and only disk write: the fully scrubbed content.
-    oDoc.SaveAs2 FileName:=savePath, FileFormat:=wdFormatXMLDocument, _
-                 AddToRecentFiles:=False
-    ' oDoc is now bound to savePath; the original file was never written.
-
-    oDoc.TrackRevisions = prevTrack
-    On Error Resume Next
-    oDoc.AutoSaveOn = prevAutoSave
-    On Error GoTo ErrH
-
-    ' Re-assert the output marker before the final save. It was already set
-    ' before SaveAs2, but this flag is the primary guard that keeps the close
-    ' hook from ever de-anonymizing this file -- if anything in between
-    ' (metadata stripping, a future edit to this Sub) wiped it, this puts it
-    ' back in the saved copy.
-    SetDocFlag oDoc, REANON_CREATED_VAR
-
-    oDoc.Save
     Application.ScreenUpdating = True
 
+    Dim reloaded As Boolean: reloaded = False
+    If Len(origPath) > 0 Then
+        On Error Resume Next
+        oDoc.Close SaveChanges:=wdDoNotSaveChanges
+        Err.Clear
+        Documents.Open FileName:=origPath, AddToRecentFiles:=False
+        reloaded = (Err.Number = 0)
+        On Error GoTo 0
+    Else
+        oDoc.TrackRevisions = prevTrack     ' keep AutoSave OFF: window holds fakes
+    End If
+
+    Dim tail As String
+    If reloaded Then
+        tail = "Your Word window has been reloaded from the original file " & _
+               "(real names), which was never modified."
+    Else
+        tail = "This window still holds the re-anonymized (fake) content and was " & _
+               "NOT saved -- close it WITHOUT saving to discard those edits and " & _
+               "get back to the untouched original."
+    End If
+
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-           " value(s). The court-identity header (department, judge, staff) " & _
-           "was blanked." & vbCrLf & vbCrLf & _
+           " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
            "Names inside italic cited case names were left as-is so a party " & _
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
            vbCrLf & vbCrLf & _
-           "Saved a metadata-free copy to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
-           "This window is now that copy; the original file is unchanged.", _
-           vbInformation, "Re-Anonymize"
+           "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
+           tail, vbInformation, "Re-Anonymize"
     Exit Sub
 
 ErrH:
@@ -331,16 +336,17 @@ ErrH:
     Application.ScreenUpdating = True
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & reN & ": " & reD & vbCrLf & vbCrLf & _
-           "If the error happened before the save, this window holds partial " & _
-           "re-anonymize edits that were NOT saved anywhere -- close it " & _
-           "WITHOUT saving to get back to the untouched original. (AutoSave " & _
-           "was left off for the same reason.)", _
+           "If the error happened before the .md file was written, this window " & _
+           "may hold partial re-anonymize edits that were NOT saved anywhere -- " & _
+           "close it WITHOUT saving to get back to the untouched original. " & _
+           "(AutoSave was left off for the same reason.)", _
            vbExclamation, "Re-Anonymize"
 End Sub
 
-' Ask where to save the anonymized copy. Defaults to the document's folder with
-' a neutral name (so real party names aren't carried in the filename). Returns
-' "" if cancelled. Ensures a .docx extension.
+' Ask where to write the anonymized Markdown file. Defaults to the document's
+' folder with a neutral name (so real party names aren't carried in the
+' filename). Returns "" if cancelled. Always normalizes the result to a .md
+' extension -- the SaveAs dialog can otherwise append a Word extension.
 Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
     Dim folder As String
     folder = ""
@@ -350,21 +356,318 @@ Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
     If Len(folder) = 0 Then folder = Environ$("USERPROFILE") & "\Documents"
 
     Dim fd As FileDialog
+    Dim p As String
     Set fd = Application.FileDialog(msoFileDialogSaveAs)
     With fd
-        .Title = "Save the anonymized copy as"
-        .InitialFileName = folder & "\Anonymized Draft.docx"
+        .Title = "Save the anonymized Markdown file as"
+        .InitialFileName = folder & "\Anonymized Draft.md"
         If .Show <> -1 Then
             PickReAnonSavePath = ""
             Exit Function
         End If
-        PickReAnonSavePath = .SelectedItems(1)
+        p = .SelectedItems(1)
     End With
 
-    If LCase$(Right$(PickReAnonSavePath, 5)) <> ".docx" Then
-        PickReAnonSavePath = PickReAnonSavePath & ".docx"
+    ' Drop any extension the dialog tacked on (it defaults to a Word type), then
+    ' force .md, so the file is always written as Markdown.
+    Dim dotPos As Long: dotPos = InStrRev(p, ".")
+    Dim slashPos As Long: slashPos = InStrRev(p, "\")
+    If dotPos > slashPos And dotPos > 0 Then
+        Select Case LCase$(Mid$(p, dotPos + 1))
+            Case "md", "markdown", "docx", "doc", "dot", "dotx", "dotm", "txt", "rtf", "xml"
+                p = Left$(p, dotPos - 1)
+        End Select
+    End If
+    If LCase$(Right$(p, 3)) <> ".md" Then p = p & ".md"
+    PickReAnonSavePath = p
+End Function
+
+'==============================================================================
+' MARKDOWN EXPORT  (read the in-memory, already-anonymized body out as Markdown)
+'==============================================================================
+' Convert the document's main body to Markdown:
+'   - paragraph styles Heading 1..6 / Title  ->  # .. ###### / #
+'   - list paragraphs                        ->  "- " (bullet) or the number label
+'   - bold / italic runs                     ->  **bold**, *italic*, ***both***
+'   - footnote/endnote reference marks        ->  [^n], with the note texts
+'                                                 collected into a trailing block
+' Only the body is exported: headers/footers carry the court identity (already
+' blanked) and have no place in Markdown. Formatting Markdown can't express
+' (alignment, tab leaders in the caption, tables) is dropped but the text is
+' kept. Text boxes/shapes are not exported.
+Private Function DocToMarkdown(ByVal oDoc As Document) As String
+    Dim sb As String
+    Dim fnList As String            ' accumulates the "[^n]: ..." footnote block
+    Dim fnCount As Long: fnCount = 0
+    Dim firstBlock As Boolean: firstBlock = True
+
+    Dim p As Paragraph
+    For Each p In oDoc.content.Paragraphs
+        Dim line As String
+        line = ParagraphToMarkdown(oDoc, p, fnCount, fnList)
+        If Len(line) > 0 Then
+            If Not firstBlock Then sb = sb & vbCrLf & vbCrLf
+            sb = sb & line
+            firstBlock = False
+        End If
+    Next p
+
+    If Len(fnList) > 0 Then sb = sb & vbCrLf & vbCrLf & fnList
+
+    DocToMarkdown = sb & vbCrLf
+End Function
+
+' One body paragraph -> one Markdown block (or "" for an empty paragraph, which
+' just becomes block separation). List prefix wins over heading prefix.
+Private Function ParagraphToMarkdown(ByVal oDoc As Document, ByVal p As Paragraph, _
+                                     ByRef fnCount As Long, ByRef fnList As String) As String
+    ' Paragraph content without the trailing paragraph mark.
+    Dim wr As Range: Set wr = p.Range.Duplicate
+    If wr.Characters.count >= 1 Then wr.MoveEnd wdCharacter, -1
+
+    Dim inner As String
+    inner = InlineMarkdown(oDoc, wr, fnCount, fnList)
+    If Len(Trim$(inner)) = 0 Then Exit Function
+
+    ' List item?
+    Dim listPrefix As String: listPrefix = ""
+    On Error Resume Next
+    If p.Range.ListFormat.ListType <> wdListNoNumbering Then
+        If p.Range.ListFormat.ListType = wdListBullet Then
+            listPrefix = "- "
+        Else
+            Dim ls As String: ls = Trim$(p.Range.ListFormat.ListString)
+            If Len(ls) = 0 Then
+                listPrefix = "- "
+            ElseIf Right$(ls, 1) = "." Then
+                listPrefix = ls & " "
+            Else
+                listPrefix = ls & ". "
+            End If
+        End If
+    End If
+    On Error GoTo 0
+    If Len(listPrefix) > 0 Then
+        ParagraphToMarkdown = listPrefix & inner
+        Exit Function
+    End If
+
+    ParagraphToMarkdown = HeadingPrefix(p) & inner
+End Function
+
+' Map a Heading 1..6 / Title paragraph style to its Markdown "#" prefix (with a
+' trailing space); returns "" for body styles.
+Private Function HeadingPrefix(ByVal p As Paragraph) As String
+    Dim sName As String: sName = ""
+    On Error Resume Next
+    sName = p.Style                 ' a Style object's default property is NameLocal
+    On Error GoTo 0
+    sName = LCase$(Trim$(sName))
+
+    Dim level As Long: level = 0
+    If Left$(sName, 8) = "heading " Then
+        level = Val(Mid$(sName, 9))
+    ElseIf sName = "title" Then
+        level = 1
+    End If
+    If level < 1 Then Exit Function
+    If level > 6 Then level = 6
+    HeadingPrefix = String$(level, "#") & " "
+End Function
+
+' Inline formatting for one paragraph's content range. Uniform paragraphs (the
+' common case -- plain body prose) are wrapped at most once without walking; only
+' mixed-format paragraphs (an italic cited case name in a sentence) are walked
+' character by character.
+Private Function InlineMarkdown(ByVal oDoc As Document, ByVal wr As Range, _
+                                ByRef fnCount As Long, ByRef fnList As String) As String
+    Dim txt As String: txt = wr.text
+    If Len(txt) = 0 Then Exit Function
+
+    Dim boldUniform As Boolean, italicUniform As Boolean
+    boldUniform = (wr.Font.Bold <> wdUndefined)
+    italicUniform = (wr.Font.Italic <> wdUndefined)
+
+    If boldUniform And italicUniform Then
+        InlineMarkdown = Emph(MapText(oDoc, txt, fnCount, fnList), _
+                              (wr.Font.Bold = True), (wr.Font.Italic = True))
+    Else
+        InlineMarkdown = WalkRuns(oDoc, wr, fnCount, fnList)
     End If
 End Function
+
+' Walk a mixed-format range character by character, grouping consecutive
+' same-format characters into runs and wrapping each run in its emphasis markers.
+Private Function WalkRuns(ByVal oDoc As Document, ByVal wr As Range, _
+                          ByRef fnCount As Long, ByRef fnList As String) As String
+    Dim result As String, runText As String
+    Dim curB As Long, curI As Long
+    curB = -1: curI = -1                    ' -1 = no run started yet
+    Dim n As Long: n = wr.Characters.count
+    Dim i As Long
+    For i = 1 To n
+        Dim ch As Range: Set ch = wr.Characters(i)
+        Dim c As String: c = ch.text
+        If c = Chr$(2) Then                 ' footnote/endnote reference mark
+            If Len(runText) > 0 Then
+                result = result & Emph(runText, curB = 1, curI = 1)
+                runText = ""
+            End If
+            result = result & EmitNote(oDoc, fnCount, fnList)
+            curB = -1: curI = -1
+        Else
+            Dim b As Long, it As Long
+            b = IIf(ch.Font.Bold = True, 1, 0)
+            it = IIf(ch.Font.Italic = True, 1, 0)
+            If b <> curB Or it <> curI Then
+                If Len(runText) > 0 Then
+                    result = result & Emph(runText, curB = 1, curI = 1)
+                    runText = ""
+                End If
+                curB = b: curI = it
+            End If
+            runText = runText & MapChar(c)
+        End If
+    Next i
+    If Len(runText) > 0 Then result = result & Emph(runText, curB = 1, curI = 1)
+    WalkRuns = result
+End Function
+
+' Map a plain (single-format) text run to Markdown, translating footnote
+' reference marks and per-character specials.
+Private Function MapText(ByVal oDoc As Document, ByVal s As String, _
+                         ByRef fnCount As Long, ByRef fnList As String) As String
+    Dim res As String, i As Long
+    For i = 1 To Len(s)
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = Chr$(2) Then
+            res = res & EmitNote(oDoc, fnCount, fnList)
+        Else
+            res = res & MapChar(c)
+        End If
+    Next i
+    MapText = res
+End Function
+
+' Consume the next footnote/endnote reference (in document order): append its
+' text to the trailing block and return the "[^n]" inline marker.
+Private Function EmitNote(ByVal oDoc As Document, ByRef fnCount As Long, _
+                          ByRef fnList As String) As String
+    fnCount = fnCount + 1
+    Dim body As String: body = FlattenNote(NoteText(oDoc, fnCount))
+    If Len(fnList) > 0 Then fnList = fnList & vbCrLf
+    fnList = fnList & "[^" & fnCount & "]: " & body
+    EmitNote = "[^" & fnCount & "]"
+End Function
+
+' The text of the idx-th note, in document order. Footnotes are used when the
+' document has any; endnotes otherwise. (Mixed foot/endnotes -- rare here -- fall
+' back to the footnotes.)
+Private Function NoteText(ByVal oDoc As Document, ByVal idx As Long) As String
+    On Error Resume Next
+    If oDoc.Footnotes.count > 0 Then
+        If idx <= oDoc.Footnotes.count Then NoteText = oDoc.Footnotes(idx).Range.text
+    ElseIf oDoc.Endnotes.count > 0 Then
+        If idx <= oDoc.Endnotes.count Then NoteText = oDoc.Endnotes(idx).Range.text
+    End If
+End Function
+
+' Collapse a note's text to a single Markdown line (footnote defs are one line):
+' newlines/breaks become spaces, per-character specials are mapped, and nested
+' reference marks are dropped.
+Private Function FlattenNote(ByVal s As String) As String
+    Dim res As String, i As Long
+    For i = 1 To Len(s)
+        Dim c As String: c = Mid$(s, i, 1)
+        Select Case c
+            Case vbCr, vbLf, Chr$(11), Chr$(12): res = res & " "
+            Case Chr$(2):                        ' nested reference mark: drop
+            Case Else:                           res = res & MapChar(c)
+        End Select
+    Next i
+    FlattenNote = Trim$(res)
+End Function
+
+' Translate one Word character to its Markdown equivalent: escape the characters
+' Markdown treats as markup, and normalize Word's control characters.
+Private Function MapChar(ByVal c As String) As String
+    Select Case c
+        Case vbTab:     MapChar = " "                 ' avoid a stray code block
+        Case Chr$(11):  MapChar = "  " & vbCrLf       ' manual line break -> hard break
+        Case Chr$(12):  MapChar = vbCrLf & vbCrLf     ' page break -> blank line
+        Case Chr$(160): MapChar = " "                 ' non-breaking space
+        Case Chr$(31):  MapChar = ""                  ' optional hyphen
+        Case Chr$(30):  MapChar = "-"                 ' non-breaking hyphen
+        Case "\":       MapChar = "\\"
+        Case "`":       MapChar = "\`"
+        Case "*":       MapChar = "\*"
+        Case "_":       MapChar = "\_"
+        Case Else:      MapChar = c
+    End Select
+End Function
+
+' Wrap text in bold/italic markers, moving any leading/trailing whitespace
+' outside the markers so the emphasis parses. An all-whitespace or unformatted
+' run is returned unchanged.
+Private Function Emph(ByVal s As String, ByVal bold As Boolean, ByVal italic As Boolean) As String
+    If Len(s) = 0 Then Exit Function
+    Dim marker As String
+    If bold Then marker = marker & "**"
+    If italic Then marker = marker & "*"
+    If Len(marker) = 0 Then
+        Emph = s
+        Exit Function
+    End If
+
+    Dim iStart As Long, iEnd As Long
+    iStart = 1
+    Do While iStart <= Len(s)
+        If Not IsWs(Mid$(s, iStart, 1)) Then Exit Do
+        iStart = iStart + 1
+    Loop
+    If iStart > Len(s) Then                  ' all whitespace: nothing to emphasize
+        Emph = s
+        Exit Function
+    End If
+    iEnd = Len(s)
+    Do While iEnd >= 1
+        If Not IsWs(Mid$(s, iEnd, 1)) Then Exit Do
+        iEnd = iEnd - 1
+    Loop
+
+    Emph = Left$(s, iStart - 1) & marker & Mid$(s, iStart, iEnd - iStart + 1) & _
+           marker & Mid$(s, iEnd + 1)
+End Function
+
+Private Function IsWs(ByVal c As String) As Boolean
+    IsWs = (c = " " Or c = vbCr Or c = vbLf Or c = vbTab)
+End Function
+
+' Write text to disk as UTF-8 without a byte-order mark (plain Markdown tools can
+' choke on a BOM). ADODB.Stream writes a BOM, so we re-read the bytes past it and
+' save those to the file.
+Private Sub WriteUtf8NoBom(ByVal path As String, ByVal text As String)
+    Dim st As Object
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2                     ' adTypeText
+    st.Charset = "utf-8"
+    st.Open
+    st.WriteText text
+
+    st.Position = 0
+    st.Type = 1                     ' adTypeBinary
+    st.Position = 3                 ' skip the 3-byte UTF-8 BOM
+    Dim bytes As Variant: bytes = st.Read
+    st.Close
+
+    Dim bin As Object
+    Set bin = CreateObject("ADODB.Stream")
+    bin.Type = 1                    ' adTypeBinary
+    bin.Open
+    bin.Write bytes
+    bin.SaveToFile path, 2          ' adSaveCreateOverWrite
+    bin.Close
+End Sub
 
 '==============================================================================
 ' AUTOMATIC DE-ANONYMIZE ON CLOSE
@@ -1095,53 +1398,6 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
     End With
     HighlightExact = n
 End Function
-
-' Remove every pink residual-pseudonym flag from the document (body, headers/
-' footers, notes, text boxes). Run at the start of re-anonymize: surviving pink
-' highlights in the shared copy would advertise exactly which tokens were fakes.
-' Uses a highlight-seeking Find (fast) rather than walking Characters (O(n) COM
-' calls). Other highlight colors -- the user's yellow, the close-review's green/
-' turquoise -- are left alone.
-Private Sub ClearResidualFlags(ByVal oDoc As Document)
-    On Error Resume Next
-    ClearPinkInRange oDoc.content
-
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then ClearPinkInRange hf.Range
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then ClearPinkInRange hf.Range
-        Next hf
-    Next sec
-
-    If oDoc.Footnotes.count > 0 Then ClearPinkInRange oDoc.StoryRanges(wdFootnotesStory)
-    If oDoc.Endnotes.count > 0 Then ClearPinkInRange oDoc.StoryRanges(wdEndnotesStory)
-
-    Dim shp As Shape
-    For Each shp In oDoc.Shapes
-        If shp.TextFrame.HasText Then ClearPinkInRange shp.TextFrame.TextRange
-    Next shp
-End Sub
-
-Private Sub ClearPinkInRange(ByVal rng As Range)
-    On Error Resume Next
-    Dim r As Range: Set r = rng.Duplicate
-    With r.Find
-        .ClearFormatting
-        .text = ""
-        .Highlight = True
-        .Forward = True
-        .Wrap = wdFindStop
-        Do While .Execute
-            If r.HighlightColorIndex = wdPink Then r.HighlightColorIndex = wdNoHighlight
-            If r.End >= rng.End Then Exit Do
-            r.Collapse Direction:=wdCollapseEnd
-            r.End = rng.End
-        Loop
-    End With
-End Sub
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,
 ' entity/company words, street names, and city/locality names. Built in chunks
