@@ -18,11 +18,15 @@ Attribute VB_Name = "DeAnonymize"
 '                          real value throughout the document (in place).
 '   ReAnonymizeTentative - the reverse: replace every real value with its fake,
 '                          then export the anonymized text as a NEW Markdown
-'                          (.md) file so it is safe to share. Nothing is ever
-'                          written back to the Word document: the real->fake
-'                          scrub runs in memory only (so italic cited authorities
-'                          can be detected), the body is read out as Markdown, and
-'                          the window is then reloaded from the untouched original.
+'                          (.md) file so it is safe to share. Hyperlinks are
+'                          stripped (keeping their display text) before the
+'                          replacement pass, and the export's default filename
+'                          is the faked version of the document's own title.
+'                          Nothing is ever written back to the Word document:
+'                          the real->fake scrub runs in memory only (so italic
+'                          cited authorities can be detected), the body is read
+'                          out as Markdown, and the window is then reloaded from
+'                          the untouched original.
 '
 ' NOTES:
 '   - The draft is a regular document (no live mail-merge fields): every value
@@ -141,6 +145,13 @@ Public Sub DeAnonymizeTentative()
     On Error GoTo ErrH
     Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
 
+    ' Strip hyperlinks (keeping display text) before replacing: a fake name
+    ' inside a link's display text has survived a first replacement pass in
+    ' practice (e.g. a linked "(Surname Decl.)" record cite) and was only
+    ' caught on a re-run after the close review had removed the links. The
+    ' close review strips every link anyway, so do it up front here.
+    StripHyperlinksEverywhere oDoc
+
     ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
     ' document (dozens of terms, each many hits) into one custom undo record
     ' overflows and crashes Word. Word still records normal (multi-step) undo.
@@ -225,11 +236,29 @@ Public Sub ReAnonymizeTentative()
     ' longer full name before that longer one is handled.
     SortMappingsByLenDesc maps, nMaps, False
 
+    ' Word's Find can only search for terms up to 255 characters, so a longer
+    ' real value (a quoted block, a long address) can never be auto-replaced
+    ' and would survive into the shared copy. Warn BEFORE doing anything.
+    Dim nTooLong As Long, i As Long
+    For i = 1 To nMaps
+        If Len(maps(i).real) > 255 Then nTooLong = nTooLong + 1
+    Next i
+    If nTooLong > 0 Then
+        If MsgBox(nTooLong & " mapping(s) in the key have a real value longer " & _
+                  "than 255 characters, which Word's search cannot handle. " & _
+                  "Those values will NOT be replaced and would remain in the " & _
+                  "anonymized copy." & vbCrLf & vbCrLf & _
+                  "Continue anyway (and review the output for them manually)?", _
+                  vbYesNo + vbExclamation + vbDefaultButton2, _
+                  "Re-Anonymize") <> vbYes Then Exit Sub
+    End If
+
     ' Choose where to write the Markdown file BEFORE changing anything, so the
-    ' run can be cancelled with nothing touched. Give it a neutral default name
-    ' so the real party names are never carried in the filename.
+    ' run can be cancelled with nothing touched. Default the filename to the
+    ' FAKED version of the document's own title, so the export is recognizable
+    ' but carries pseudonyms, not real party names.
     Dim savePath As String
-    savePath = PickReAnonSavePath(oDoc)
+    savePath = PickReAnonSavePath(oDoc, maps, nMaps)
     If Len(savePath) = 0 Then Exit Sub
 
     If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save an " & _
@@ -257,11 +286,18 @@ Public Sub ReAnonymizeTentative()
     On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
     Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
 
+    ' Strip hyperlinks (keeping display text) before replacing and exporting:
+    ' link targets can carry real names/paths the Markdown must not contain,
+    ' and a real name inside a link's display text is replaced more reliably
+    ' once the link is gone. Runs on the in-memory scratch copy only -- the
+    ' original file (reloaded below) keeps its links.
+    StripHyperlinksEverywhere oDoc
+
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
     ' also names a published case isn't rewritten in the shared copy. No custom
     ' undo record (it overflows and crashes Word on large documents).
-    Dim distinctHits As Long, i As Long
+    Dim distinctHits As Long
     For i = 1 To nMaps
         If ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake, True) > 0 Then
             distinctHits = distinctHits + 1
@@ -292,15 +328,39 @@ Public Sub ReAnonymizeTentative()
 
     Application.ScreenUpdating = True
 
+    Dim closedOK As Boolean: closedOK = False
     Dim reloaded As Boolean: reloaded = False
     If Len(origPath) > 0 Then
+        ' The scratch copy is (typically) a dated OneDrive tentative, so this
+        ' Close would otherwise fire the close review in clsAppEvents -- a
+        ' surprise "Review document before closing?" prompt on the scrubbed
+        ' copy, and a "stay open" answer would cancel the close while we
+        ' report success. Suppress the review with the same flag the mail
+        ' merge uses. (g_ReAnonThisSession already suppresses the
+        ' de-anonymize half of that hook.)
+        modMain.gSkipCloseChecks = True
         On Error Resume Next
         oDoc.Close SaveChanges:=wdDoNotSaveChanges
         Err.Clear
-        Documents.Open FileName:=origPath, AddToRecentFiles:=False
-        reloaded = (Err.Number = 0)
+        ' Probe whether the close actually happened: touching a closed
+        ' Document object raises, so an error here means success.
+        Dim sProbe As String
+        sProbe = oDoc.name
+        closedOK = (Err.Number <> 0)
+        Err.Clear
+        modMain.gSkipCloseChecks = False
+        If closedOK Then
+            Documents.Open FileName:=origPath, AddToRecentFiles:=False
+            reloaded = (Err.Number = 0)
+        End If
         On Error GoTo 0
-    Else
+    End If
+
+    If Len(origPath) > 0 And Not closedOK Then
+        On Error Resume Next
+        oDoc.TrackRevisions = prevTrack     ' keep AutoSave OFF: window holds fakes
+        On Error GoTo 0
+    ElseIf Len(origPath) = 0 Then
         oDoc.TrackRevisions = prevTrack     ' keep AutoSave OFF: window holds fakes
     End If
 
@@ -308,6 +368,10 @@ Public Sub ReAnonymizeTentative()
     If reloaded Then
         tail = "Your Word window has been reloaded from the original file " & _
                "(real names), which was never modified."
+    ElseIf closedOK Then
+        tail = "The scratch window (fake names) was discarded, but the original " & _
+               "could not be reopened automatically -- open it yourself from:" & _
+               vbCrLf & origPath & vbCrLf & "It was never modified."
     Else
         tail = "This window still holds the re-anonymized (fake) content and was " & _
                "NOT saved -- close it WITHOUT saving to discard those edits and " & _
@@ -344,10 +408,14 @@ ErrH:
 End Sub
 
 ' Ask where to write the anonymized Markdown file. Defaults to the document's
-' folder with a neutral name (so real party names aren't carried in the
-' filename). Returns "" if cancelled. Always normalizes the result to a .md
-' extension -- the SaveAs dialog can otherwise append a Word extension.
-Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
+' folder and to the FAKED version of the document's own title (real values in
+' the filename replaced with their pseudonyms via the key), so the export is
+' recognizable without carrying real party names. Returns "" if cancelled.
+' Always normalizes the result to a .md extension -- the SaveAs dialog can
+' otherwise append a Word extension.
+Private Function PickReAnonSavePath(ByVal oDoc As Document, _
+                                     ByRef maps() As Mapping, _
+                                     ByVal nMaps As Long) As String
     Dim folder As String
     folder = ""
     On Error Resume Next
@@ -360,7 +428,7 @@ Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
     Set fd = Application.FileDialog(msoFileDialogSaveAs)
     With fd
         .Title = "Save the anonymized Markdown file as"
-        .InitialFileName = folder & "\Anonymized Draft.md"
+        .InitialFileName = folder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
         If .Show <> -1 Then
             PickReAnonSavePath = ""
             Exit Function
@@ -381,6 +449,106 @@ Private Function PickReAnonSavePath(ByVal oDoc As Document) As String
     If LCase$(Right$(p, 3)) <> ".md" Then p = p & ".md"
     PickReAnonSavePath = p
 End Function
+
+' The document's title (filename without extension) with every real value from
+' the key replaced by its fake, longest real first (the maps are already sorted
+' that way when this is called). Matching is case-insensitive and the fake is
+' recased to mirror the casing found, same as the body replacement. Characters
+' Windows forbids in filenames are folded to "-" as a safety net.
+Private Function FakedDocTitle(ByVal oDoc As Document, _
+                                ByRef maps() As Mapping, _
+                                ByVal nMaps As Long) As String
+    Dim t As String
+    t = "Anonymized Draft"            ' fallback for an unnamed document
+    On Error Resume Next
+    t = oDoc.name
+    On Error GoTo 0
+
+    Dim dotPos As Long: dotPos = InStrRev(t, ".")
+    If dotPos > 1 Then t = Left$(t, dotPos - 1)
+
+    Dim i As Long
+    For i = 1 To nMaps
+        t = ReplaceCIString(t, maps(i).real, maps(i).fake)
+    Next i
+
+    Dim k As Long, ch As String
+    For k = 1 To Len(t)
+        ch = Mid$(t, k, 1)
+        If InStr(1, "\/:*?""<>|", ch) > 0 Then Mid$(t, k, 1) = "-"
+    Next k
+
+    FakedDocTitle = Trim$(t)
+    If Len(FakedDocTitle) = 0 Then FakedDocTitle = "Anonymized Draft"
+End Function
+
+' Case-insensitive replace of every occurrence of findText in s, recasing the
+' replacement to mirror each occurrence's casing (via MatchCasing). Restarts
+' the scan after each inserted replacement so an inserted fake is never itself
+' rescanned.
+Private Function ReplaceCIString(ByVal s As String, _
+                                  ByVal findText As String, _
+                                  ByVal replaceText As String) As String
+    Dim res As String, pos As Long, hit As Long
+    res = "": pos = 1
+    If Len(findText) = 0 Then ReplaceCIString = s: Exit Function
+    Do
+        hit = InStr(pos, s, findText, vbTextCompare)
+        If hit = 0 Then
+            res = res & Mid$(s, pos)
+            Exit Do
+        End If
+        res = res & Mid$(s, pos, hit - pos) & _
+              MatchCasing(Mid$(s, hit, Len(findText)), replaceText)
+        pos = hit + Len(findText)
+    Loop
+    ReplaceCIString = res
+End Function
+
+'==============================================================================
+' HYPERLINK STRIPPING
+'==============================================================================
+' Remove every hyperlink, keeping its display text, from all the stories the
+' replacement pass touches. The body goes through Citation Linker's quiet
+' remover (which also resets the blue/underline link formatting); headers,
+' footers, notes, and text boxes are handled directly here. Motivation: a fake
+' name inside a link's display text has survived a replacement pass in practice
+' (a linked "(Surname Decl.)" record cite), and for the Markdown export the
+' link targets themselves can leak real names or file paths.
+Private Sub StripHyperlinksEverywhere(ByVal oDoc As Document)
+    On Error Resume Next
+
+    CitationLinker.RemoveAllHyperlinks_Quiet oDoc
+    Application.ScreenUpdating = False   ' the helper re-enables it on exit
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then StripHyperlinksInRange hf.Range
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then StripHyperlinksInRange hf.Range
+        Next hf
+    Next sec
+
+    If oDoc.Footnotes.count > 0 Then StripHyperlinksInRange oDoc.StoryRanges(wdFootnotesStory)
+    If oDoc.Endnotes.count > 0 Then StripHyperlinksInRange oDoc.StoryRanges(wdEndnotesStory)
+
+    Dim shp As Shape
+    For Each shp In oDoc.Shapes
+        If shp.TextFrame.HasText Then StripHyperlinksInRange shp.TextFrame.TextRange
+    Next shp
+End Sub
+
+' Delete the hyperlinks in one range, newest-index first (the collection
+' reindexes as links are deleted). Display text is retained.
+Private Sub StripHyperlinksInRange(ByVal rng As Range)
+    On Error Resume Next
+    Dim i As Long
+    For i = rng.Hyperlinks.count To 1 Step -1
+        rng.Hyperlinks(i).Delete
+    Next i
+End Sub
 
 '==============================================================================
 ' MARKDOWN EXPORT  (read the in-memory, already-anonymized body out as Markdown)
@@ -598,6 +766,8 @@ Private Function MapChar(ByVal c As String) As String
         Case Chr$(160): MapChar = " "                 ' non-breaking space
         Case Chr$(31):  MapChar = ""                  ' optional hyphen
         Case Chr$(30):  MapChar = "-"                 ' non-breaking hyphen
+        Case Chr$(1), Chr$(5), Chr$(19), Chr$(20), Chr$(21)
+            MapChar = ""    ' inline object / annotation / field control marks
         Case "\":       MapChar = "\\"
         Case "`":       MapChar = "\`"
         Case "*":       MapChar = "\*"
@@ -616,6 +786,18 @@ Private Function Emph(ByVal s As String, ByVal bold As Boolean, ByVal italic As 
     If italic Then marker = marker & "*"
     If Len(marker) = 0 Then
         Emph = s
+        Exit Function
+    End If
+
+    ' Markdown emphasis cannot span a blank line (MapChar turns a page break
+    ' into one): wrap each blank-line-separated piece separately.
+    If InStr(s, vbCrLf & vbCrLf) > 0 Then
+        Dim parts() As String, pi As Long
+        parts = Split(s, vbCrLf & vbCrLf)
+        For pi = LBound(parts) To UBound(parts)
+            parts(pi) = Emph(parts(pi), bold, italic)
+        Next pi
+        Emph = Join(parts, vbCrLf & vbCrLf)
         Exit Function
     End If
 
@@ -713,6 +895,11 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     prevAutoSave = Doc.AutoSaveOn
     Doc.AutoSaveOn = False
 
+    ' Strip hyperlinks first for the same reason as the manual macro: this
+    ' hook runs BEFORE the close review's own link removal, and a fake name
+    ' inside a link's display text has been missed on exactly this first pass.
+    StripHyperlinksEverywhere Doc
+
     Dim i As Long
     For i = 1 To nMaps
         ReplaceEverywhere Doc, maps(i).fake, maps(i).real
@@ -729,11 +916,16 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     SetDocFlag Doc, DEANON_DONE_VAR
 End Sub
 
-' True when the document is re-anonymize output. Two EXACT signals only:
-'   1. The MM_ReAnonymizeCreated document variable -- the primary marker.
-'   2. The filename contains "anonym" (the save dialog defaults to
-'      "Anonymized Draft.docx") -- survives even if the variables were
-'      stripped by RemoveDocumentInformation or a non-Word round trip.
+' True when the document is re-anonymize output. Three EXACT signals only:
+'   1. The MM_ReAnonymizeCreated document variable -- the primary marker
+'      (only present on legacy .docx output; the Markdown export carries no
+'      document variables).
+'   2. The filename contains "anonym" (legacy output, or a fallback title).
+'   3. The filename ends in .md/.markdown -- the export is now a Markdown file
+'      whose default name is the FAKED document title (which ends in the same
+'      date as the original), so a re-anonymized .md opened in Word would pass
+'      the close hook's dated-OneDrive gates with neither signal 1 nor 2 to
+'      protect it. The only dated .md in those folders is re-anonymize output.
 ' A blanked-header content heuristic used to be a third signal, but it false-
 ' positived on ordinary documents (header text layout varies) and tripped the
 ' manual-macro warning on every run, so it was removed. Same-session safety no
@@ -749,6 +941,12 @@ Private Function LooksReAnonymized(ByVal Doc As Document) As Boolean
     End If
 
     If InStr(1, Doc.name, "anonym", vbTextCompare) > 0 Then
+        LooksReAnonymized = True
+        Exit Function
+    End If
+
+    Dim nm As String: nm = LCase$(Doc.name)
+    If Right$(nm, 3) = ".md" Or Right$(nm, 9) = ".markdown" Then
         LooksReAnonymized = True
     End If
     Exit Function
@@ -1051,6 +1249,10 @@ Private Function ReplaceEverywhere(ByVal oDoc As Document, _
                                     Optional ByVal protectCitations As Boolean = False) As Long
     Dim total As Long: total = 0
     If Len(findText) = 0 Then Exit Function
+    ' Word's Find raises on search terms longer than 255 characters; under the
+    ' resume-next handling below that used to fall through in a dangerous state.
+    ' Skip such mappings outright (re-anonymize warns about them up front).
+    If Len(findText) > 255 Then Exit Function
 
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
 
@@ -1133,7 +1335,17 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .MatchCase = False
             .MatchWholeWord = whole
             .MatchWildcards = False
-            If Not .Execute Then Exit Do
+            ' Capture the result BEFORE testing it: this function runs under
+            ' On Error Resume Next, and an error raised inside the old
+            ' "If Not .Execute Then Exit Do" skipped the whole statement --
+            ' falling through to the replacement below with scan still
+            ' spanning the entire story, which would overwrite it wholesale.
+            Dim bHit As Boolean
+            bHit = False
+            Err.Clear
+            bHit = .Execute
+            If Err.Number <> 0 Then Err.Clear: Exit Do
+            If Not bHit Then Exit Do
         End With
         ' scan now spans the matched text. Skip it (leave the real name in place)
         ' when it sits in a cited authority -- italic text -- so re-anonymize
