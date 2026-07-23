@@ -844,12 +844,23 @@ End Sub
 
 Private Sub ResetLinkFormatting(ByVal rng As Range)
     On Error Resume Next
+
+    ' Code-section heading: the whole line is a code section on its own (e.g.
+    ' "Civil Code Section 1942.4"), optionally after a roman numeral + period
+    ' ("I. Civil Code Section 1942.4"). Such a heading is underlined, so APPLY
+    ' the underline to the (former) link and stop. This is the case the adjacency
+    ' check below can't catch -- a line that is ENTIRELY one linked code section
+    ' has no adjacent underlined character to key off, so the underline was lost.
+    If ParaIsCodeSectionHeading(rng) Then
+        rng.Font.Underline = wdUnderlineSingle
+        rng.Font.ColorIndex = wdAuto
+        Exit Sub
+    End If
+
     ' Clear the hyperlink style's underline -- but NOT when the link sat inside
     ' text that is itself underlined (an underlined section heading containing
     ' a code section). If a character adjacent to the former link is underlined,
-    ' the underline belongs to the surrounding text, so keep it. (A fully-linked
-    ' underlined heading is covered by the paragraph mark, which carries the
-    ' heading's formatting.)
+    ' the underline belongs to the surrounding text, so keep it.
     Dim keepUnderline As Boolean: keepUnderline = False
     Dim probe As Range
     If rng.start > 0 Then
@@ -867,6 +878,53 @@ Private Sub ResetLinkFormatting(ByVal rng As Range)
     If Not keepUnderline Then rng.Font.Underline = wdUnderlineNone
     rng.Font.ColorIndex = wdAuto
 End Sub
+
+
+' True when rng's paragraph is a standalone code-section heading: the whole
+' line, after an optional roman-numeral prefix, is a single code-section
+' citation and nothing else. Used to keep/apply the underline on such a heading
+' when its hyperlink is removed.
+Private Function ParaIsCodeSectionHeading(ByVal rng As Range) As Boolean
+    On Error Resume Next
+    Dim s As String
+    s = rng.Paragraphs(1).Range.text
+
+    ' Strip trailing paragraph/line/cell marks and spaces.
+    Do While Len(s) > 0
+        Dim c As String: c = Right$(s, 1)
+        If c = vbCr Or c = vbLf Or c = Chr$(11) Or c = Chr$(12) Or c = Chr$(7) Or c = " " Then
+            s = Left$(s, Len(s) - 1)
+        Else
+            Exit Do
+        End If
+    Loop
+    s = Trim$(s)
+    ' Headings are short; a length cap keeps a prose sentence that merely names
+    ' a section from ever qualifying.
+    If Len(s) = 0 Or Len(s) > 90 Then Exit Function
+
+    ParaIsCodeSectionHeading = IsCodeSectionHeadingText(s)
+End Function
+
+' Regex test: an entire line that is a code-section citation, optionally led by
+' a roman numeral + period. Accepts an optional code-name run ("Civil Code ",
+' "Code Civ. Proc., ") before the section marker (Section / Sec. / section
+' sign), then a section number with optional dotted parts and (a)(1)-style
+' subdivisions -- and NOTHING after it, so "Section 5 of the lease" (a sentence)
+' does not match. Case-insensitive.
+Private Function IsCodeSectionHeadingText(ByVal s As String) As Boolean
+    Static re As Object
+    If re Is Nothing Then
+        Set re = CreateObject("VBScript.RegExp")
+        re.IgnoreCase = True
+        re.Global = False
+        re.Pattern = "^(?:[IVXLCDM]{1,7}\.\s+)?" & _
+                     "(?:[A-Za-z][A-Za-z.,'&/ ]*\s)?" & _
+                     "(?:" & ChrW(167) & "|Section|Sec\.)\s*" & _
+                     "\d[\d.]*(?:\s*\([A-Za-z0-9]+\))*\.?$"
+    End If
+    IsCodeSectionHeadingText = re.Test(s)
+End Function
 
 
 ' Paragraph text without the trailing paragraph mark, used for BOTH the HTML
