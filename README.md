@@ -1,8 +1,8 @@
 # My_Macros
 
 VBA source for the Word macro template `My_Macros.dotm`, version-controlled as
-text and wired into the one-click GitHub auto-pull tool so editing a macro is as
-seamless as editing a Chrome extension.
+text and wired into the one-click GitHub auto-pull tool, so editing a macro is
+as seamless as editing a Chrome extension.
 
 ## The model
 
