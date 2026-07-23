@@ -453,11 +453,20 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     Dim tailStart As Long
     tailStart = CaseNameTailStart(s)   ' 1-based index where the non-italic tail begins
     If tailStart <= 1 Then
-        ' No case name inside the link. It may be a supra cite whose short name
-        ' sits just BEFORE the link (the linker anchors supra cites on the
-        ' reporter). Italicize that preceding short name.
-        ItalicizeSupraShortNameBefore disp
-        Exit Sub
+        ' No case-name tail (no "(year)" / ", supra" / " v. ") INSIDE the link.
+        ' Two supra shapes leave the short name outside that logic:
+        '  (a) the display IS the short name and ", supra, <reporter>" follows
+        '      OUTSIDE the link ("<link>Galleria Plus, Inc.</link>, supra,
+        '      179 Cal.App.4th at p. 538"). The Hyperlink style stripped the
+        '      short name's italic, so treat the whole display as the case name.
+        '  (b) the short name sits BEFORE the link (the linker anchored on the
+        '      reporter) -- italicize that preceding run.
+        If LinkFollowedBySupra(disp) Then
+            tailStart = Len(s) + 1        ' whole display is the case short name
+        Else
+            ItalicizeSupraShortNameBefore disp
+            Exit Sub
+        End If
     End If
 
     Dim m As Long
@@ -522,6 +531,29 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
         ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
     End If
 End Sub
+
+' True when the text immediately AFTER the link begins with ", supra" -- i.e.
+' the linked display is the case short name of a supra cite and the "supra,
+' <reporter>" tail follows outside the link. The comma may be inside or outside
+' the link, so leading whitespace, commas, non-breaking spaces, and the hidden
+' field-end control marks are skipped before the "supra" test.
+Private Function LinkFollowedBySupra(ByVal disp As Range) As Boolean
+    On Error Resume Next
+    Dim m As Long: m = disp.Characters.count
+    If m < 1 Then Exit Function
+    Dim aStart As Long: aStart = disp.Characters(m).End
+    Dim after As String
+    after = ActiveDocument.Range(aStart, aStart + 16).text
+    Do While Len(after) > 0
+        Dim c As String: c = Left$(after, 1)
+        If c = " " Or c = "," Or c = Chr$(160) Or AscW(c) <= 31 Then
+            after = Mid$(after, 2)
+        Else
+            Exit Do
+        End If
+    Loop
+    LinkFollowedBySupra = (LCase$(Left$(after, 5)) = "supra")
+End Function
 
 ' Italicize the short name of a supra cite that sits just BEFORE a linked
 ' reporter, e.g. the document reads "Rappleyea, supra, " and then the linked
