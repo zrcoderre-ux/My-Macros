@@ -236,35 +236,18 @@ Public Sub ReAnonymizeTentative()
     ' longer full name before that longer one is handled.
     SortMappingsByLenDesc maps, nMaps, False
 
-    ' Word's Find can only search for terms up to 255 characters, so a longer
-    ' real value (a quoted block, a long address) can never be auto-replaced
-    ' and would survive into the shared copy. Warn BEFORE doing anything.
-    Dim nTooLong As Long, i As Long
-    For i = 1 To nMaps
-        If Len(maps(i).real) > 255 Then nTooLong = nTooLong + 1
-    Next i
-    If nTooLong > 0 Then
-        If MsgBox(nTooLong & " mapping(s) in the key have a real value longer " & _
-                  "than 255 characters, which Word's search cannot handle. " & _
-                  "Those values will NOT be replaced and would remain in the " & _
-                  "anonymized copy." & vbCrLf & vbCrLf & _
-                  "Continue anyway (and review the output for them manually)?", _
-                  vbYesNo + vbExclamation + vbDefaultButton2, _
-                  "Re-Anonymize") <> vbYes Then Exit Sub
-    End If
+    Dim i As Long
 
-    ' Choose where to write the Markdown file BEFORE changing anything, so the
-    ' run can be cancelled with nothing touched. Default the filename to the
+    ' Run-and-done: no Save-As dialog and no confirmation. The .md is written
+    ' automatically next to the document (its local synced folder) under the
     ' FAKED version of the document's own title, so the export is recognizable
-    ' but carries pseudonyms, not real party names.
+    ' but carries pseudonyms, not real party names. DocFolderLocal maps a
+    ' SharePoint/OneDrive URL to the writable local sync folder; if the folder
+    ' can't be resolved (never-saved doc) it falls back to Documents.
     Dim savePath As String
-    savePath = PickReAnonSavePath(oDoc, maps, nMaps)
-    If Len(savePath) = 0 Then Exit Sub
-
-    If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save an " & _
-              "anonymized Markdown file to:" & vbCrLf & vbCrLf & savePath & vbCrLf & vbCrLf & _
-              "The Word document is left unchanged -- only the .md file is written.", _
-              vbYesNo + vbQuestion, "Re-Anonymize") <> vbYes Then Exit Sub
+    Dim outFolder As String: outFolder = DocFolderLocal(oDoc)
+    If Len(outFolder) = 0 Then outFolder = Environ$("USERPROFILE") & "\Documents"
+    savePath = outFolder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
 
     ' From this point on, no automatic de-anonymize for the rest of the Word
     ' session (set even if the run errors out partway -- fail safe). This also
@@ -416,49 +399,6 @@ ErrH:
            "(AutoSave was left off for the same reason.)", _
            vbExclamation, "Re-Anonymize"
 End Sub
-
-' Ask where to write the anonymized Markdown file. Defaults to the document's
-' folder and to the FAKED version of the document's own title (real values in
-' the filename replaced with their pseudonyms via the key), so the export is
-' recognizable without carrying real party names. Returns "" if cancelled.
-' Always normalizes the result to a .md extension -- the SaveAs dialog can
-' otherwise append a Word extension.
-Private Function PickReAnonSavePath(ByVal oDoc As Document, _
-                                     ByRef maps() As Mapping, _
-                                     ByVal nMaps As Long) As String
-    Dim folder As String
-    folder = ""
-    On Error Resume Next
-    folder = oDoc.path
-    On Error GoTo 0
-    If Len(folder) = 0 Then folder = Environ$("USERPROFILE") & "\Documents"
-
-    Dim fd As FileDialog
-    Dim p As String
-    Set fd = Application.FileDialog(msoFileDialogSaveAs)
-    With fd
-        .Title = "Save the anonymized Markdown file as"
-        .InitialFileName = folder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
-        If .Show <> -1 Then
-            PickReAnonSavePath = ""
-            Exit Function
-        End If
-        p = .SelectedItems(1)
-    End With
-
-    ' Drop any extension the dialog tacked on (it defaults to a Word type), then
-    ' force .md, so the file is always written as Markdown.
-    Dim dotPos As Long: dotPos = InStrRev(p, ".")
-    Dim slashPos As Long: slashPos = InStrRev(p, "\")
-    If dotPos > slashPos And dotPos > 0 Then
-        Select Case LCase$(Mid$(p, dotPos + 1))
-            Case "md", "markdown", "docx", "doc", "dot", "dotx", "dotm", "txt", "rtf", "xml"
-                p = Left$(p, dotPos - 1)
-        End Select
-    End If
-    If LCase$(Right$(p, 3)) <> ".md" Then p = p & ".md"
-    PickReAnonSavePath = p
-End Function
 
 ' The document's title (filename without extension) with every real value from
 ' the key replaced by its fake, longest real first (the maps are already sorted
@@ -839,7 +779,23 @@ End Function
 ' choke on a BOM). ADODB.Stream writes a BOM, so we re-read the bytes past it and
 ' save those to the file.
 Private Sub WriteUtf8NoBom(ByVal path As String, ByVal text As String)
-    Dim st As Object
+    ' ADODB.Stream can only write to a local/UNC path. Catch a URL (or a missing
+    ' folder) here and raise a plain-English error instead of a bare 3004.
+    If LCase$(Left$(path, 7)) = "http://" Or LCase$(Left$(path, 8)) = "https://" Then
+        Err.Raise vbObjectError + 3004, "WriteUtf8NoBom", _
+            "Cannot write to a cloud URL: " & path & vbCrLf & _
+            "Choose a local folder for the .md file."
+    End If
+    Dim parent As String
+    Dim sl As Long: sl = InStrRev(path, "\")
+    If sl > 0 Then parent = Left$(path, sl - 1)
+    If Len(parent) > 0 And Dir$(parent, vbDirectory) = "" Then
+        Err.Raise vbObjectError + 3004, "WriteUtf8NoBom", _
+            "The target folder does not exist:" & vbCrLf & parent
+    End If
+
+    Dim st As Object, bin As Object
+    On Error GoTo Fail
     Set st = CreateObject("ADODB.Stream")
     st.Type = 2                     ' adTypeText
     st.Charset = "utf-8"
@@ -850,15 +806,23 @@ Private Sub WriteUtf8NoBom(ByVal path As String, ByVal text As String)
     st.Type = 1                     ' adTypeBinary
     st.Position = 3                 ' skip the 3-byte UTF-8 BOM
     Dim bytes As Variant: bytes = st.Read
-    st.Close
+    st.Close: Set st = Nothing
 
-    Dim bin As Object
     Set bin = CreateObject("ADODB.Stream")
     bin.Type = 1                    ' adTypeBinary
     bin.Open
     bin.Write bytes
     bin.SaveToFile path, 2          ' adSaveCreateOverWrite
-    bin.Close
+    bin.Close: Set bin = Nothing
+    Exit Sub
+
+Fail:
+    Dim n As Long, d As String: n = Err.Number: d = Err.Description
+    On Error Resume Next
+    If Not st Is Nothing Then st.Close
+    If Not bin Is Nothing Then bin.Close
+    On Error GoTo 0
+    Err.Raise n, "WriteUtf8NoBom", d
 End Sub
 
 '==============================================================================
