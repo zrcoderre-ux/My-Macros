@@ -830,22 +830,15 @@ Private Sub LinkOrphanSupraCites(ByVal doc As Document, ByRef keep() As CiteRow,
             url = UrlForReporterVol(repVol, keep)
             If Len(url) = 0 Then GoTo NextMatch
 
-            ' Link from the "supra" signal through the pincite, so the hyperlink
-            ' is continuous with no gap before the reporter. Only the APPLIED
-            ' span is widened -- the URL is still resolved from the reporter
-            ' volume alone (UrlForReporterVol above). Drop the leading ", "
-            ' connective so the link starts cleanly at "supra".
+            ' Link the ENTIRE matched span -- the leading ", " connective, the
+            ' "supra" signal, and the reporter through the pincite -- so the
+            ' hyperlink is continuous with no gap after the short name. The match
+            ' starts at the comma before "supra" (pattern ",\s+supra,\s+..."), so
+            ' mm.Value already includes that comma and space. Only the APPLIED
+            ' span is widened; the URL is still resolved from the reporter volume
+            ' alone (UrlForReporterVol above).
             Dim linkText As String
-            Dim sp As Long
-            sp = InStr(1, mm.Value, "supra", vbTextCompare)
-            If sp > 0 Then
-                linkText = Mid$(mm.Value, sp)
-            Else
-                Dim vp As Long
-                vp = InStr(mm.Value, repVol)
-                If vp = 0 Then GoTo NextMatch
-                linkText = Mid$(mm.Value, vp)
-            End If
+            linkText = mm.Value
 
             LinkTextIfUnlinked p.Range, linkText, url, added
 NextMatch:
