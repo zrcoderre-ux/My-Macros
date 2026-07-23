@@ -421,6 +421,23 @@ End Function
 Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String) As Boolean
     On Error GoTo Fail
 
+    ' Never start a citation link at the citation sentence's outer "(" (or a
+    ' leading "[", quote, or space). The literal-text fallback in particular can
+    ' hand us a range that begins with "(" -- e.g. "(Commodore Home Systems,
+    ' Inc. v. Superior Court ...". Trim any such leading characters off the
+    ' anchor so the hyperlink begins at the case name.
+    On Error Resume Next
+    Do While rng.Characters.count > 1
+        Dim fch As String: fch = rng.Characters(1).text
+        If fch = "(" Or fch = "[" Or fch = " " Or fch = Chr$(160) _
+           Or fch = ChrW$(8220) Or fch = ChrW$(8216) Or fch = Chr$(34) Then
+            rng.MoveStart wdCharacter, 1
+        Else
+            Exit Do
+        End If
+    Loop
+    On Error GoTo Fail
+
     Dim h As Hyperlink
     Set h = ActiveDocument.Hyperlinks.Add(Anchor:=rng, Address:=url, _
         ScreenTip:=Left$(SCREENTIP_PREFIX & typ & " | " & url, 255))
@@ -534,6 +551,29 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     If extendedBack Then
         ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
     End If
+
+    ' When the whole supra cite is one link ("Galleria Plus, Inc., supra, 179
+    ' Cal.App.4th at p. 538"), the case-name run above ends at ", supra"; also
+    ' italicize the "supra" word so only the reporter stays roman. No-op when
+    ' there is no ", supra" in the display.
+    ItalicizeSupraWordInDisplay disp
+End Sub
+
+' Italicize a "supra" signal that appears inside the display AFTER the case name
+' ("<name>, supra, <reporter>"). The clean-slate above left it roman; this adds
+' the italic so the reporter alone stays roman. No-op when the display has no
+' ", supra".
+Private Sub ItalicizeSupraWordInDisplay(ByVal disp As Range)
+    On Error Resume Next
+    Dim s As String: s = disp.text
+    Dim cp As Long: cp = InStr(1, s, ", supra", vbTextCompare)
+    If cp < 1 Then Exit Sub
+    Dim sp As Long: sp = cp + 2                  ' 1-based index of "supra" (after ", ")
+    Dim m As Long: m = disp.Characters.count
+    If sp < 1 Or sp > m Then Exit Sub
+    Dim endIdx As Long: endIdx = sp + 4          ' "supra" is 5 characters
+    If endIdx > m Then endIdx = m
+    ActiveDocument.Range(disp.Characters(sp).start, disp.Characters(endIdx).End).Font.Italic = True
 End Sub
 
 ' True when the text immediately AFTER the link begins with ", supra" -- i.e.
@@ -830,15 +870,21 @@ Private Sub LinkOrphanSupraCites(ByVal doc As Document, ByRef keep() As CiteRow,
             url = UrlForReporterVol(repVol, keep)
             If Len(url) = 0 Then GoTo NextMatch
 
-            ' Link the ENTIRE matched span -- the leading ", " connective, the
-            ' "supra" signal, and the reporter through the pincite -- so the
-            ' hyperlink is continuous with no gap after the short name. The match
-            ' starts at the comma before "supra" (pattern ",\s+supra,\s+..."), so
-            ' mm.Value already includes that comma and space. Only the APPLIED
-            ' span is widened; the URL is still resolved from the reporter volume
-            ' alone (UrlForReporterVol above).
+            ' Link the ENTIRE supra cite as one hyperlink -- the case short name,
+            ' the ", supra" connective, and the reporter through the pincite. The
+            ' regex match starts at the ", supra" comma; walk back through the raw
+            ' paragraph text to the start of the short name and link from there.
+            ' Only the APPLIED span is widened -- the URL is still resolved from
+            ' the reporter volume alone (UrlForReporterVol above). Falls back to
+            ' the match alone when no short name is found.
+            Dim matchStart As Long: matchStart = mm.FirstIndex + 1   ' 1-based, at the "," of ", supra"
+            Dim nameStart As Long: nameStart = SupraShortNameStart(raw, matchStart)
             Dim linkText As String
-            linkText = mm.Value
+            If nameStart > 0 And nameStart < matchStart Then
+                linkText = Mid$(raw, nameStart, matchStart + Len(mm.Value) - nameStart)
+            Else
+                linkText = mm.Value
+            End If
 
             LinkTextIfUnlinked p.Range, linkText, url, added
 NextMatch:
@@ -846,6 +892,73 @@ NextMatch:
 NextPara:
     Next p
 End Sub
+
+
+' Given the raw paragraph text and the 1-based index of the ", supra" comma,
+' return the 1-based index where the case SHORT NAME begins, so the orphan-supra
+' link can start there -- or 0 to NOT extend (link from ", supra" only).
+'
+' The short name is delimited only when it sits behind a STRUCTURAL boundary:
+' an opening "(" / "[" (the citation sentence's outer paren, never linked), or a
+' ")" / "]" / ";" that closes a prior clause or citation -- exactly the
+' parenthetical and string-cite shapes where supra cites live. A ". " boundary
+' is deliberately NOT used: it can't be told apart from "v." or "Inc." inside a
+' case name, and walking through open prose would swallow preceding words ("The
+' court in Grand Terrace, supra..." -> the whole phrase). When no structural
+' boundary is found before the paragraph start, return 0 so the link falls back
+' to starting at ", supra" -- a smaller span is far safer than a wrong one.
+Private Function SupraShortNameStart(ByVal raw As String, ByVal commaPos As Long) As Long
+    Dim nameEnd As Long: nameEnd = commaPos - 1
+    Do While nameEnd >= 1 And Mid$(raw, nameEnd, 1) = " ": nameEnd = nameEnd - 1
+    Loop
+    If nameEnd < 1 Then Exit Function
+
+    Dim k As Long: k = nameEnd
+    Dim foundBoundary As Boolean: foundBoundary = False
+    Do While k >= 1
+        Dim ch As String: ch = Mid$(raw, k, 1)
+        If ch = "(" Or ch = ")" Or ch = "[" Or ch = "]" Or ch = ";" Then
+            foundBoundary = True
+            Exit Do
+        End If
+        k = k - 1
+    Loop
+    If Not foundBoundary Then Exit Function          ' no structural delimiter -> don't extend
+    Dim nameStart As Long: nameStart = k + 1
+
+    ' Skip leading spaces and citation signal words -- lowercase in running text
+    ' ("see Galleria...") or Capitalized in a parenthetical ("(See Galleria...")
+    ' -- so the link starts at the capitalized case name, not the signal.
+    Do
+        Do While nameStart <= nameEnd And Mid$(raw, nameStart, 1) = " ": nameStart = nameStart + 1
+        Loop
+        If nameStart > nameEnd Then Exit Function
+        Dim wEnd As Long: wEnd = nameStart
+        Do While wEnd <= nameEnd And Mid$(raw, wEnd, 1) <> " ": wEnd = wEnd + 1
+        Loop
+        Dim word As String: word = LCase$(Mid$(raw, nameStart, wEnd - nameStart))
+        Do While Len(word) > 0 And (Right$(word, 1) = "," Or Right$(word, 1) = ".")
+            word = Left$(word, Len(word) - 1)
+        Loop
+        If IsCiteSignalWord(word) Then
+            nameStart = wEnd            ' skip the signal word, keep scanning
+        Else
+            Exit Do
+        End If
+    Loop
+    If nameStart > nameEnd Then Exit Function
+    SupraShortNameStart = nameStart
+End Function
+
+' A leading citation signal word (case-insensitive, trailing punctuation already
+' stripped) that precedes a case name and should stay OUT of the hyperlink.
+Private Function IsCiteSignalWord(ByVal w As String) As Boolean
+    Select Case w
+        Case "see", "also", "generally", "cf", "accord", "contra", "but", _
+             "compare", "e.g", "eg"
+            IsCiteSignalWord = True
+    End Select
+End Function
 
 
 ' Return the URL of the linked full cite whose text contains reporter volume
