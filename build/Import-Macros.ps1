@@ -19,6 +19,10 @@
         the user closed/crashed Word during the pull) -> automatically retry the
         build in a fresh private headless Word so the on-disk .dotm still gets
         rebuilt; the user just restarts Word to pick it up.
+      - BACKGROUND Word (window closed but WINWORD.EXE lingering -- a pending
+        OnTime timer, or a leaked automation instance) holds the template lock
+        and blocks the rebuild -> such no-window ghosts are terminated up front.
+        A real, visible session is never killed (its add-in is unloaded instead).
 
     The build TARGET is the file Word actually loads: the copy in
     %AppData%\Microsoft\Word\STARTUP. The repo's src\ is the source. Override
@@ -64,6 +68,30 @@ function Test-DeadCom {
         $ex = $ex.InnerException
     }
     return ("$errRec" -match 'RPC server is unavailable|remote procedure call failed|disconnected from its clients|0x800706BA|0x800706BE|0x80010108')
+}
+
+# ---------------------------------------------------------------------------
+# Terminate BACKGROUND Word processes -- a WINWORD.EXE with no visible main
+# window (MainWindowHandle == 0). These are ghosts: a session whose window was
+# closed but whose process lingered (a pending Application.OnTime timer or a
+# leaked automation instance -- including our own headless build if it once
+# failed to quit). A ghost keeps the STARTUP template locked, so the rebuild
+# can't open it. A REAL, visible Word session (MainWindowHandle != 0) is never
+# touched here -- that one is handled by unloading its add-in below.
+#
+# Returns $true if it killed anything (so the caller can wait for the OS to
+# release the file handle before proceeding).
+# ---------------------------------------------------------------------------
+function Stop-GhostWord {
+    $ghosts = @(Get-Process -Name WINWORD -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowHandle.ToInt64() -eq 0 })
+    if ($ghosts.Count -eq 0) { return $false }
+    Write-Host "  [macros] closing $($ghosts.Count) background Word process(es) that were holding the file lock ..." -ForegroundColor DarkGray
+    foreach ($g in $ghosts) {
+        try { $g.Kill() } catch {}
+    }
+    try { $ghosts | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+    return $true
 }
 
 # ---------------------------------------------------------------------------
@@ -168,6 +196,10 @@ function Invoke-TemplateRebuild {
 
     return $didBootstrap
 }
+
+# Clear any lingering background Word first, so it can't hold the template lock
+# through the rebuild. A real, visible session is left alone (attached below).
+if (Stop-GhostWord) { Start-Sleep -Milliseconds 700 }
 
 # --- Attach to a running Word, or start our own headless one ---------------
 $word = $null; $startedWord = $false
