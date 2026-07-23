@@ -464,6 +464,10 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
         If LinkFollowedBySupra(disp) Then
             tailStart = Len(s) + 1        ' whole display is the case short name
         Else
+            ' The link may begin with the "supra" signal (the orphan-supra
+            ' linker pulls "supra" into the link so there's no gap). Italicize
+            ' that "supra" inside the link, and the case short name before it.
+            ItalicizeLeadingSupra disp
             ItalicizeSupraShortNameBefore disp
             Exit Sub
         End If
@@ -555,11 +559,42 @@ Private Function LinkFollowedBySupra(ByVal disp As Range) As Boolean
     LinkFollowedBySupra = (LCase$(Left$(after, 5)) = "supra")
 End Function
 
-' Italicize the short name of a supra cite that sits just BEFORE a linked
-' reporter, e.g. the document reads "Rappleyea, supra, " and then the linked
-' "8 Cal.4th at p. 982". The short name is outside the hyperlink, so it is a
-' plain document range (no field-boundary quirk). Only called when the in-link
-' logic found nothing, so it never disturbs cites handled inside the link.
+' When a supra cite's link display begins with the "supra" signal (the orphan-
+' supra linker pulls "supra" into the link so the hyperlink is continuous),
+' italicize just that "supra" word inside the link -- the reporter that follows
+' stays roman, matching legal style. No-op unless the display leads with "supra".
+Private Sub ItalicizeLeadingSupra(ByVal disp As Range)
+    On Error Resume Next
+    Dim s As String: s = disp.text
+    Dim m As Long: m = disp.Characters.count
+    If m < 1 Then Exit Sub
+
+    Dim p As Long: p = InStr(1, s, "supra", vbTextCompare)
+    If p < 1 Or p > m Then Exit Sub
+    ' Only the LEADING signal counts -- nothing but a comma/space may precede it.
+    If Len(Trim$(Replace(Left$(s, p - 1), ",", ""))) > 0 Then Exit Sub
+
+    Dim endIdx As Long: endIdx = p + 4               ' "supra" is 5 characters
+    If endIdx > m Then endIdx = m
+
+    ' Clean slate across the display (extend one back into the field separator),
+    ' then italicize only the "supra" run.
+    ActiveDocument.Range(disp.Characters(1).start - 1, disp.Characters(m).End).Font.Italic = False
+    Dim startPos As Long: startPos = disp.Characters(p).start
+    Dim extendedBack As Boolean: extendedBack = (p = 1)
+    If extendedBack Then startPos = startPos - 1
+    ActiveDocument.Range(startPos, disp.Characters(endIdx).End).Font.Italic = True
+    If extendedBack Then
+        ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
+    End If
+End Sub
+
+' Italicize the short name of a supra cite that sits just BEFORE the link, e.g.
+' the document reads "Rappleyea, supra, " and then the link (which now includes
+' the "supra" signal, "supra, 8 Cal.4th at p. 982"). The short name is outside
+' the hyperlink, so it is a plain document range (no field-boundary quirk). Only
+' called when the in-link logic found nothing, so it never disturbs cites handled
+' inside the link.
 Private Sub ItalicizeSupraShortNameBefore(ByVal disp As Range)
     On Error Resume Next
     Dim linkStart As Long: linkStart = disp.start
@@ -571,23 +606,39 @@ Private Sub ItalicizeSupraShortNameBefore(ByVal disp As Range)
     Dim b As String: b = ActiveDocument.Range(base, linkStart).text
     If Len(b) = 0 Then Exit Sub
 
-    ' The text right before the link must end with "..., supra" (ignoring any
-    ' trailing spaces / comma the link itself doesn't include).
+    ' This must be a supra context. The document reads "<short name>, supra,
+    ' <reporter>"; depending on where the link starts, the text before it ends
+    ' either with "..., supra" (link anchored on the reporter) or with "..., "
+    ' (link now includes "supra"). Confirm via one of those two signals so this
+    ' never italicizes the tail of an ordinary preceding sentence.
+    Dim leadSupra As Boolean
+    Dim dLead As String: dLead = disp.text
+    Do While Len(dLead) > 0
+        Dim dc As String: dc = Left$(dLead, 1)
+        If dc = " " Or dc = "," Then dLead = Mid$(dLead, 2) Else Exit Do
+    Loop
+    leadSupra = (LCase$(Left$(dLead, 5)) = "supra")
+
     Dim t As String: t = b
     Do While Len(t) > 0
         Dim last As String: last = Right$(t, 1)
         If last = " " Or last = "," Then t = Left$(t, Len(t) - 1) Else Exit Do
     Loop
-    If Len(t) < 5 Then Exit Sub
-    If LCase$(Right$(t, 5)) <> "supra" Then Exit Sub
+    Dim beforeSupra As Boolean: beforeSupra = (Len(t) >= 5 And LCase$(Right$(t, 5)) = "supra")
 
-    ' The comma separating the short name from ", supra".
-    Dim supraPos As Long: supraPos = Len(t) - 4      ' 1-based start of "supra" in b
-    Dim j As Long: j = supraPos - 1
-    Do While j >= 1 And Mid$(b, j, 1) = " ": j = j - 1
-    Loop
-    If j >= 1 And Mid$(b, j, 1) = "," Then j = j - 1 Else Exit Sub
-    Dim nameEnd As Long: nameEnd = j                 ' last char of the short name
+    If Not leadSupra And Not beforeSupra Then Exit Sub
+
+    ' If "supra" trails the before-text (it's outside the link), drop it and its
+    ' comma so we land on the short name -- same landing as the in-link case.
+    If beforeSupra Then
+        t = Left$(t, Len(t) - 5)
+        Do While Len(t) > 0
+            Dim l2 As String: l2 = Right$(t, 1)
+            If l2 = " " Or l2 = "," Then t = Left$(t, Len(t) - 1) Else Exit Do
+        Loop
+    End If
+    If Len(t) = 0 Then Exit Sub
+    Dim nameEnd As Long: nameEnd = Len(t)            ' last char of the short name (index in b)
 
     ' Walk back to the start of the short name: stop at "(", ";", or a sentence
     ' boundary ". ".
@@ -779,14 +830,22 @@ Private Sub LinkOrphanSupraCites(ByVal doc As Document, ByRef keep() As CiteRow,
             url = UrlForReporterVol(repVol, keep)
             If Len(url) = 0 Then GoTo NextMatch
 
-            ' Link the reporter through the pincite pages -- the whole match with
-            ' the leading ", supra, " connective dropped. Taken from the matched
-            ' text itself so it reproduces the document's exact punctuation.
-            Dim vp As Long
-            vp = InStr(mm.Value, repVol)
-            If vp = 0 Then GoTo NextMatch
+            ' Link from the "supra" signal through the pincite, so the hyperlink
+            ' is continuous with no gap before the reporter. Only the APPLIED
+            ' span is widened -- the URL is still resolved from the reporter
+            ' volume alone (UrlForReporterVol above). Drop the leading ", "
+            ' connective so the link starts cleanly at "supra".
             Dim linkText As String
-            linkText = Mid$(mm.Value, vp)
+            Dim sp As Long
+            sp = InStr(1, mm.Value, "supra", vbTextCompare)
+            If sp > 0 Then
+                linkText = Mid$(mm.Value, sp)
+            Else
+                Dim vp As Long
+                vp = InStr(mm.Value, repVol)
+                If vp = 0 Then GoTo NextMatch
+                linkText = Mid$(mm.Value, vp)
+            End If
 
             LinkTextIfUnlinked p.Range, linkText, url, added
 NextMatch:
