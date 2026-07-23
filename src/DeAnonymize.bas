@@ -271,6 +271,16 @@ Public Sub ReAnonymizeTentative()
     ' keeps the close hook from firing when we discard the scratch edits below.
     g_ReAnonThisSession = True
 
+    ' Save the user's pending edits FIRST, while the document still holds only
+    ' real-name content. The run ends by discarding the scratch window and
+    ' reloading the original from disk, so anything unsaved would otherwise be
+    ' lost -- this saves it so the user doesn't have to remember to. Safe: no
+    ' fake content exists yet. Skipped for a never-saved document (nothing to
+    ' save to) and if the doc is unchanged.
+    On Error Resume Next
+    If Len(oDoc.path) > 0 And Not oDoc.Saved Then oDoc.Save
+    On Error GoTo ErrH
+
     Application.ScreenUpdating = False
 
     ' The real->fake scrub runs IN MEMORY on the open document ONLY -- so italic
