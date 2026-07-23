@@ -844,7 +844,27 @@ End Sub
 
 Private Sub ResetLinkFormatting(ByVal rng As Range)
     On Error Resume Next
-    rng.Font.Underline = wdUnderlineNone
+    ' Clear the hyperlink style's underline -- but NOT when the link sat inside
+    ' text that is itself underlined (an underlined section heading containing
+    ' a code section). If a character adjacent to the former link is underlined,
+    ' the underline belongs to the surrounding text, so keep it. (A fully-linked
+    ' underlined heading is covered by the paragraph mark, which carries the
+    ' heading's formatting.)
+    Dim keepUnderline As Boolean: keepUnderline = False
+    Dim probe As Range
+    If rng.start > 0 Then
+        Set probe = rng.Duplicate
+        probe.SetRange rng.start - 1, rng.start
+        If probe.Font.Underline <> wdUnderlineNone And _
+           probe.Font.Underline <> wdUndefined Then keepUnderline = True
+    End If
+    If Not keepUnderline Then
+        Set probe = rng.Duplicate
+        probe.SetRange rng.End, rng.End + 1
+        If probe.Font.Underline <> wdUnderlineNone And _
+           probe.Font.Underline <> wdUndefined Then keepUnderline = True
+    End If
+    If Not keepUnderline Then rng.Font.Underline = wdUnderlineNone
     rng.Font.ColorIndex = wdAuto
 End Sub
 
