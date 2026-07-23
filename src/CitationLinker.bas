@@ -936,11 +936,11 @@ Private Function SupraShortNameStart(ByVal raw As String, ByVal commaPos As Long
         Dim wEnd As Long: wEnd = nameStart
         Do While wEnd <= nameEnd And Mid$(raw, wEnd, 1) <> " ": wEnd = wEnd + 1
         Loop
-        Dim word As String: word = LCase$(Mid$(raw, nameStart, wEnd - nameStart))
-        Do While Len(word) > 0 And (Right$(word, 1) = "," Or Right$(word, 1) = ".")
-            word = Left$(word, Len(word) - 1)
+        Dim tok As String: tok = LCase$(Mid$(raw, nameStart, wEnd - nameStart))
+        Do While Len(tok) > 0 And (Right$(tok, 1) = "," Or Right$(tok, 1) = ".")
+            tok = Left$(tok, Len(tok) - 1)
         Loop
-        If IsCiteSignalWord(word) Then
+        If IsCiteSignalWord(tok) Then
             nameStart = wEnd            ' skip the signal word, keep scanning
         Else
             Exit Do
