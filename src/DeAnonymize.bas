@@ -320,42 +320,11 @@ Public Sub ReAnonymizeTentative()
     ' body, which is what the Markdown export reads.
     ApplyCourtIdentity oDoc, False
 
-    ' Generic court-personnel scrub, ported from PDF-Linker's
-    ' register_court_names: role labels ("Judicial Assistant: <name>", "Deputy
-    ' Clerk: ...", "Court Reporter: ..."), judicial titles ("Hon. / Judge /
-    ' Justice <name>"), and label-anchored department numbers ("Department 515",
-    ' "Dept. 72") are blanked WHOEVER is named -- nothing is hard-coded, so a
-    ' new assistant, a different judge, or a body-text mention in a form the
-    ' exact-string pass doesn't know is still caught.
-    ScrubCourtIdentityGeneric oDoc
-
-    ' Leak gate, ported from PDF-Linker's quarantine rule (a leaked real value
-    ' is worse than an aborted run): if any real value from the key survived
-    ' outside a protected italic citation, warn BEFORE anything is written and
-    ' let the run be aborted with nothing on disk.
-    Dim nLeaks As Long, sLeakList As String
-    nLeaks = CountRealLeaks(oDoc, maps, nMaps, sLeakList)
-    Dim bWriteExport As Boolean: bWriteExport = True
-    If nLeaks > 0 Then
-        If MsgBox("WARNING: " & nLeaks & " occurrence(s) of real value(s) from " & _
-                  "the key are STILL PRESENT after replacement:" & vbCrLf & vbCrLf & _
-                  sLeakList & vbCrLf & _
-                  "(Real names inside italic cited case names are exempt and " & _
-                  "not counted.)" & vbCrLf & vbCrLf & _
-                  "Write the anonymized export anyway?", _
-                  vbYesNo + vbExclamation + vbDefaultButton2, _
-                  "Re-Anonymize") <> vbYes Then
-            bWriteExport = False
-        End If
-    End If
-
     ' Read the now-anonymized body out as Markdown and write it to disk (UTF-8,
     ' no BOM). This is the only file the macro writes.
     Dim md As String
-    If bWriteExport Then
-        md = DocToMarkdown(oDoc)
-        WriteUtf8NoBom savePath, md
-    End If
+    md = DocToMarkdown(oDoc)
+    WriteUtf8NoBom savePath, md
 
     ' Discard the in-memory fake edits: reload the window from the untouched
     ' original so the user is back on the real-names document and a stray Ctrl+S
@@ -419,21 +388,14 @@ Public Sub ReAnonymizeTentative()
                "get back to the untouched original."
     End If
 
-    If bWriteExport Then
-        MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-               " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
-               "Names inside italic cited case names were left as-is so a party " & _
-               "surname that also names a published case wasn't rewritten -- check " & _
-               "any italicized cites if a real party name should have been replaced." & _
-               vbCrLf & vbCrLf & _
-               "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
-               tail, vbInformation, "Re-Anonymize"
-    Else
-        MsgBox "Re-anonymize ABORTED at the leak check: nothing was written to " & _
-               "disk." & vbCrLf & vbCrLf & _
-               "Fix the key (add the missing variant rows) and run again." & _
-               vbCrLf & vbCrLf & tail, vbExclamation, "Re-Anonymize"
-    End If
+    MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
+           " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
+           "Names inside italic cited case names were left as-is so a party " & _
+           "surname that also names a published case wasn't rewritten -- check " & _
+           "any italicized cites if a real party name should have been replaced." & _
+           vbCrLf & vbCrLf & _
+           "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
+           tail, vbInformation, "Re-Anonymize"
     Exit Sub
 
 ErrH:
@@ -1568,180 +1530,6 @@ Private Function RangeContains(ByVal rng As Range, ByVal s As String) As Boolean
         .MatchWildcards = False
         RangeContains = .Execute
     End With
-End Function
-
-'==============================================================================
-' GENERIC COURT-PERSONNEL SCRUB  (ported from PDF-Linker register_court_names)
-'==============================================================================
-' Blank court-identity values by PATTERN rather than by exact string, so the
-' scrub works whoever is named:
-'   - role labels:   "Judicial Assistant: <Name Words>" -> "Judicial Assistant:"
-'   - judicial titles: "Hon./Honorable/Judge/Justice/Commissioner <Name Words>"
-'                      -> the title alone (title kept, name blanked)
-'   - department numbers, label-anchored: "Department 515" -> "Department",
-'     "Dept. 72" -> "Dept." (a bare number elsewhere is never touched)
-' Runs across the same stories the replacement pass covers. Over-blanking a
-' following capitalized word (e.g. "Judge Presiding" -> "Judge") is accepted:
-' for anonymity, blanking too much is the safe direction.
-Private Sub ScrubCourtIdentityGeneric(ByVal oDoc As Document)
-    On Error Resume Next
-    ScrubCourtInRange oDoc.content
-
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then ScrubCourtInRange hf.Range
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then ScrubCourtInRange hf.Range
-        Next hf
-    Next sec
-
-    If oDoc.Footnotes.count > 0 Then ScrubCourtInRange oDoc.StoryRanges(wdFootnotesStory)
-    If oDoc.Endnotes.count > 0 Then ScrubCourtInRange oDoc.StoryRanges(wdEndnotesStory)
-
-    Dim shp As Shape
-    For Each shp In oDoc.Shapes
-        If shp.TextFrame.HasText Then ScrubCourtInRange shp.TextFrame.TextRange
-    Next shp
-End Sub
-
-Private Sub ScrubCourtInRange(ByVal rng As Range)
-    On Error Resume Next
-    ' One capitalized name word (letters, apostrophes -- straight and curly --
-    ' and hyphens), for the wildcard patterns below.
-    Dim nm As String
-    nm = "[A-Z][a-zA-Z'" & ChrW(8217) & "-]@"
-
-    ' Department / courtroom numbers, label-anchored.
-    WildcardBlankInRange rng, "Department No. [0-9]{1,3}", "Department"
-    WildcardBlankInRange rng, "Department [0-9]{1,3}", "Department"
-    WildcardBlankInRange rng, "DEPARTMENT [0-9]{1,3}", "DEPARTMENT"
-    WildcardBlankInRange rng, "Dept. [0-9]{1,3}", "Dept."
-    WildcardBlankInRange rng, "Dept [0-9]{1,3}", "Dept"
-
-    ' Role labels: blank 1-3 capitalized name words after the label. Longest
-    ' first so a two-word name isn't half-eaten by the one-word pattern.
-    Dim labels As Variant
-    labels = Array("Judge:", "Judicial Assistant:", "Courtroom Assistant:", _
-                   "Courtroom Clerk:", "Court Clerk:", "Deputy Clerk:", _
-                   "Court Reporter:", "Bailiff:", "Court Attendant:", _
-                   "Research Attorney:", "Law Clerk:")
-    Dim i As Long, k As Long
-    For i = LBound(labels) To UBound(labels)
-        For k = 3 To 1 Step -1
-            WildcardBlankInRange rng, CStr(labels(i)) & NameWordsPattern(nm, k), CStr(labels(i))
-        Next k
-    Next i
-
-    ' Judicial titles anywhere in the text: keep the title, blank the name.
-    Dim titles As Variant
-    titles = Array("Honorable", "Hon.", "Judge", "Justice", "Commissioner")
-    For i = LBound(titles) To UBound(titles)
-        For k = 3 To 1 Step -1
-            WildcardBlankInRange rng, CStr(titles(i)) & NameWordsPattern(nm, k), CStr(titles(i))
-        Next k
-    Next i
-End Sub
-
-' " <name> <name> ..." -- k space-separated capitalized-name-word patterns.
-Private Function NameWordsPattern(ByVal nm As String, ByVal k As Long) As String
-    Dim s As String, i As Long
-    For i = 1 To k
-        s = s & " " & nm
-    Next i
-    NameWordsPattern = s
-End Function
-
-Private Sub WildcardBlankInRange(ByVal rng As Range, ByVal findPat As String, _
-                                  ByVal repl As String)
-    On Error Resume Next
-    Dim r As Range: Set r = rng.Duplicate
-    With r.Find
-        .ClearFormatting
-        .Replacement.ClearFormatting
-        .text = findPat
-        .Replacement.text = repl
-        .Forward = True
-        .Wrap = wdFindStop
-        .MatchWildcards = True
-        .Execute Replace:=wdReplaceAll
-    End With
-End Sub
-
-'==============================================================================
-' LEAK SCAN  (ported from PDF-Linker's quarantine/LEAK machinery)
-'==============================================================================
-' Count occurrences of the key's REAL values still present after the real->fake
-' pass -- each one is a would-be leak in the shared export. Matches inside
-' italic text are exempt (protected citations, mirroring the replacement pass's
-' protectCitations). Fills sList with up to 8 offending values for the dialog.
-Private Function CountRealLeaks(ByVal oDoc As Document, ByRef maps() As Mapping, _
-                                 ByVal nMaps As Long, ByRef sList As String) As Long
-    Dim total As Long, i As Long, nDistinct As Long
-    sList = ""
-    For i = 1 To nMaps
-        Dim n As Long: n = 0
-        n = n + LeaksInRange(oDoc.content, maps(i).real)
-
-        Dim sec As Section, hf As HeaderFooter
-        For Each sec In oDoc.Sections
-            For Each hf In sec.Headers
-                If hf.Exists Then n = n + LeaksInRange(hf.Range, maps(i).real)
-            Next hf
-            For Each hf In sec.Footers
-                If hf.Exists Then n = n + LeaksInRange(hf.Range, maps(i).real)
-            Next hf
-        Next sec
-
-        On Error Resume Next
-        If oDoc.Footnotes.count > 0 Then n = n + LeaksInRange(oDoc.StoryRanges(wdFootnotesStory), maps(i).real)
-        If oDoc.Endnotes.count > 0 Then n = n + LeaksInRange(oDoc.StoryRanges(wdEndnotesStory), maps(i).real)
-        Dim shp As Shape
-        For Each shp In oDoc.Shapes
-            If shp.TextFrame.HasText Then n = n + LeaksInRange(shp.TextFrame.TextRange, maps(i).real)
-        Next shp
-        On Error GoTo 0
-
-        If n > 0 Then
-            total = total + n
-            nDistinct = nDistinct + 1
-            If nDistinct <= 8 Then
-                sList = sList & "  - " & maps(i).real & "  (" & n & ")" & vbCrLf
-            End If
-        End If
-    Next i
-    If nDistinct > 8 Then
-        sList = sList & "  ...and " & (nDistinct - 8) & " more value(s)" & vbCrLf
-    End If
-    CountRealLeaks = total
-End Function
-
-' Occurrences of realText in one range, skipping italic (protected) matches.
-Private Function LeaksInRange(ByVal rng As Range, ByVal realText As String) As Long
-    On Error Resume Next
-    Dim n As Long: n = 0
-    If Len(realText) = 0 Then Exit Function
-    Dim scan As Range: Set scan = rng.Duplicate
-    Do
-        With scan.Find
-            .ClearFormatting
-            .Replacement.ClearFormatting
-            .text = realText
-            .Replacement.text = ""
-            .Forward = True
-            .Wrap = wdFindStop
-            .MatchCase = False
-            .MatchWholeWord = ShouldWholeWord(realText)
-            .MatchWildcards = False
-            If Not .Execute Then Exit Do
-        End With
-        If Not (scan.Font.Italic = True) Then n = n + 1
-        scan.Collapse Direction:=wdCollapseEnd
-        scan.End = rng.End
-        If scan.start >= rng.End Then Exit Do
-    Loop
-    LeaksInRange = n
 End Function
 
 '==============================================================================
