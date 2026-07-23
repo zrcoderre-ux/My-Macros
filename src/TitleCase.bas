@@ -102,8 +102,21 @@ Sub ApplyTitleCase()
     Selection.Collapse wdCollapseEnd
 
 CleanUp:
+    ' Capture the error before cleanup (Err is cleared by On Error Resume
+    ' Next), close the undo record, then report any real error instead of
+    ' swallowing it silently.
+    Dim lErrNum As Long, sErrDesc As String
+    lErrNum = Err.Number
+    sErrDesc = Err.Description
     On Error Resume Next
     oUndo.EndCustomRecord
+    On Error GoTo 0
+
+    If lErrNum <> 0 Then
+        MsgBox "Title Case hit an error and stopped:" & vbCrLf & vbCrLf & _
+               "Error " & lErrNum & ": " & sErrDesc, _
+               vbExclamation, "Title Case"
+    End If
     Exit Sub
 
 NoClipboard:
@@ -461,8 +474,13 @@ Function TitleCaseString(inputText As String) As String
     acronyms(13) = "FEHA"
 
     ' --- Protect "et seq." (case-insensitive) by substituting a placeholder ---
+    ' The placeholder is a SINGLE token the casing engine cannot alter: the
+    ' leading digit makes the UCase(Left$(...)) capitalization a no-op, and the
+    ' all-lowercase body survives both the shouldCap and LCase branches, so the
+    ' restore's binary InStr always finds it (even when "et seq." is the last
+    ' word and the first/last-word rule fires).
     Dim etSeqPlaceholder As String
-    etSeqPlaceholder = "et seq"
+    etSeqPlaceholder = "9927etseq"
     Dim workText As String
     workText = inputText
     Dim esPos As Long
@@ -542,7 +560,13 @@ Function TitleCaseString(inputText As String) As String
             Dim shouldCap As Boolean
             Dim newBare As String
 
-            If acronymMatch <> "" Then
+            If IsDottedAcronym(bareWord) Then
+                ' Dotted acronym (e.g. "U.S" after its final period was
+                ' stripped into trailPunct, or "L.A.M.C"): preserve the
+                ' original casing exactly; lead/trail punctuation is
+                ' reattached below as usual.
+                newBare = bareWord
+            ElseIf acronymMatch <> "" Then
                 ' Protected acronym: preserve all-caps form, skip all other rules
                 newBare = acronymMatch
             Else
@@ -596,14 +620,17 @@ Function TitleCaseString(inputText As String) As String
         End If
     Next i
 
-    ' --- Restore "et seq." placeholder ---
+    ' --- Restore the placeholder back to "et seq." ---
+    ' Each placeholder occurrence is replaced by "et seq."; the scan resumes
+    ' just past the restored text (Len("et seq.") characters on), which stays
+    ' correct regardless of the placeholder's length.
     Dim finalResult As String
     finalResult = result
     Dim rp As Long
     rp = InStr(finalResult, etSeqPlaceholder)
     Do While rp > 0
         finalResult = Left(finalResult, rp - 1) & "et seq." & Mid(finalResult, rp + Len(etSeqPlaceholder))
-        rp = InStr(rp + 7, finalResult, etSeqPlaceholder)
+        rp = InStr(rp + Len("et seq."), finalResult, etSeqPlaceholder)
     Loop
 
     TitleCaseString = finalResult
@@ -697,11 +724,9 @@ Function StripPunctuation(tok As String, ByRef leadPunct As String, ByRef trailP
     Dim s As String
     s = tok
 
-    ' Dotted acronym like L.A.M.C. or L.A.M.C — return as-is.
-    If IsDottedAcronym(s) Then
-        StripPunctuation = s
-        Exit Function
-    End If
+    ' NOTE: dotted acronyms are detected by the CALLER on the stripped bare
+    ' word (see TitleCaseString), so tokens like "(U.S." strip normally here
+    ' and the acronym check still succeeds on the bare "U.S" core.
 
     Do While Len(s) > 0 And Not IsLetterOrDigit(Left(s, 1))
         leadPunct = leadPunct & Left(s, 1)
@@ -718,14 +743,17 @@ End Function
 
 
 ' ============================================================
-' Returns True if the token looks like a dotted acronym,
-' e.g. L.A.M.C. or U.S.A or F.E.H.A.
+' Returns True if the token looks like a dotted acronym:
+' alternating single letter + period, with the trailing period
+' optional, e.g. "U.S.", "U.S", "L.A.M.C.", "L.A.M.C".
+' The caller passes the STRIPPED bare word, so the final period
+' may already have been moved into trailPunct.
 ' ============================================================
 Function IsDottedAcronym(tok As String) As Boolean
     IsDottedAcronym = False
     Dim n As Long
     n = Len(tok)
-    If n < 3 Then Exit Function  ' minimum: "A." or "A.B"
+    If n < 3 Then Exit Function  ' minimum: "A.B" (or "U.S" with dot stripped)
 
     Dim i As Long
     For i = 1 To n

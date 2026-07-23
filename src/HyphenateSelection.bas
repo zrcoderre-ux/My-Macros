@@ -5,11 +5,16 @@ Sub HyphenateSelection()
         Exit Sub
     End If
     Dim s As String
+    Dim sTail As String
     s = Selection.text
-    ' Trim trailing space if the selection grabbed one
+    ' Peel off trailing spaces the selection grabbed so they aren't
+    ' hyphenated, but keep them: the replacement overwrites the FULL
+    ' selection, and dropping them fused the result with the next word.
+    sTail = ""
     Do While Right(s, 1) = " "
+        sTail = sTail & " "
         s = Left(s, Len(s) - 1)
     Loop
     s = Replace(s, " ", "-")
-    Selection.TypeText text:=s
+    Selection.TypeText text:=s & sTail
 End Sub

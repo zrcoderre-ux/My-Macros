@@ -182,6 +182,10 @@ Public m_InSetup        As Boolean
 Private Const POLL_INTERVAL_MS As Long = 75
 Private m_PollPending As Boolean
 Private m_NextPollAt As Date
+' Count of OnTime callbacks queued but not yet fired. Word's OnTime cannot
+' be cancelled, so PollTick uses this to drain stale ticks: only the most
+' recently armed tick may process and re-arm (see PollTick).
+Private m_TicksQueued As Long
 
 '--- Symbol helpers ----------------------------------------------------------
 ' paragraph sign = Chr(182), section sign = Chr(167)
@@ -576,13 +580,24 @@ ErrExit:
 End Function
 
 '=============================================================================
-' DOCUMENT SCANNER  (unchanged from v2)
+' DOCUMENT SCANNER  (stack-based pairing; nesting- and paragraph-aware)
 '=============================================================================
 Private Sub ScanDocument()
     Dim sText    As String
-    Dim pos      As Long
-    Dim closeP   As Long
+    Dim k        As Long
+    Dim ch       As String
     Dim inner    As String
+
+    ' Stack of "(" positions. Pushing on "(" and popping the MOST RECENT
+    ' "(" on ")" means the INNERMOST pair is the candidate examined -- for
+    ' "(see (Mot. at p. 5))" that's "(Mot. at p. 5)", not the outer span.
+    ' A stray unmatched "(" is never popped, so it can no longer capture
+    ' everything up to some ")" paragraphs later. The enclosing pair of a
+    ' nested candidate still pops on its own ")", but its inner text keeps
+    ' the consumed "(...)" characters, so the "(" rejection below drops it.
+    Dim openPos(0 To 199) As Long
+    Dim openTop  As Long
+    openTop = 0
 
     Dim tmpCites(0 To 4999) As String
     Dim tmpFreqs(0 To 4999) As Long
@@ -591,51 +606,61 @@ Private Sub ScanDocument()
 
     sText = ActiveDocument.content.text
 
-    pos = 1
-    Do
-        pos = InStr(pos, sText, "(")
-        If pos = 0 Then Exit Do
+    For k = 1 To Len(sText)
+        ch = Mid(sText, k, 1)
+        If ch = "(" Then
+            If openTop < 199 Then
+                openTop = openTop + 1
+                openPos(openTop) = k
+            End If
+        ElseIf ch = ")" Then
+            If openTop > 0 Then
+                inner = Mid(sText, openPos(openTop) + 1, k - openPos(openTop) - 1)
+                openTop = openTop - 1
 
-        closeP = InStr(pos, sText, ")")
-        If closeP = 0 Then Exit Do
+                ' Reject candidates that cross a paragraph mark or still
+                ' contain a "(": the stored template is replayed verbatim
+                ' via sel.TypeText on accept, so it must be a clean,
+                ' single-paragraph segment with no leftover nesting.
+                If InStr(inner, vbCr) = 0 And InStr(inner, "(") = 0 Then
 
-        inner = Mid(sText, pos + 1, closeP - pos - 1)
+                    If IsCiteSegment(inner) Then
+                        Dim parts() As String
+                        parts = Split(inner, ";")
 
-        If IsCiteSegment(inner) Then
-            Dim parts() As String
-            parts = Split(inner, ";")
+                        Dim p As Long
+                        For p = 0 To UBound(parts)
+                            Dim rawCite As String
+                            rawCite = Trim(parts(p))
 
-            Dim p As Long
-            For p = 0 To UBound(parts)
-                Dim rawCite As String
-                rawCite = Trim(parts(p))
+                            If IsCiteSegment(rawCite) And Len(rawCite) > 0 Then
+                                rawCite = NormalizeCiteSegment(rawCite)
 
-                If IsCiteSegment(rawCite) And Len(rawCite) > 0 Then
-                    rawCite = NormalizeCiteSegment(rawCite)
-
-                    If Len(Trim(rawCite)) > 0 Then
-                        Dim found As Boolean
-                        found = False
-                        Dim j As Long
-                        For j = 0 To tmpCount - 1
-                            If tmpCites(j) = rawCite Then
-                                tmpFreqs(j) = tmpFreqs(j) + 1
-                                found = True
-                                Exit For
+                                If Len(Trim(rawCite)) > 0 Then
+                                    Dim found As Boolean
+                                    found = False
+                                    Dim j As Long
+                                    For j = 0 To tmpCount - 1
+                                        If tmpCites(j) = rawCite Then
+                                            tmpFreqs(j) = tmpFreqs(j) + 1
+                                            found = True
+                                            Exit For
+                                        End If
+                                    Next j
+                                    If Not found And tmpCount < 5000 Then
+                                        tmpCites(tmpCount) = rawCite
+                                        tmpFreqs(tmpCount) = 1
+                                        tmpCount = tmpCount + 1
+                                    End If
+                                End If
                             End If
-                        Next j
-                        If Not found And tmpCount < 5000 Then
-                            tmpCites(tmpCount) = rawCite
-                            tmpFreqs(tmpCount) = 1
-                            tmpCount = tmpCount + 1
-                        End If
+                        Next p
                     End If
-                End If
-            Next p
-        End If
 
-        pos = closeP + 1
-    Loop
+                End If
+            End If
+        End If
+    Next k
 
     Dim si As Long, sj As Long, stC As String, stF As Long
     For si = 1 To tmpCount - 1
@@ -1028,9 +1053,10 @@ End Sub
 ' we schedule an Application.OnTime callback every POLL_INTERVAL_MS while
 ' a session is active. The callback re-runs the same narrowing logic that
 ' OnSelectionChanged uses, then re-arms itself if the session is still
-' active. DismissSuggest cancels future ticks by clearing m_PollPending;
-' Word's OnTime has no cancel API (unlike Excel's Schedule:=False), so
-' PollTick guards against orphan ticks by checking m_PollPending on entry.
+' active. Word's OnTime cannot be cancelled (no Schedule:=False, unlike
+' Excel), so StopPollTimer just clears m_PollPending; PollTick drains
+' stale queued ticks via m_TicksQueued so only the most recently armed
+' tick can process and re-arm (see PollTick).
 '=============================================================================
 Private Sub StartPollTimer()
     ' Belt-and-suspenders: make sure nothing's already scheduled.
@@ -1040,12 +1066,12 @@ End Sub
 
 Private Sub StopPollTimer()
     On Error Resume Next
-    ' Word doesn't expose a cancel mechanism on Application.OnTime the way
-    ' Excel does (Excel has Schedule:=False; Word's OnTime has no such
-    ' parameter). Instead we rely on m_PollPending: when PollTick fires,
-    ' it checks m_Mode and exits without re-arming if the session ended.
-    ' Setting m_PollPending=False here ensures any in-flight tick is a
-    ' no-op for state purposes; the tick will run once more and then stop.
+    ' Word's Application.OnTime has no cancel mechanism (unlike Excel's
+    ' Schedule:=False -- Word's signature is just When, Name, Tolerance), so
+    ' an already-queued tick WILL still fire. Clearing m_PollPending makes
+    ' that orphan tick a no-op; the m_TicksQueued drain in PollTick keeps a
+    ' stale tick from ever re-arming a second chain on top of a new
+    ' session's own timer.
     m_PollPending = False
     On Error GoTo 0
 End Sub
@@ -1058,18 +1084,25 @@ Private Sub SchedulePoll()
     m_NextPollAt = Now + CDbl(POLL_INTERVAL_MS) / 86400000#
     Application.OnTime m_NextPollAt, "ParentheticalAutocomplete.PollTick"
     m_PollPending = True
+    m_TicksQueued = m_TicksQueued + 1
     On Error GoTo 0
 End Sub
 
 ' Public because Application.OnTime requires a Public procedure to call.
 ' Re-runs narrowing, then re-arms the timer if a session is still active.
 '
-' Word's Application.OnTime has no cancel mechanism (unlike Excel's), so
-' StopPollTimer just sets m_PollPending=False; the already-scheduled tick
-' will still fire. We guard against that here so an orphan tick from a
-' previous session doesn't restart polling on top of a fresh session's
-' own timer chain.
+' Queued ticks cannot be cancelled, so a stale tick from a previous
+' session can fire after a new session has armed its own tick. We guard
+' against that here so an orphan tick never restarts polling on top of a
+' fresh session's own timer chain.
 Public Sub PollTick()
+    ' Drain stale ticks: every SchedulePoll increments m_TicksQueued and
+    ' every firing decrements it. If ticks remain queued after this one,
+    ' this is an OLD tick and a newer one is still coming -- exit without
+    ' processing or re-arming, so exactly one chain survives.
+    If m_TicksQueued > 0 Then m_TicksQueued = m_TicksQueued - 1
+    If m_TicksQueued > 0 Then Exit Sub
+
     ' If we're not the timer the current session is waiting on, bail. The
     ' check is "is there a poll pending right now and is it me?": if
     ' m_PollPending is False, either no session is active or StopPollTimer

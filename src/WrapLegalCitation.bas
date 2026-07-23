@@ -439,16 +439,31 @@ Private Function DoCheckAndWrapAt(oDoc As Document, lParStart As Long, sIn As St
     End If
 
     ' Quote depth: never wrap mid-quotation
-    Dim qDepth As Long, qi As Long
+    ' Straight double quotes (AscW 34) are direction-ambiguous -- the same
+    ' character opens and closes -- so they are tracked by parity: the flag
+    ' toggles on each one, and an odd count (flag still True) means a straight
+    ' quote is open.  Curly singles get their own depth so a right single
+    ' quote (8217) only closes a pending 8216 opener; with no opener pending
+    ' it is an apostrophe (e.g. "plaintiff's") and must be ignored rather
+    ' than counted as a closer.
+    Dim qDepth As Long, qSingle As Long, qi As Long
+    Dim bStraightOpen As Boolean: bStraightOpen = False
     For qi = 1 To Len(s)
         Dim qc As Long: qc = AscW(Mid(s, qi, 1))
-        If qc = 34 Or qc = 8220 Then
+        If qc = 34 Then
+            bStraightOpen = Not bStraightOpen
+        ElseIf qc = 8220 Then
             qDepth = qDepth + 1
-        ElseIf qc = 8221 Or qc = 8217 Then
+        ElseIf qc = 8221 Then
             If qDepth > 0 Then qDepth = qDepth - 1
+        ElseIf qc = 8216 Then
+            qSingle = qSingle + 1
+        ElseIf qc = 8217 Then
+            If qSingle > 0 Then qSingle = qSingle - 1
         End If
     Next qi
-    If qDepth > 0 Then Exit Function
+    If bStraightOpen Then qDepth = qDepth + 1
+    If qDepth + qSingle > 0 Then Exit Function
 
     ' Paren balance: if paragraph has unmatched "(", close with ")" only.
     Dim bSkipOpen As Boolean: bSkipOpen = False
@@ -527,8 +542,12 @@ Private Function DoCheckAndWrapAt(oDoc As Document, lParStart As Long, sIn As St
         Exit Function
     End If
 
-    ' Pattern 3c: Cal., U.S., or sec - requires trailing digit/")" or bExhibit
-    If InStr(sSearch, "Cal.") > 0 Or InStr(sSearch, "U.S.") > 0 Or InStr(sSearch, ChrW(167)) > 0 Then
+    ' Pattern 3c: Cal., U.S., sec, or a bare exhibit reference (header item
+    ' (d)).  Reporter/section citations require a trailing digit/")"; an
+    ' exhibit reference (bExhibit) reaches the wrap logic even when no
+    ' reporter/section marker is present, and keeps its existing
+    ' trailing-digit bypass.
+    If InStr(sSearch, "Cal.") > 0 Or InStr(sSearch, "U.S.") > 0 Or InStr(sSearch, ChrW(167)) > 0 Or bExhibit Then
         Dim charBefore As String: charBefore = Mid(s, Len(s) - 1, 1)
         If (charBefore Like "[0-9)]") Or bExhibit Then
             lOff = GetCiteStart(s)
@@ -804,7 +823,6 @@ Sub WrapLegalCitation()
     ' citation wrapping for the rest of the session.
     On Error GoTo CleanUp
 
-    nDocEnd = oDoc.content.End - 1
     Application.ScreenUpdating = False
     nWrapped = 0
 
@@ -823,6 +841,14 @@ Sub WrapLegalCitation()
     oSearch.Find.MatchWildcards = False
 
     Do While oSearch.Find.Execute
+
+        ' Refresh the document end on every iteration: each wrap below inserts
+        ' characters, so a snapshot taken once before the loop goes stale and
+        ' the character walks (and FindCalTerminalPos, which receives nDocEnd)
+        ' would stop short of the real end, mangling or skipping a trailing
+        ' citation.  No insertions happen between here and those uses, so the
+        ' value stays current for the whole iteration.
+        nDocEnd = oDoc.content.End - 1
 
         Dim nBlockStart  As Long
         Dim nBlockEnd    As Long

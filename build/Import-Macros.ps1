@@ -51,6 +51,9 @@ try {
     $word = New-Object -ComObject Word.Application
     $startedWord = $true
 }
+# Suppress alerts during the rebuild, but remember the prior value so the
+# user's live Word instance gets it back on every exit path.
+$prevDisplayAlerts = $word.DisplayAlerts
 $word.DisplayAlerts = 0
 
 # --- Release the lock on the STARTUP template -----------------------------
@@ -64,6 +67,7 @@ if (-not $startedWord) {
     foreach ($d in $word.Documents) {
         if ($d.FullName -ieq $Template) {
             Write-Warning "  [macros] $leaf is open in Word as a document. Close it and re-run; skipped."
+            try { $word.DisplayAlerts = $prevDisplayAlerts } catch {}
             return
         }
     }
@@ -111,17 +115,25 @@ try {
         ForEach-Object { $comps.Import($_.FullName) | Out-Null }
 
     # 3) Update ThisDocument code in place. A .cls export starts with a header
-    #    block (VERSION / BEGIN..END / Attribute VB_*). Keep ONLY the lines after
-    #    the last header line; anything header-like left in the code area causes
-    #    a "compile error in hidden module: ThisDocument".
+    #    block (VERSION / BEGIN..END / Attribute VB_*). Strip only the CONTIGUOUS
+    #    header block at the top: stop at the first non-header line and keep
+    #    everything from there on. (Matching header-ish lines ANYWHERE -- e.g. a
+    #    mid-file "Attribute App.VB_VarHelpID = -1" emitted for WithEvents
+    #    variables -- silently discarded all code above it.)
     $tdPath = Join-Path $Src "ThisDocument.cls"
     if (Test-Path $tdPath) {
-        $lines = Get-Content -Path $tdPath
-        $lastHeader = -1
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\s*(VERSION |BEGIN|END\s*$|MultiUse|Attribute )') { $lastHeader = $i }
+        $lines = @(Get-Content -Path $tdPath)
+        $firstBody = 0
+        while ($firstBody -lt $lines.Count -and
+               ($lines[$firstBody] -match '^\s*(VERSION |BEGIN|END\s*$|MultiUse|Attribute )' -or
+                $lines[$firstBody] -match '^\s*$')) {
+            $firstBody++
         }
-        $body = ($lines[($lastHeader + 1)..($lines.Count - 1)]) -join "`r`n"
+        if ($firstBody -lt $lines.Count) {
+            $body = ($lines[$firstBody..($lines.Count - 1)]) -join "`r`n"
+        } else {
+            $body = ""
+        }
         $cm = $comps.Item("ThisDocument").CodeModule
         if ($cm.CountOfLines -gt 0) { $cm.DeleteLines(1, $cm.CountOfLines) }
         $cm.AddFromString($body)
@@ -157,6 +169,9 @@ finally {
         try { $word.AddIns.Add($Template, $true) | Out-Null; Write-Host "  [macros] loaded new add-in (macros are live)." -ForegroundColor Green }
         catch { Write-Warning "  [macros] created the template; restart Word to load it." }
     }
+    # Restore DisplayAlerts (kept suppressed through the add-in reload above
+    # so that step stays silent too). Harmless on our own headless instance.
+    try { $word.DisplayAlerts = $prevDisplayAlerts } catch {}
     if ($startedWord) {
         try { $word.Quit() } catch {}
         [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word)

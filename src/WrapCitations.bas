@@ -48,6 +48,11 @@ End Sub
 
 Private Sub ApplyAutoCorrect()
     On Error GoTo Done
+    ' Main body only: Selection.Start in a footnote/header/text box is
+    ' story-relative, but oDoc.Range() below always addresses the main text
+    ' story, so running there would rewrite unrelated body text and move the
+    ' cursor.  Same guard as DoCheckAndWrap.
+    If Selection.StoryType <> wdMainTextStory Then Exit Sub
     Dim oDoc As Document: Set oDoc = ActiveDocument
     Dim lCur As Long: lCur = Selection.start
     If lCur < 2 Then GoTo Done
@@ -123,15 +128,25 @@ Private Sub DoCheckAndWrap()
     End If
 
     ' 3. QUOTE DEPTH CHECK: Includes single curly quotes for nested legal cites
+    ' Straight double quotes (AscW 34) are direction-ambiguous -- the same
+    ' character opens and closes -- so they are tracked by parity: the flag
+    ' toggles on each one, and an odd count (flag still True) means a straight
+    ' quote is open.  Counting them as openers only would leave qDepth
+    ' permanently inflated after a closed "..." pair, silently disabling
+    ' wrapping for the rest of the paragraph.
     Dim qDepth As Long, qi As Long
+    Dim bStraightOpen As Boolean: bStraightOpen = False
     For qi = 1 To Len(s)
         Dim qc As Long: qc = AscW(Mid(s, qi, 1))
-        If qc = 34 Or qc = 8220 Then
+        If qc = 34 Then
+            bStraightOpen = Not bStraightOpen
+        ElseIf qc = 8220 Then
             qDepth = qDepth + 1
         ElseIf qc = 8221 Or qc = 8217 Then
             If qDepth > 0 Then qDepth = qDepth - 1
         End If
     Next qi
+    If bStraightOpen Then qDepth = qDepth + 1
     If qDepth > 0 Then Exit Sub
 
     ' PAREN BALANCE: if the paragraph has an unmatched open "(" before the
@@ -191,7 +206,8 @@ Private Sub DoCheckAndWrap()
     ' Pattern 2: Id. at  (must appear after the last wrapped citation,
     ' and outside any closed parenthetical)
     If InStr(sTrig, "Id. at") > 0 Then
-        Dim lId As Long: lId = InStrRev(s, "Id. at")
+        Dim lId As Long: lId = LastPosOutsideParens(s, "Id. at")
+        If lId = 0 Then lId = InStrRev(s, "Id. at")   ' no depth-0 occurrence: keep old behavior
         lS = lParStart + lId - 1: lE = lParStart + Len(s)
         If Not IsAlreadyWrapped(oDoc, lS, lE) Then WrapRange oDoc, lS, lE, False, True, bSkipOpen
         Exit Sub
@@ -212,8 +228,13 @@ Private Sub DoCheckAndWrap()
     ' citation, and outside any closed parenthetical)
     If InStr(sTrig, " at p.") > 0 Or InStr(sTrig, " at pp.") > 0 Then
         Dim lAtP As Long
-        lAtP = InStrRev(s, " at pp.")
-        If lAtP = 0 Then lAtP = InStrRev(s, " at p.")
+        lAtP = LastPosOutsideParens(s, " at pp.")
+        If lAtP = 0 Then lAtP = LastPosOutsideParens(s, " at p.")
+        If lAtP = 0 Then
+            ' No depth-0 occurrence at all: keep old behavior
+            lAtP = InStrRev(s, " at pp.")
+            If lAtP = 0 Then lAtP = InStrRev(s, " at p.")
+        End If
         If lAtP > 1 Then
             lOff = GetCiteStart(Left(s, lAtP - 1))
         Else
@@ -359,6 +380,39 @@ Private Function StripClosedParens(s As String) As String
         If Not remove(i) Then out = out & Mid(s, i, 1)
     Next i
     StripClosedParens = out
+End Function
+
+' Returns the position (1-based, like InStrRev) of the LAST occurrence of
+' sFind in s that sits at paren depth 0, i.e. NOT inside a balanced (...)
+' pair.  Trigger detection runs on the paren-stripped sTrig, so the wrap
+' position must obey the same rule -- a plain InStrRev could land on a copy
+' sealed inside an already-closed parenthetical (e.g. "Id. at 5 (citing Id.
+' at 3)." must position on the OUTER "Id. at").  The scan walks right to
+' left counting ")" / "(": a position is inside a closed pair exactly when
+' unmatched ")"s remain to its right, so text after an unmatched/unclosed
+' "(" still counts as depth 0 -- mirroring StripClosedParens, which keeps a
+' manually-opened citation positioning correctly.  With no parentheses in s
+' the result equals InStrRev(s, sFind).  Returns 0 if no depth-0 occurrence
+' exists.
+Private Function LastPosOutsideParens(s As String, sFind As String) As Long
+    LastPosOutsideParens = 0
+    Dim fLen As Long: fLen = Len(sFind)
+    If fLen = 0 Or Len(s) = 0 Then Exit Function
+
+    Dim depth As Long: depth = 0
+    Dim i As Long
+    For i = Len(s) To 1 Step -1
+        Select Case Mid(s, i, 1)
+            Case ")": depth = depth + 1
+            Case "(": If depth > 0 Then depth = depth - 1
+        End Select
+        If depth = 0 And i + fLen - 1 <= Len(s) Then
+            If Mid(s, i, fLen) = sFind Then
+                LastPosOutsideParens = i
+                Exit Function
+            End If
+        End If
+    Next i
 End Function
 
 Private Function GetCiteStart(s As String) As Long
