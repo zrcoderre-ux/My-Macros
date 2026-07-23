@@ -236,35 +236,18 @@ Public Sub ReAnonymizeTentative()
     ' longer full name before that longer one is handled.
     SortMappingsByLenDesc maps, nMaps, False
 
-    ' Word's Find can only search for terms up to 255 characters, so a longer
-    ' real value (a quoted block, a long address) can never be auto-replaced
-    ' and would survive into the shared copy. Warn BEFORE doing anything.
-    Dim nTooLong As Long, i As Long
-    For i = 1 To nMaps
-        If Len(maps(i).real) > 255 Then nTooLong = nTooLong + 1
-    Next i
-    If nTooLong > 0 Then
-        If MsgBox(nTooLong & " mapping(s) in the key have a real value longer " & _
-                  "than 255 characters, which Word's search cannot handle. " & _
-                  "Those values will NOT be replaced and would remain in the " & _
-                  "anonymized copy." & vbCrLf & vbCrLf & _
-                  "Continue anyway (and review the output for them manually)?", _
-                  vbYesNo + vbExclamation + vbDefaultButton2, _
-                  "Re-Anonymize") <> vbYes Then Exit Sub
-    End If
+    Dim i As Long
 
-    ' Choose where to write the Markdown file BEFORE changing anything, so the
-    ' run can be cancelled with nothing touched. Default the filename to the
+    ' Run-and-done: no Save-As dialog and no confirmation. The .md is written
+    ' automatically next to the document (its local synced folder) under the
     ' FAKED version of the document's own title, so the export is recognizable
-    ' but carries pseudonyms, not real party names.
+    ' but carries pseudonyms, not real party names. DocFolderLocal maps a
+    ' SharePoint/OneDrive URL to the writable local sync folder; if the folder
+    ' can't be resolved (never-saved doc) it falls back to Documents.
     Dim savePath As String
-    savePath = PickReAnonSavePath(oDoc, maps, nMaps)
-    If Len(savePath) = 0 Then Exit Sub
-
-    If MsgBox("Re-anonymize using " & nMaps & " mapping(s) and save an " & _
-              "anonymized Markdown file to:" & vbCrLf & vbCrLf & savePath & vbCrLf & vbCrLf & _
-              "The Word document is left unchanged -- only the .md file is written.", _
-              vbYesNo + vbQuestion, "Re-Anonymize") <> vbYes Then Exit Sub
+    Dim outFolder As String: outFolder = DocFolderLocal(oDoc)
+    If Len(outFolder) = 0 Then outFolder = Environ$("USERPROFILE") & "\Documents"
+    savePath = outFolder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
 
     ' From this point on, no automatic de-anonymize for the rest of the Word
     ' session (set even if the run errors out partway -- fail safe). This also
@@ -320,42 +303,11 @@ Public Sub ReAnonymizeTentative()
     ' body, which is what the Markdown export reads.
     ApplyCourtIdentity oDoc, False
 
-    ' Generic court-personnel scrub, ported from PDF-Linker's
-    ' register_court_names: role labels ("Judicial Assistant: <name>", "Deputy
-    ' Clerk: ...", "Court Reporter: ..."), judicial titles ("Hon. / Judge /
-    ' Justice <name>"), and label-anchored department numbers ("Department 515",
-    ' "Dept. 72") are blanked WHOEVER is named -- nothing is hard-coded, so a
-    ' new assistant, a different judge, or a body-text mention in a form the
-    ' exact-string pass doesn't know is still caught.
-    ScrubCourtIdentityGeneric oDoc
-
-    ' Leak gate, ported from PDF-Linker's quarantine rule (a leaked real value
-    ' is worse than an aborted run): if any real value from the key survived
-    ' outside a protected italic citation, warn BEFORE anything is written and
-    ' let the run be aborted with nothing on disk.
-    Dim nLeaks As Long, sLeakList As String
-    nLeaks = CountRealLeaks(oDoc, maps, nMaps, sLeakList)
-    Dim bWriteExport As Boolean: bWriteExport = True
-    If nLeaks > 0 Then
-        If MsgBox("WARNING: " & nLeaks & " occurrence(s) of real value(s) from " & _
-                  "the key are STILL PRESENT after replacement:" & vbCrLf & vbCrLf & _
-                  sLeakList & vbCrLf & _
-                  "(Real names inside italic cited case names are exempt and " & _
-                  "not counted.)" & vbCrLf & vbCrLf & _
-                  "Write the anonymized export anyway?", _
-                  vbYesNo + vbExclamation + vbDefaultButton2, _
-                  "Re-Anonymize") <> vbYes Then
-            bWriteExport = False
-        End If
-    End If
-
     ' Read the now-anonymized body out as Markdown and write it to disk (UTF-8,
     ' no BOM). This is the only file the macro writes.
     Dim md As String
-    If bWriteExport Then
-        md = DocToMarkdown(oDoc)
-        WriteUtf8NoBom savePath, md
-    End If
+    md = DocToMarkdown(oDoc)
+    WriteUtf8NoBom savePath, md
 
     ' Discard the in-memory fake edits: reload the window from the untouched
     ' original so the user is back on the real-names document and a stray Ctrl+S
@@ -419,21 +371,14 @@ Public Sub ReAnonymizeTentative()
                "get back to the untouched original."
     End If
 
-    If bWriteExport Then
-        MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-               " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
-               "Names inside italic cited case names were left as-is so a party " & _
-               "surname that also names a published case wasn't rewritten -- check " & _
-               "any italicized cites if a real party name should have been replaced." & _
-               vbCrLf & vbCrLf & _
-               "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
-               tail, vbInformation, "Re-Anonymize"
-    Else
-        MsgBox "Re-anonymize ABORTED at the leak check: nothing was written to " & _
-               "disk." & vbCrLf & vbCrLf & _
-               "Fix the key (add the missing variant rows) and run again." & _
-               vbCrLf & vbCrLf & tail, vbExclamation, "Re-Anonymize"
-    End If
+    MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
+           " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
+           "Names inside italic cited case names were left as-is so a party " & _
+           "surname that also names a published case wasn't rewritten -- check " & _
+           "any italicized cites if a real party name should have been replaced." & _
+           vbCrLf & vbCrLf & _
+           "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
+           tail, vbInformation, "Re-Anonymize"
     Exit Sub
 
 ErrH:
@@ -454,49 +399,6 @@ ErrH:
            "(AutoSave was left off for the same reason.)", _
            vbExclamation, "Re-Anonymize"
 End Sub
-
-' Ask where to write the anonymized Markdown file. Defaults to the document's
-' folder and to the FAKED version of the document's own title (real values in
-' the filename replaced with their pseudonyms via the key), so the export is
-' recognizable without carrying real party names. Returns "" if cancelled.
-' Always normalizes the result to a .md extension -- the SaveAs dialog can
-' otherwise append a Word extension.
-Private Function PickReAnonSavePath(ByVal oDoc As Document, _
-                                     ByRef maps() As Mapping, _
-                                     ByVal nMaps As Long) As String
-    Dim folder As String
-    folder = ""
-    On Error Resume Next
-    folder = oDoc.path
-    On Error GoTo 0
-    If Len(folder) = 0 Then folder = Environ$("USERPROFILE") & "\Documents"
-
-    Dim fd As FileDialog
-    Dim p As String
-    Set fd = Application.FileDialog(msoFileDialogSaveAs)
-    With fd
-        .Title = "Save the anonymized Markdown file as"
-        .InitialFileName = folder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
-        If .Show <> -1 Then
-            PickReAnonSavePath = ""
-            Exit Function
-        End If
-        p = .SelectedItems(1)
-    End With
-
-    ' Drop any extension the dialog tacked on (it defaults to a Word type), then
-    ' force .md, so the file is always written as Markdown.
-    Dim dotPos As Long: dotPos = InStrRev(p, ".")
-    Dim slashPos As Long: slashPos = InStrRev(p, "\")
-    If dotPos > slashPos And dotPos > 0 Then
-        Select Case LCase$(Mid$(p, dotPos + 1))
-            Case "md", "markdown", "docx", "doc", "dot", "dotx", "dotm", "txt", "rtf", "xml"
-                p = Left$(p, dotPos - 1)
-        End Select
-    End If
-    If LCase$(Right$(p, 3)) <> ".md" Then p = p & ".md"
-    PickReAnonSavePath = p
-End Function
 
 ' The document's title (filename without extension) with every real value from
 ' the key replaced by its fake, longest real first (the maps are already sorted
@@ -877,7 +779,23 @@ End Function
 ' choke on a BOM). ADODB.Stream writes a BOM, so we re-read the bytes past it and
 ' save those to the file.
 Private Sub WriteUtf8NoBom(ByVal path As String, ByVal text As String)
-    Dim st As Object
+    ' ADODB.Stream can only write to a local/UNC path. Catch a URL (or a missing
+    ' folder) here and raise a plain-English error instead of a bare 3004.
+    If LCase$(Left$(path, 7)) = "http://" Or LCase$(Left$(path, 8)) = "https://" Then
+        Err.Raise vbObjectError + 3004, "WriteUtf8NoBom", _
+            "Cannot write to a cloud URL: " & path & vbCrLf & _
+            "Choose a local folder for the .md file."
+    End If
+    Dim parent As String
+    Dim sl As Long: sl = InStrRev(path, "\")
+    If sl > 0 Then parent = Left$(path, sl - 1)
+    If Len(parent) > 0 And Dir$(parent, vbDirectory) = "" Then
+        Err.Raise vbObjectError + 3004, "WriteUtf8NoBom", _
+            "The target folder does not exist:" & vbCrLf & parent
+    End If
+
+    Dim st As Object, bin As Object
+    On Error GoTo Fail
     Set st = CreateObject("ADODB.Stream")
     st.Type = 2                     ' adTypeText
     st.Charset = "utf-8"
@@ -888,15 +806,23 @@ Private Sub WriteUtf8NoBom(ByVal path As String, ByVal text As String)
     st.Type = 1                     ' adTypeBinary
     st.Position = 3                 ' skip the 3-byte UTF-8 BOM
     Dim bytes As Variant: bytes = st.Read
-    st.Close
+    st.Close: Set st = Nothing
 
-    Dim bin As Object
     Set bin = CreateObject("ADODB.Stream")
     bin.Type = 1                    ' adTypeBinary
     bin.Open
     bin.Write bytes
     bin.SaveToFile path, 2          ' adSaveCreateOverWrite
-    bin.Close
+    bin.Close: Set bin = Nothing
+    Exit Sub
+
+Fail:
+    Dim n As Long, d As String: n = Err.Number: d = Err.Description
+    On Error Resume Next
+    If Not st Is Nothing Then st.Close
+    If Not bin Is Nothing Then bin.Close
+    On Error GoTo 0
+    Err.Raise n, "WriteUtf8NoBom", d
 End Sub
 
 '==============================================================================
@@ -1568,180 +1494,6 @@ Private Function RangeContains(ByVal rng As Range, ByVal s As String) As Boolean
         .MatchWildcards = False
         RangeContains = .Execute
     End With
-End Function
-
-'==============================================================================
-' GENERIC COURT-PERSONNEL SCRUB  (ported from PDF-Linker register_court_names)
-'==============================================================================
-' Blank court-identity values by PATTERN rather than by exact string, so the
-' scrub works whoever is named:
-'   - role labels:   "Judicial Assistant: <Name Words>" -> "Judicial Assistant:"
-'   - judicial titles: "Hon./Honorable/Judge/Justice/Commissioner <Name Words>"
-'                      -> the title alone (title kept, name blanked)
-'   - department numbers, label-anchored: "Department 515" -> "Department",
-'     "Dept. 72" -> "Dept." (a bare number elsewhere is never touched)
-' Runs across the same stories the replacement pass covers. Over-blanking a
-' following capitalized word (e.g. "Judge Presiding" -> "Judge") is accepted:
-' for anonymity, blanking too much is the safe direction.
-Private Sub ScrubCourtIdentityGeneric(ByVal oDoc As Document)
-    On Error Resume Next
-    ScrubCourtInRange oDoc.content
-
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then ScrubCourtInRange hf.Range
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then ScrubCourtInRange hf.Range
-        Next hf
-    Next sec
-
-    If oDoc.Footnotes.count > 0 Then ScrubCourtInRange oDoc.StoryRanges(wdFootnotesStory)
-    If oDoc.Endnotes.count > 0 Then ScrubCourtInRange oDoc.StoryRanges(wdEndnotesStory)
-
-    Dim shp As Shape
-    For Each shp In oDoc.Shapes
-        If shp.TextFrame.HasText Then ScrubCourtInRange shp.TextFrame.TextRange
-    Next shp
-End Sub
-
-Private Sub ScrubCourtInRange(ByVal rng As Range)
-    On Error Resume Next
-    ' One capitalized name word (letters, apostrophes -- straight and curly --
-    ' and hyphens), for the wildcard patterns below.
-    Dim nm As String
-    nm = "[A-Z][a-zA-Z'" & ChrW(8217) & "-]@"
-
-    ' Department / courtroom numbers, label-anchored.
-    WildcardBlankInRange rng, "Department No. [0-9]{1,3}", "Department"
-    WildcardBlankInRange rng, "Department [0-9]{1,3}", "Department"
-    WildcardBlankInRange rng, "DEPARTMENT [0-9]{1,3}", "DEPARTMENT"
-    WildcardBlankInRange rng, "Dept. [0-9]{1,3}", "Dept."
-    WildcardBlankInRange rng, "Dept [0-9]{1,3}", "Dept"
-
-    ' Role labels: blank 1-3 capitalized name words after the label. Longest
-    ' first so a two-word name isn't half-eaten by the one-word pattern.
-    Dim labels As Variant
-    labels = Array("Judge:", "Judicial Assistant:", "Courtroom Assistant:", _
-                   "Courtroom Clerk:", "Court Clerk:", "Deputy Clerk:", _
-                   "Court Reporter:", "Bailiff:", "Court Attendant:", _
-                   "Research Attorney:", "Law Clerk:")
-    Dim i As Long, k As Long
-    For i = LBound(labels) To UBound(labels)
-        For k = 3 To 1 Step -1
-            WildcardBlankInRange rng, CStr(labels(i)) & NameWordsPattern(nm, k), CStr(labels(i))
-        Next k
-    Next i
-
-    ' Judicial titles anywhere in the text: keep the title, blank the name.
-    Dim titles As Variant
-    titles = Array("Honorable", "Hon.", "Judge", "Justice", "Commissioner")
-    For i = LBound(titles) To UBound(titles)
-        For k = 3 To 1 Step -1
-            WildcardBlankInRange rng, CStr(titles(i)) & NameWordsPattern(nm, k), CStr(titles(i))
-        Next k
-    Next i
-End Sub
-
-' " <name> <name> ..." -- k space-separated capitalized-name-word patterns.
-Private Function NameWordsPattern(ByVal nm As String, ByVal k As Long) As String
-    Dim s As String, i As Long
-    For i = 1 To k
-        s = s & " " & nm
-    Next i
-    NameWordsPattern = s
-End Function
-
-Private Sub WildcardBlankInRange(ByVal rng As Range, ByVal findPat As String, _
-                                  ByVal repl As String)
-    On Error Resume Next
-    Dim r As Range: Set r = rng.Duplicate
-    With r.Find
-        .ClearFormatting
-        .Replacement.ClearFormatting
-        .text = findPat
-        .Replacement.text = repl
-        .Forward = True
-        .Wrap = wdFindStop
-        .MatchWildcards = True
-        .Execute Replace:=wdReplaceAll
-    End With
-End Sub
-
-'==============================================================================
-' LEAK SCAN  (ported from PDF-Linker's quarantine/LEAK machinery)
-'==============================================================================
-' Count occurrences of the key's REAL values still present after the real->fake
-' pass -- each one is a would-be leak in the shared export. Matches inside
-' italic text are exempt (protected citations, mirroring the replacement pass's
-' protectCitations). Fills sList with up to 8 offending values for the dialog.
-Private Function CountRealLeaks(ByVal oDoc As Document, ByRef maps() As Mapping, _
-                                 ByVal nMaps As Long, ByRef sList As String) As Long
-    Dim total As Long, i As Long, nDistinct As Long
-    sList = ""
-    For i = 1 To nMaps
-        Dim n As Long: n = 0
-        n = n + LeaksInRange(oDoc.content, maps(i).real)
-
-        Dim sec As Section, hf As HeaderFooter
-        For Each sec In oDoc.Sections
-            For Each hf In sec.Headers
-                If hf.Exists Then n = n + LeaksInRange(hf.Range, maps(i).real)
-            Next hf
-            For Each hf In sec.Footers
-                If hf.Exists Then n = n + LeaksInRange(hf.Range, maps(i).real)
-            Next hf
-        Next sec
-
-        On Error Resume Next
-        If oDoc.Footnotes.count > 0 Then n = n + LeaksInRange(oDoc.StoryRanges(wdFootnotesStory), maps(i).real)
-        If oDoc.Endnotes.count > 0 Then n = n + LeaksInRange(oDoc.StoryRanges(wdEndnotesStory), maps(i).real)
-        Dim shp As Shape
-        For Each shp In oDoc.Shapes
-            If shp.TextFrame.HasText Then n = n + LeaksInRange(shp.TextFrame.TextRange, maps(i).real)
-        Next shp
-        On Error GoTo 0
-
-        If n > 0 Then
-            total = total + n
-            nDistinct = nDistinct + 1
-            If nDistinct <= 8 Then
-                sList = sList & "  - " & maps(i).real & "  (" & n & ")" & vbCrLf
-            End If
-        End If
-    Next i
-    If nDistinct > 8 Then
-        sList = sList & "  ...and " & (nDistinct - 8) & " more value(s)" & vbCrLf
-    End If
-    CountRealLeaks = total
-End Function
-
-' Occurrences of realText in one range, skipping italic (protected) matches.
-Private Function LeaksInRange(ByVal rng As Range, ByVal realText As String) As Long
-    On Error Resume Next
-    Dim n As Long: n = 0
-    If Len(realText) = 0 Then Exit Function
-    Dim scan As Range: Set scan = rng.Duplicate
-    Do
-        With scan.Find
-            .ClearFormatting
-            .Replacement.ClearFormatting
-            .text = realText
-            .Replacement.text = ""
-            .Forward = True
-            .Wrap = wdFindStop
-            .MatchCase = False
-            .MatchWholeWord = ShouldWholeWord(realText)
-            .MatchWildcards = False
-            If Not .Execute Then Exit Do
-        End With
-        If Not (scan.Font.Italic = True) Then n = n + 1
-        scan.Collapse Direction:=wdCollapseEnd
-        scan.End = rng.End
-        If scan.start >= rng.End Then Exit Do
-    Loop
-    LeaksInRange = n
 End Function
 
 '==============================================================================
