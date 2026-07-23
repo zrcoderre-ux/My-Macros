@@ -204,6 +204,11 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     If CheckUnmatchedPairs(Doc, "{", "}", HL_GREEN) Then issues = True
     If CheckUnmatchedPairs(Doc, "(", ")", HL_GREEN) Then issues = True
 
+    ' Placeholder word "blank" (cyan; *blank* marks intentional use and is
+    ' skipped, then stripped back to plain "blank" by the restore pass)
+    If HighlightWord(Doc, "blank", HL_CYAN) Then issues = True
+    RestoreIntentionalBlanks Doc
+
     ' Double spaces
     If CheckDoubleSpaces(Doc) Then issues = True
 
@@ -595,14 +600,32 @@ End Function
 
 ' Removes only the macro's own colors (bright green and cyan).
 ' Called at the start of every check run to clear prior results.
+' Uses a highlight-seeking Find (jumps between highlighted runs) instead of
+' walking Doc.Content.Characters one COM call at a time, which froze Word
+' for minutes on long documents.
 Public Sub ClearCheckHighlights(Doc As Document)
-    Dim rng As Range
-    For Each rng In Doc.content.Characters
-        If rng.HighlightColorIndex = wdBrightGreen Or _
-           rng.HighlightColorIndex = wdTurquoise Then
-            rng.HighlightColorIndex = wdNoHighlight
-        End If
-    Next rng
+    Dim rng     As Range
+    Dim lastEnd As Long
+    Set rng = Doc.content
+    lastEnd = -1
+    With rng.Find
+        .ClearFormatting
+        .text = ""
+        .Highlight = True
+        .Wrap = wdFindStop
+        Do While .Execute
+            If rng.HighlightColorIndex = wdBrightGreen Or _
+               rng.HighlightColorIndex = wdTurquoise Then
+                rng.HighlightColorIndex = wdNoHighlight
+            End If
+            ' Guard against a zero-progress infinite loop.
+            If rng.End <= lastEnd Then Exit Do
+            lastEnd = rng.End
+            rng.Collapse Direction:=wdCollapseEnd
+            rng.End = Doc.content.End
+            If rng.start >= rng.End Then Exit Do
+        Loop
+    End With
 End Sub
 
 ' Removes all highlight colors except yellow (the user's own color).

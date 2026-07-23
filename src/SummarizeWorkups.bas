@@ -132,7 +132,9 @@ Private Sub ProcessFile(sPath As String, lProcessed As Long, lSkipped As Long, l
     On Error GoTo OpenError
     Set oDoc = Documents.Open(FileName:=sPath, ReadOnly:=True, Visible:=False, _
                               AddToRecentFiles:=False)
-    On Error GoTo 0
+    ' From here on, contain any error to this file so the batch continues
+    ' and the invisible read-only document is never left orphaned.
+    On Error GoTo ProcessError
 
     ' --- Gate 7: skip mail merge documents
     If oDoc.MailMerge.MainDocumentType <> wdNotAMergeDocument Then
@@ -214,6 +216,16 @@ Private Sub ProcessFile(sPath As String, lProcessed As Long, lSkipped As Long, l
 OpenError:
     Call AppendLog("ERROR (could not open): " & sFile & " � " & Err.Description)
     lErrors = lErrors + 1
+    Exit Sub
+
+ProcessError:
+    ' Any error after the document opened (Gates 7-11, API tail, summary
+    ' write): log it, count it, close the invisible read-only document,
+    ' and return so the batch moves on to the next file.
+    Call AppendLog("ERROR (processing): " & sFile & " - " & Err.Description)
+    lErrors = lErrors + 1
+    On Error Resume Next   ' a failed close must not re-enter this handler
+    If Not oDoc Is Nothing Then oDoc.Close SaveChanges:=False
 End Sub
 
 ' ============================================================
@@ -225,9 +237,12 @@ Private Function IsIncompleteDocumentResponse(sSummary As String) As Boolean
     Dim sLower As String
     sLower = LCase(sSummary)
 
-    ' Phrases that signal Claude could not summarize due to missing content
+    ' Phrases that signal Claude could not summarize due to missing content.
+    ' "incomplete_document" catches the INCOMPLETE_DOCUMENT sentinel that
+    ' CallClaudeAPI returns verbatim (the input is lowercased above).
     Dim aPhrases As Variant
     aPhrases = Array( _
+        "incomplete_document", _
         "cannot provide the requested summary", _
         "i cannot provide", _
         "i'm unable to provide", _
@@ -352,14 +367,15 @@ Private Function CallClaudeAPI(sDocText As String) As String
         Exit Function
     End If
 
-    ' Strip backslash-escaped quotes the API sometimes inserts
-    sText = Replace(sText, Chr(92) & Chr(34), Chr(34))
-    ' Unescape JSON escape sequences that may survive into the summary text
-    sText = Replace(sText, "\\""", """")
-    sText = Replace(sText, "\\\\", "\\")
-    sText = Replace(sText, "\\n", " ")
-    sText = Replace(sText, "\\r", "")
-    sText = Replace(sText, "\\t", " ")
+    ' Unescape JSON escape sequences that may survive into the summary text.
+    ' Protect escaped backslashes first so the "\n" inside "\\n" (a literal
+    ' backslash followed by n) is not mistaken for a newline escape.
+    sText = Replace(sText, "\\", ChrW(1))               ' \\ -> placeholder
+    sText = Replace(sText, "\" & Chr(34), Chr(34))      ' \" -> "
+    sText = Replace(sText, "\n", " ")                   ' \n -> space
+    sText = Replace(sText, "\r", "")                    ' \r -> removed
+    sText = Replace(sText, "\t", " ")                   ' \t -> space
+    sText = Replace(sText, ChrW(1), "\")                ' placeholder -> \
     CallClaudeAPI = Trim(sText)
     Exit Function
 

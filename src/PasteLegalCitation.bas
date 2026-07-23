@@ -1075,15 +1075,18 @@ End Sub
 '===========================================================
 ' Escape a string for embedding in a JSON string literal.
 ' Handles backslash, double-quote, and common control chars.
+' Note: VBA string literals have no escape sequences, so "\"
+' is one backslash and "\\" is two -- each replacement below
+' yields a two-character escape (backslash + letter/quote).
 '===========================================================
 Private Function JsonEscape(s As String) As String
     Dim r As String
     r = s
-    r = Join(Split(r, "\\"), "\\\\")
-    r = Join(Split(r, Chr(34)), "\\" & Chr(34))
-    r = Join(Split(r, Chr(13)), "\\r")
-    r = Join(Split(r, Chr(10)), "\\n")
-    r = Join(Split(r, Chr(9)), "\\t")
+    r = Join(Split(r, "\"), "\\")
+    r = Join(Split(r, Chr(34)), "\" & Chr(34))
+    r = Join(Split(r, Chr(13)), "\r")
+    r = Join(Split(r, Chr(10)), "\n")
+    r = Join(Split(r, Chr(9)), "\t")
     JsonEscape = r
 End Function
 
@@ -1366,6 +1369,21 @@ End Sub
 ' Helper: does bracket contain an unofficial reporter?
 '===========================================================
 Private Function IsParallelCitation(s As String) As Boolean
+    ' Parallel citations always start with a volume number, so the
+    ' bracketed span only qualifies if its content (after the "[" and
+    ' any leading whitespace) begins with a digit. This keeps editorial
+    ' inserts like "[J.A. 123]" or "[A. Smith]" from tripping the bare
+    ' "P."/"A."/"So." reporter tests below.
+    IsParallelCitation = False
+    Dim sContent As String
+    sContent = s
+    If Left(sContent, 1) = "[" Then sContent = Mid(sContent, 2)
+    sContent = LTrim(sContent)
+    If Len(sContent) = 0 Then Exit Function
+    Dim nFirst As Long
+    nFirst = AscW(Left(sContent, 1))
+    If nFirst < 48 Or nFirst > 57 Then Exit Function
+
     If InStr(s, "L.Ed.2d") > 0 Then IsParallelCitation = True: Exit Function
     If InStr(s, "L.Ed.") > 0 Then IsParallelCitation = True: Exit Function
     If InStr(s, "S.Ct.") > 0 Then IsParallelCitation = True: Exit Function
@@ -1439,12 +1457,17 @@ Private Sub RemoveWestlawParallelCitations(oRange As Range)
         Dim nIter As Long
         nIter = 0
 
+        ' Progress cursor: where the next search starts. Advances past
+        ' each non-qualifying match so the same hit is never re-found.
+        Dim lSearchFrom As Long
+        lSearchFrom = oRange.start
+
         Do
             nIter = nIter + 1
             If nIter > MAX_ITER Then Exit Do
 
             Dim oFind As Range
-            Set oFind = oRange.Duplicate
+            Set oFind = oDoc.Range(lSearchFrom, oRange.End)
 
             With oFind.Find
                 .ClearFormatting
@@ -1478,9 +1501,11 @@ Private Sub RemoveWestlawParallelCitations(oRange As Range)
             Set oRightCheck = Nothing
 
             If nRightFirst < 48 Or nRightFirst > 57 Then
-                oFind.Collapse wdCollapseEnd
+                ' Not a parallel cite here -- skip past this match and
+                ' keep searching for later occurrences of the reporter.
+                lSearchFrom = oFind.End
                 Set oFind = Nothing
-                Exit Do
+                GoTo NextReporterMatch
             End If
 
             ' --- Validate left side: comma then digits-only volume number ---
@@ -1514,7 +1539,9 @@ Private Sub RemoveWestlawParallelCitations(oRange As Range)
             Loop
 
             If Not bCommaFound Then
-                oFind.Collapse wdCollapseEnd
+                ' No qualifying volume/comma on the left -- skip past
+                ' this match rather than re-finding it forever.
+                lSearchFrom = oFind.End
                 Set oFind = Nothing
             Else
                 ' --- Walk right consuming page number digits only ---
@@ -1550,8 +1577,11 @@ Private Sub RemoveWestlawParallelCitations(oRange As Range)
                 Set oDel = Nothing
                 Set oFind = Nothing
                 Set oRange = oDoc.Range(oRange.start, oRange.End)
+                ' Text shrank -- resume the search from the deletion point.
+                lSearchFrom = lDelStart
             End If
 
+NextReporterMatch:
         Loop
     Next r
 
@@ -2057,6 +2087,9 @@ Private Sub BalanceNestedQuotes(oRange As Range)
                 nOpenSingle = nOpenSingle + 1
             Case &H2019
                 nCloseSingle = nCloseSingle + 1
+            Case 34
+                ' straight double ? counted as an open double quote mark
+                nOpenDouble = nOpenDouble + 1
             Case 39
                 ' straight single ? treat as apostrophe only if immediately followed by a letter;
                 ' otherwise count as an open single quote mark
@@ -2328,9 +2361,11 @@ Private Function DetectPrePasteTextual(oDoc As Document, _
     DetectPrePasteTextual = False
     If lStart < 3 Then Exit Function  ' need at least " in"
 
-    ' Read up to 5 characters before lStart
+    ' Read up to 10 characters before lStart -- wide enough that a run
+    ' of trailing spaces cannot push the character preceding "in" out
+    ' of the window (a 5-char window let "begin" + 3 spaces match).
     Dim nRead As Long
-    nRead = 5
+    nRead = 10
     If lStart < nRead Then nRead = lStart
     Dim sScan As String
     sScan = oDoc.Range(lStart - nRead, lStart).text
@@ -2928,7 +2963,7 @@ Private Sub RestructureAsCites(oDoc As Document, _
         Dim sPassage As String
         sPassage = RTrim(Left(sText, nCitStart - 1))
         ' Build: Citation for the proposition that "Passage."
-        sNew = sCitBody & ", for the proposition that " & sPassage
+        sNew = sCitBody & " for the proposition that " & sPassage
     End If
 
     ' Replace the trimmed portion of the range with the new text.
@@ -4772,22 +4807,11 @@ Private Sub RestructureAsParenthetical(oDoc As Document, _
     ' Safety: first character must be an open double quote
     If AscW(Left(sTrimmed, 1)) <> &H201C Then Exit Sub
 
-    ' Locate the first closing double quote (U+201D)
-    Dim lCloseQuoteIdx As Long
-    lCloseQuoteIdx = 0
-    Dim i As Long
-    For i = 2 To Len(sTrimmed)
-        If AscW(Mid(sTrimmed, i, 1)) = &H201D Then
-            lCloseQuoteIdx = i
-            Exit For
-        End If
-    Next i
-    If lCloseQuoteIdx = 0 Then Exit Sub
-
     ' Locate the outermost citation parenthesis (right-to-left)
     Dim nDepth As Integer
     Dim nCitationStart As Long
     nDepth = 0: nCitationStart = -1
+    Dim i As Long
     Dim c As String
     For i = Len(sTrimmed) To 1 Step -1
         c = Mid(sTrimmed, i, 1)
@@ -4798,6 +4822,21 @@ Private Sub RestructureAsParenthetical(oDoc As Document, _
         End If
     Next i
     If nCitationStart = -1 Then Exit Sub
+
+    ' Locate the passage's closing double quote (U+201D): the LAST
+    ' one before the citation parenthesis. The passage can contain
+    ' internal U+201D marks (SwapSmartQuotes converts nested single
+    ' quotes to close-doubles), so the first one found scanning
+    ' forward may be internal and would truncate the passage.
+    Dim lCloseQuoteIdx As Long
+    lCloseQuoteIdx = 0
+    For i = nCitationStart - 1 To 2 Step -1
+        If AscW(Mid(sTrimmed, i, 1)) = &H201D Then
+            lCloseQuoteIdx = i
+            Exit For
+        End If
+    Next i
+    If lCloseQuoteIdx = 0 Then Exit Sub
 
     ' Extract passage (between the outer quote marks)
     Dim sPassage As String

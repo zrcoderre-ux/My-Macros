@@ -147,6 +147,11 @@ On Error GoTo ErrHandler
     PreScanDocument Doc, docCites, dcc, multiDict, snToKey, rpToKey, preScanInfo, _
                     altPartyToKey, shortNameOverrides, hintLines, hlC, needsShortName
 
+    ' hintLines grows inside PreScanDocument (+50 steps) but usedHints was fixed
+    ' at 0..100, so hints with index >= 101 could be consumed yet never deleted
+    ' in Phase 4. Size usedHints to match before anything reads or writes it.
+    If hlC - 1 > UBound(usedHints) Then ReDim usedHints(0 To hlC - 1)
+
     gPhase = "Phase 1.5: InQuote"
     Dim b15Dict  As Object: Set b15Dict = CreateObject("Scripting.Dictionary"): b15Dict.CompareMode = 1
     Dim b15Count As Long: b15Count = 0
@@ -864,6 +869,7 @@ Private Sub ProcessInQuoteCompletions(Doc As Document, _
                 Else
                     bDot = ""
                 End If
+                Dim b1BN As String: b1BN = ""   ' bracket note captured below, if any
 
                 Dim b1MT As String: b1MT = mS.Value
                 Dim b1AtP As Long: b1AtP = InStr(1, b1MT, " at p", vbTextCompare)
@@ -889,9 +895,17 @@ Private Sub ProcessInQuoteCompletions(Doc As Document, _
                         If Mid(pt, b1PS, 1) = "[" Then
                             Dim b1TE As Long: b1TE = FindClosingBracket(pt, b1PS)
                             If b1TE > b1PS Then
+                                ' Keep the bracket note's text: the span below
+                                ' swallows it, and BuildB1Transformed must
+                                ' re-emit it or "[italics added]"-style notes
+                                ' vanish from the quoted material.
+                                b1BN = Mid(pt, b1PS, b1TE - b1PS + 1)
                                 Dim b1NE As Long: b1NE = b1TE + 1
                                 If b1NE <= Len(pt) Then
-                                    If Mid(pt, b1NE, 1) = "." Then b1NE = b1NE + 1
+                                    If Mid(pt, b1NE, 1) = "." Then
+                                        If Len(bDot) = 0 Then bDot = "."
+                                        b1NE = b1NE + 1
+                                    End If
                                 End If
                                 If b1NE <= Len(pt) Then
                                     If Mid(pt, b1NE, 1) = ")" Then b1NE = b1NE + 1
@@ -921,7 +935,7 @@ Private Sub ProcessInQuoteCompletions(Doc As Document, _
                 If repC < 99 Then
                     Dim b1IO As Long, b1IL As Long, b1IO2 As Long, b1IL2 As Long
                     Dim b1NT As String
-                    b1NT = BuildB1Transformed(bSig, bName, bRep, bPin, bDot, b1HL, b1IO, b1IL, b1IO2, b1IL2)
+                    b1NT = BuildB1Transformed(bSig, bName, bRep, bPin, bDot, b1HL, b1IO, b1IL, b1IO2, b1IL2, b1BN)
                     repAbsStart(repC) = PARA.Range.start + bss - 1
                     repAbsEnd(repC) = PARA.Range.start + bss - 1 + bsl
                     repNewText(repC) = b1NT
@@ -1058,6 +1072,16 @@ B2NextRun:
                 Dim repRng As Range
                 Set repRng = Doc.Range(repAbsStart(ri), repAbsEnd(ri))
                 repRng.text = repNewText(ri)
+                ' Every replacement changes the document's length from this
+                ' point on, but docCites carries absolute offsets captured by
+                ' the prescan. Shift them now, or Phase 2's swaps (and this
+                ' loop's own long-cite checks in later paragraphs) land on
+                ' stale positions and overwrite the wrong text.
+                Dim b15Delta As Long
+                b15Delta = Len(repNewText(ri)) - (repAbsEnd(ri) - repAbsStart(ri))
+                If b15Delta <> 0 Then
+                    ShiftDocCiteOffsets docCites, dcc, repAbsStart(ri), repAbsEnd(ri), b15Delta
+                End If
                 TrimTrailingItalic Doc, repAbsStart(ri), Len(repNewText(ri))
                 Dim flatRng As Range
                 Set flatRng = Doc.Range(repAbsStart(ri), repAbsStart(ri) + Len(repNewText(ri)))
@@ -1079,6 +1103,24 @@ B2NextRun:
 
 PIQCNext:
     Next PARA
+End Sub
+
+' Shift the prescan's absolute offsets after an in-quote completion edited the
+' document: entries at or after the replaced span move by delta; an entry whose
+' span CONTAINS the edit keeps its start but grows/shrinks by delta. Entries
+' entirely before the edit are untouched.
+Private Sub ShiftDocCiteOffsets(docCites() As DocCite, ByVal dcc As Long, _
+                                 ByVal editStart As Long, ByVal editEnd As Long, _
+                                 ByVal delta As Long)
+    Dim k As Long
+    For k = 0 To dcc - 1
+        If docCites(k).absStart >= editEnd Then
+            docCites(k).absStart = docCites(k).absStart + delta
+        ElseIf docCites(k).absStart <= editStart And _
+               docCites(k).absStart + docCites(k).textLen >= editEnd Then
+            docCites(k).textLen = docCites(k).textLen + delta
+        End If
+    Next k
 End Sub
 
 '==============================================================================
@@ -1151,9 +1193,13 @@ Private Function PerformSwaps(Doc As Document, _
         Else
             swEffSN = docCites(li2).shortName
         End If
+        ' A BARE orphan supra sits in running text ("In Smith, supra, ... the
+        ' court held"), so its promoted full cite must not be wrapped in a
+        ' citation-sentence "( ... .)" -- that produced a parenthesized
+        ' sentence fragment mid-sentence. Build it as bare running text.
         newLong = BuildFullCiteTextSN(docCites(li2), docCites(si).pincite, _
                                       docCites(si).signal, True, swEffSN, _
-                                      docCites(si).fnTail)
+                                      docCites(si).fnTail, docCites(si).isBare)
 
         Dim swRng As Range
         Set swRng = Doc.Range(start:=docCites(si).absStart, _
@@ -1162,7 +1208,13 @@ Private Function PerformSwaps(Doc As Document, _
 
         TrimTrailingItalic Doc, docCites(si).absStart, Len(newLong)
 
-        Dim cnAbs As Long: cnAbs = docCites(si).absStart + 1
+        ' Case-name italics offset: bare output has no leading "(".
+        Dim cnAbs As Long
+        If docCites(si).isBare Then
+            cnAbs = docCites(si).absStart
+        Else
+            cnAbs = docCites(si).absStart + 1
+        End If
         If docCites(si).signal <> "" Then cnAbs = cnAbs + Len(docCites(si).signal) + 1
         Dim cnLen As Long: cnLen = Len(docCites(li2).caseName)
         If cnLen > 0 Then
@@ -1317,6 +1369,14 @@ Private Sub ProcessParagraph(PARA As Paragraph, _
                         ' abbreviated "p." -- this is inside a citation
                         ' parenthetical, not a textual bare supra.
                         newTxt = "(" & BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, True, True, cit.bracketNote, 0)
+                    ElseIf cit.isBare And PrevNonSpaceChar(pt, cit.startChar) = ";" Then
+                        ' Second/later entry of a compound citation
+                        ' parenthetical: the scanner flags only the first
+                        ' entry (the one behind the "(") as compound, so an
+                        ' entry after "; " arrives here as bare. It is still
+                        ' inside the parenthetical, so keep the abbreviated
+                        ' "p." rather than spelling out "page".
+                        newTxt = BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, True, True, cit.bracketNote, 0)
                     Else
                         newTxt = BuildSupraStr(cit.signal, rSN, rRep, cit.pincite, cit.isMidSentence, cit.isBare, cit.bracketNote)
                     End If
@@ -1792,6 +1852,11 @@ P35DecideNK:
                 Dim mR As Object
                 Dim renStarts(49) As Long, renEnds(49) As Long
                 Dim renNewTxts(49) As String: Dim renC As Long: renC = 0
+                ' Per-entry signal: the apply loop below computes the short-
+                ' name italics offset from the signal, and reading the loop
+                ' variable rSig there would use the LAST match's signal for
+                ' every entry.
+                Dim renSigs(49) As String
                 For Each mR In msR
                     If LCase(Trim(mR.SubMatches(1))) = LCase(bestPartial) And _
                        LCase(Trim(mR.SubMatches(2))) = LCase(fci(4)) Then
@@ -1845,6 +1910,7 @@ P35DecideNK:
                             renStarts(renC) = para3.Range.start + mR.FirstIndex
                             renEnds(renC) = para3.Range.start + mR.FirstIndex + rML
                             renNewTxts(renC) = rNewT
+                            renSigs(renC) = rSig
                             renC = renC + 1
                         End If
                     End If
@@ -1862,7 +1928,7 @@ P35DecideNK:
                                                renStarts(ri3) + supIdx - 1 + 5)
                         supRng.Font.Italic = True
                     End If
-                    Dim snOff As Long: snOff = 1 + IIf(rSig <> "", Len(rSig) + 1, 0)
+                    Dim snOff As Long: snOff = 1 + IIf(renSigs(ri3) <> "", Len(renSigs(ri3)) + 1, 0)
                     Dim snRng As Range
                     Set snRng = Doc.Range(renStarts(ri3) + snOff, _
                                           renStarts(ri3) + snOff + Len(fciEffSN))
@@ -1873,6 +1939,7 @@ P35DecideNK:
                 Dim mRB As Object
                 Dim renBStarts(49) As Long, renBEnds(49) As Long
                 Dim renBNewTxts(49) As String: Dim renBC As Long: renBC = 0
+                Dim renBSigs(49) As String    ' per-entry signal (same reason as renSigs)
                 For Each mRB In msRB
                     Dim bsOff As Long: bsOff = mRB.FirstIndex + 1
                     If bsOff > 1 Then
@@ -1890,6 +1957,7 @@ P35DecideNK:
                             renBStarts(renBC) = para3.Range.start + mRB.FirstIndex
                             renBEnds(renBC) = para3.Range.start + mRB.FirstIndex + mRB.length
                             renBNewTxts(renBC) = rbNewT
+                            renBSigs(renBC) = rbSig
                             renBC = renBC + 1
                         End If
                     End If
@@ -2033,6 +2101,21 @@ Private Function ExtractBracketNoteFromSupraMatch(m As Object, pt As String) As 
     End If
 End Function
 
+' The last non-space character before 1-based position pos in s, or "" when
+' there is none. Used to spot the "; " that precedes the second and later
+' entries of a compound citation parenthetical.
+Private Function PrevNonSpaceChar(ByVal s As String, ByVal pos As Long) As String
+    Dim k As Long: k = pos - 1
+    Do While k >= 1
+        If Mid(s, k, 1) <> " " Then
+            PrevNonSpaceChar = Mid(s, k, 1)
+            Exit Function
+        End If
+        k = k - 1
+    Loop
+    PrevNonSpaceChar = ""
+End Function
+
 Private Function IsPartyPrefix(shortName As String, plaintiff As String, defendant As String) As Boolean
     Dim sn As String: sn = LCase(Trim(shortName))
     If Len(sn) = 0 Then IsPartyPrefix = False: Exit Function
@@ -2058,8 +2141,11 @@ Private Sub DeleteUsedHintLines(Doc As Document, _
             If usedHints(i) Then
                 Dim bmn As String: bmn = hintLines(i).bmName
                 If Doc.Bookmarks.Exists(bmn) Then
+                    ' The bookmark was created over PARA.Range, which already
+                    ' includes the trailing paragraph mark -- extending by one
+                    ' more character here ate the first character of the NEXT
+                    ' paragraph. Delete exactly the bookmarked range.
                     Dim delRng As Range: Set delRng = Doc.Bookmarks(bmn).Range
-                    If delRng.End < Doc.content.End Then delRng.End = delRng.End + 1
                     delRng.Delete
                     If Doc.Bookmarks.Exists(bmn) Then Doc.Bookmarks(bmn).Delete
                 End If
@@ -2358,7 +2444,11 @@ NextBS:
     '--- Ibid. ---
     Dim reIbid As Object: Set reIbid = CreateObject("VBScript.RegExp")
     reIbid.Global = True: reIbid.Multiline = False
-    reIbid.Pattern = "\([Ii]bid\.(\s*\[[\s\S]*?\])?\)"
+    ' The optional (\.?) matches this macro's own bracket-note output,
+    ' "(Ibid. [fn. omitted].)" -- BuildIbidStr puts a period after the note,
+    ' and without it a re-run could never re-validate or update such cites.
+    ' (The Id. pattern below already has the same group.)
+    reIbid.Pattern = "\([Ii]bid\.(\s*\[[\s\S]*?\])?(\.?)\)"
 
     Dim msI As Object: Set msI = reIbid.Execute(pt)
     Dim mI  As Object
@@ -2427,21 +2517,29 @@ Private Function BuildFullCiteText(longInfo As DocCite, _
     BuildFullCiteText = BuildFullCiteTextSN(longInfo, usePincite, useSignal, addParen, sn, "")
 End Function
 
+' asBare = True builds the cite as running text (no wrapping parens, no
+' terminal period) for a BARE supra being promoted to a full cite mid-sentence;
+' the default keeps the parenthesized citation-sentence form.
 Private Function BuildFullCiteTextSN(longInfo As DocCite, _
                                       usePincite As String, _
                                       useSignal As String, _
                                       addParen As Boolean, _
                                       shortName As String, _
-                                      Optional useFnTail As String = "") As String
+                                      Optional useFnTail As String = "", _
+                                      Optional asBare As Boolean = False) As String
     Dim s As String
-    s = "("
+    If asBare Then s = "" Else s = "("
     If useSignal <> "" Then s = s & useSignal & " "
     s = s & longInfo.caseName & " (" & longInfo.year & ") " & _
             longInfo.reporter & " " & longInfo.initialPage
     If usePincite <> "" Then s = s & ", " & usePincite
     If useFnTail <> "" Then s = s & ", " & useFnTail
     If addParen Then s = s & " (" & shortName & ")"
-    BuildFullCiteTextSN = s & ".)"
+    If asBare Then
+        BuildFullCiteTextSN = s
+    Else
+        BuildFullCiteTextSN = s & ".)"
+    End If
 End Function
 
 Private Function BuildFullCiteText2(cit As CitInfo, shortName As String) As String
@@ -2452,7 +2550,10 @@ Private Function BuildFullCiteText2(cit As CitInfo, shortName As String) As Stri
         If cit.signal <> "" Then s = cit.signal & " " Else s = ""
         s = s & cit.caseName & " (" & cit.year & ") " & cit.reporter & " " & cit.initialPage
         If cit.pincite <> "" Then s = s & ", " & cit.pincite
-        BuildFullCiteText2 = s & fnSfx & " (" & shortName & ") " & bn
+        ' No trailing space: bn carries its own leading space, and the bare
+        ' span being replaced has no trailing space of its own -- appending
+        ' one here doubled the space before the following word.
+        BuildFullCiteText2 = s & fnSfx & " (" & shortName & ")" & bn
     Else
         s = "("
         If cit.signal <> "" Then s = s & cit.signal & " "
@@ -3225,7 +3326,8 @@ Private Function BuildB1Transformed(sig As String, capturedName As String, _
                                      ByRef italicOff As Long, _
                                      ByRef italicLen As Long, _
                                      ByRef italicOff2 As Long, _
-                                     ByRef italicLen2 As Long) As String
+                                     ByRef italicLen2 As Long, _
+                                     Optional bracketNote As String = "") As String
     italicOff2 = 0: italicLen2 = 0
 
     Dim s As String: s = "("
@@ -3261,8 +3363,11 @@ Private Function BuildB1Transformed(sig As String, capturedName As String, _
 
     italicOff = nameStartInS
 
+    ' Re-emit any bracket note the match span absorbed (e.g. "[italics
+    ' added]") so the completion never deletes text from quoted material.
     s = s & " [(" & hl.year & ")] " & capturedRep & _
-            " [" & hl.initialPage & ",] " & capturedPin & trailDot & ")"
+            " [" & hl.initialPage & ",] " & capturedPin & _
+            IIf(bracketNote <> "", " " & bracketNote, "") & trailDot & ")"
 
     BuildB1Transformed = s
 End Function
