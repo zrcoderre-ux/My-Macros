@@ -1307,7 +1307,12 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             .Forward = True
             .Wrap = wdFindStop
             .MatchCase = False
-            .MatchWholeWord = whole
+            ' Whole-token restriction is enforced by WholeTokenBoundaries below,
+            ' NOT by Word's MatchWholeWord: the latter counts an apostrophe as a
+            ' word character (so "Thorne's" never matched and the name leaked)
+            ' and mishandles tokens hugged by parentheses/quotation marks. Search
+            ' as a plain substring; our own boundary check decides what to keep.
+            .MatchWholeWord = False
             .MatchWildcards = False
             ' Capture the result BEFORE testing it: this function runs under
             ' On Error Resume Next, and an error raised inside the old
@@ -1321,10 +1326,25 @@ Private Function ReplaceInRange(ByVal rng As Range, _
             If Err.Number <> 0 Then Err.Clear: Exit Do
             If Not bHit Then Exit Do
         End With
-        ' scan now spans the matched text. Skip it (leave the real name in place)
-        ' when it sits in a cited authority -- italic text -- so re-anonymize
-        ' never rewrites a published case name that shares a party's surname.
-        If Not (protectCitations And scan.Font.Italic = True) Then
+        ' scan now spans the matched text. Two independent reasons to leave a
+        ' match in place:
+        '
+        '  1. Whole-token names/case numbers (whole = True) must not be rewritten
+        '     inside a larger word. WholeTokenBoundaries requires the characters
+        '     on either side of the match to be non-alphanumeric, so "(Nash)",
+        '     a quoted name, and the possessive "Thorne's" are all caught while
+        '     "Nash" inside "Nashville" is not. Multi-word / punctuated finds
+        '     (whole = False) keep the old literal-substring behavior.
+        '
+        '  2. protectCitations (re-anonymize): a match in italic text is a cited
+        '     authority, left as-is so a published case name that shares a party
+        '     surname isn't rewritten in the shared copy.
+        Dim doReplace As Boolean: doReplace = True
+        If whole Then
+            If Not WholeTokenBoundaries(scan) Then doReplace = False
+        End If
+        If doReplace And protectCitations And scan.Font.Italic = True Then doReplace = False
+        If doReplace Then
             ' assign directly (no smart-case) after recasing the replacement
             ' to the casing the fake appeared in.
             scan.text = MatchCasing(scan.text, replaceText)
@@ -1336,6 +1356,47 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         If scan.start >= rng.End Then Exit Do
     Loop
     ReplaceInRange = madeChange
+End Function
+
+' True when the matched range is a whole alphanumeric token -- the characters
+' immediately before AND after it are not letters or digits. This is our own
+' word-boundary test, used instead of Word's MatchWholeWord for single-token
+' names and case numbers. Word's version treats an apostrophe as a word
+' character, so a possessive ("Thorne's") read as one word and never matched --
+' the real name then leaked through both redaction and de-redaction -- and it
+' has been observed to skip tokens pressed against parentheses or quotation
+' marks. Here EVERY non-alphanumeric character counts as a boundary: "(", ")",
+' "[", "]", straight or curly quotes, apostrophes, spaces, punctuation, and the
+' story edge. So "(Nash)", "“Nash”", and "Thorne's" all qualify, while
+' "Nash" inside "Nashville" does not.
+Private Function WholeTokenBoundaries(ByVal matched As Range) As Boolean
+    On Error Resume Next
+    WholeTokenBoundaries = True
+
+    ' Character immediately before the match (empty at the story start).
+    Dim pb As Range: Set pb = matched.Duplicate
+    pb.Collapse Direction:=wdCollapseStart
+    If pb.MoveStart(wdCharacter, -1) <> 0 Then
+        If IsAlnumChar(pb.text) Then
+            WholeTokenBoundaries = False
+            Exit Function
+        End If
+    End If
+
+    ' Character immediately after the match (empty at the story end).
+    Dim pa As Range: Set pa = matched.Duplicate
+    pa.Collapse Direction:=wdCollapseEnd
+    If pa.MoveEnd(wdCharacter, 1) <> 0 Then
+        If IsAlnumChar(pa.text) Then WholeTokenBoundaries = False
+    End If
+End Function
+
+' True for a single ASCII letter or digit. A one-character range at a boundary
+' may also come back as a paragraph mark, field control, or curly quote -- all
+' correctly reported as non-alphanumeric (a boundary).
+Private Function IsAlnumChar(ByVal c As String) As Boolean
+    If Len(c) <> 1 Then Exit Function
+    IsAlnumChar = (c Like "[A-Za-z0-9]")
 End Function
 
 ' Recase replaceText to mirror the casing of the matched fake text, so a name is
