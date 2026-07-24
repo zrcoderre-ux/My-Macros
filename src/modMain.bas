@@ -216,8 +216,12 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' domain still in the document, flagged pink -- even when mashed inside a
     ' larger word -- so a fake that slipped into the draft is caught before the
     ' document is shared. bodyOnly:=True keeps the pink in the main body, the only
-    ' story this module's highlight clearers sweep.
+    ' story this module's highlight clearers sweep. The scan is a few hundred
+    ' native Find sweeps; suspend screen redraw so they run fast and flicker-free.
+    Dim prevSU As Boolean: prevSU = Application.ScreenUpdating
+    Application.ScreenUpdating = False
     If DeAnonymize.HighlightResidualPseudonyms(Doc, bodyOnly:=True) > 0 Then issues = True
+    Application.ScreenUpdating = prevSU
 
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc

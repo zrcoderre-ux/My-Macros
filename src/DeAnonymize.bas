@@ -1621,17 +1621,30 @@ End Function
 ' Highlight every pool word and every email domain in one range. Returns the
 ' count. Words use the case-sensitive first-capital/all-caps rule; domains are
 ' matched literally and case-insensitively.
+'
+' This is a few hundred native Find sweeps (one per term per case form). Each is
+' cheap -- a term absent from the document returns immediately -- but DoEvents
+' every few terms lets Word service its message queue, so a long document can
+' never make the pass look like a hang.
 Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant, _
                                         ByVal doms As Variant) As Long
     Dim total As Long, k As Long
     For k = LBound(pool) To UBound(pool)
         total = total + HighlightWordInRange(rng, CStr(pool(k)))
+        If k Mod 25 = 0 Then DoEvents
     Next k
     For k = LBound(doms) To UBound(doms)
         total = total + HighlightLiteralCI(rng, CStr(doms(k)))
     Next k
     HighlightFakesInRange = total
 End Function
+
+' Safety valve for the highlight loops below. A pool word can be ordinary English
+' ("Sterling", "Cedar", "Mercer"), so a long document could in principle hold
+' thousands of hits for one term. Highlighting is a review aid -- once a term has
+' this many flags the point is already made -- so each pass stops here rather
+' than grinding on. Far above any real leak count.
+Private Const MAX_HITS_PER_TERM As Long = 500
 
 ' Highlight every occurrence of a lowercase literal fake -- an email domain such
 ' as "example.com" -- in a range, case-insensitively and even inside a larger
@@ -1654,6 +1667,7 @@ Private Function HighlightLiteralCI(ByVal rng As Range, ByVal term As String) As
         Do While .Execute
             r.HighlightColorIndex = wdPink
             n = n + 1
+            If n >= MAX_HITS_PER_TERM Then Exit Do
         Loop
     End With
     HighlightLiteralCI = n
@@ -1690,6 +1704,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
         Do While .Execute
             r.HighlightColorIndex = wdPink
             n = n + 1
+            If n >= MAX_HITS_PER_TERM Then Exit Do
         Loop
     End With
     HighlightExact = n
