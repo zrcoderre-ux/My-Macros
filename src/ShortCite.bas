@@ -1719,6 +1719,15 @@ P35NextPara1:
     reSupra.Global = True: reSupra.Multiline = False: reSupra.Pattern = BuildSupraPattern()
     reBareSup.Global = True: reBareSup.Multiline = False: reBareSup.Pattern = BuildBareSupraPattern()
 
+    ' Paragraph snapshot for the read-only detection scan below. Rebuilt only
+    ' after a rename/remove branch edits the document (snapDirty), so it always
+    ' reflects the same live state the old per-case Doc.Paragraphs enumeration
+    ' saw -- but without paying that O(cases x paragraphs) COM cost, which was
+    ' what made this macro hang or crash Word on long briefs.
+    Dim snapStarts() As Long, snapEnds() As Long, snapTexts() As String
+    Dim snapCount As Long
+    Dim snapDirty As Boolean: snapDirty = True
+
     Dim nkv As Variant
     For Each nkv In firstCiteInfo.Keys
         Dim nk As String: nk = CStr(nkv)
@@ -1744,17 +1753,20 @@ P35NextPara1:
         Dim foundPartial As Boolean: foundPartial = False
         Dim bestPartial  As String:  bestPartial = ""
 
-        Dim para2 As Paragraph
-        For Each para2 In Doc.Paragraphs
-            Dim paraEnd As Long: paraEnd = para2.Range.End - 1
+        If snapDirty Then
+            BuildParaSnapshot Doc, snapStarts, snapEnds, snapTexts, snapCount
+            snapDirty = False
+        End If
+
+        Dim pIdx As Long
+        For pIdx = 0 To snapCount - 1
+            Dim paraEnd As Long: paraEnd = snapEnds(pIdx) - 1
             If paraEnd <= fciAbsStart Then GoTo P35NextPara2
 
-            Dim paraAbsStart As Long: paraAbsStart = para2.Range.start
+            Dim paraAbsStart As Long: paraAbsStart = snapStarts(pIdx)
 
-            Dim pt2Live As String: pt2Live = para2.Range.text
-            If Len(pt2Live) > 0 And Right(pt2Live, 1) = Chr(13) Then _
-                pt2Live = Left(pt2Live, Len(pt2Live) - 1)
-            pt2Live = NormalizeSpaces(pt2Live)
+            ' snapTexts is already trailing-Chr(13)-stripped and normalized.
+            Dim pt2Live As String: pt2Live = snapTexts(pIdx)
 
             Dim searchFrom As Long
             If paraAbsStart > fciAbsStart Then
@@ -1835,7 +1847,7 @@ P35NextSup2:
 P35NextBS2:
             Next mBS2
 P35NextPara2:
-        Next para2
+        Next pIdx
 
 P35DecideNK:
         If foundExact Then GoTo P35NextNK
@@ -1984,6 +1996,9 @@ P35NextRB:
                 Next rbi3
 P35NextPara3:
             Next para3
+            ' The rename loop above edited the document; force a snapshot
+            ' rebuild so the next case's detection scan sees the new positions.
+            snapDirty = True
             GoTo P35NextNK
         End If
 
@@ -2044,9 +2059,48 @@ P35NextM4:
             If para4.Range.start >= fciAbsStart And para4.Range.End > fciAbsStart Then Exit For
 P35NextPara4:
         Next para4
+        ' The removal loop above may have edited the document; force a snapshot
+        ' rebuild so the next case's detection scan sees the new positions.
+        snapDirty = True
 
 P35NextNK:
     Next nkv
+End Sub
+
+'------------------------------------------------------------------------------
+' Snapshot every paragraph's absolute bounds and normalized text in a single
+' Doc.Paragraphs enumeration. Iterating that collection is the slowest common
+' operation in Word VBA, so callers that would otherwise re-enumerate it many
+' times (e.g. the read-only detection scan in ProcessParentheticals) read from
+' these arrays instead. Text is stored exactly as the old inline scan derived
+' it: trailing paragraph mark stripped, then NormalizeSpaces applied.
+'------------------------------------------------------------------------------
+Private Sub BuildParaSnapshot(Doc As Document, _
+                              ByRef sStarts() As Long, _
+                              ByRef sEnds() As Long, _
+                              ByRef sTexts() As String, _
+                              ByRef sCount As Long)
+    Dim cap As Long: cap = 200
+    ReDim sStarts(0 To cap)
+    ReDim sEnds(0 To cap)
+    ReDim sTexts(0 To cap)
+    sCount = 0
+
+    Dim p As Paragraph
+    For Each p In Doc.Paragraphs
+        If sCount > cap - 1 Then
+            cap = cap + 200
+            ReDim Preserve sStarts(0 To cap)
+            ReDim Preserve sEnds(0 To cap)
+            ReDim Preserve sTexts(0 To cap)
+        End If
+        sStarts(sCount) = p.Range.start
+        sEnds(sCount) = p.Range.End
+        Dim t As String: t = p.Range.text
+        If Len(t) > 0 And Right(t, 1) = Chr(13) Then t = Left(t, Len(t) - 1)
+        sTexts(sCount) = NormalizeSpaces(t)
+        sCount = sCount + 1
+    Next p
 End Sub
 
 '--- FindClosingBracket ---
