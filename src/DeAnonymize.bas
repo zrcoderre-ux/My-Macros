@@ -1560,54 +1560,117 @@ End Function
 '==============================================================================
 ' RESIDUAL PSEUDONYM HIGHLIGHTING  (leak safety net)
 '==============================================================================
-' The pseudonymizer draws every fake from a fixed pool of ~140 words. After
-' de-anonymize has swapped the keyed fakes back to real values, highlight any
-' pool word STILL present in the document -- even embedded inside a larger word
-' -- so a fake the key missed (an odd inflection, a stray occurrence) can't slip
-' through unnoticed. Returns the number of occurrences highlighted.
+' The pseudonymizer draws every fake from a fixed pool of words plus a handful
+' of placeholder email domains. Highlight any of them STILL present in the
+' document -- even embedded inside a larger word -- so a fake that leaked in (a
+' key the tool missed, an odd inflection, a stray occurrence) can't slip through
+' unnoticed. Returns the number of occurrences highlighted. Public so the
+' close-before-review pass (modMain.RunAllDocumentChecks) can run the same
+' safety net on every reviewed document, not only right after de-anonymize.
 '
 ' Substring matching (MatchWholeWord = False) is intentional and per the user's
-' request. Matching is case-sensitive: only a first-capital form ("Nash") or an
-' all-caps form ("NASH") is flagged, so a lowercase occurrence -- whether a
-' stray "nash" or the "vance" buried in "advance" -- is left alone. Capitalized
-' prose that happens to be a pool word (e.g. "Cedar", "Granite") can still be
-' flagged, which is fine for a review aid -- the user clears those by eye.
-Private Function HighlightResidualPseudonyms(ByVal oDoc As Document) As Long
+' request. Name/place words are matched case-sensitively: only a first-capital
+' form ("Nash") or an all-caps form ("NASH") is flagged, so a lowercase
+' occurrence -- whether a stray "nash" or the "vance" buried in "advance" -- is
+' left alone. Capitalized prose that happens to be a pool word (e.g. "Cedar",
+' "Granite") can still be flagged, which is fine for a review aid -- the user
+' clears those by eye. The email domains are lowercase with dots, so they are
+' matched literally and case-insensitively instead.
+'
+' bodyOnly: the close-review caller (modMain.RunAllDocumentChecks) passes True so
+' the pink it adds stays in the main body -- the only story its highlight
+' clearers (ClearCheckHighlights / ClearAllHighlightsExceptYellow) sweep, so a
+' flag can never be stranded in a header or footnote after the user chooses
+' "close and remove highlights." The manual de-anonymize caller leaves it False
+' for full coverage: it manages its own pink and never runs those clearers.
+Public Function HighlightResidualPseudonyms(ByVal oDoc As Document, _
+                                            Optional ByVal bodyOnly As Boolean = False) As Long
     Dim pool As Variant: pool = PseudonymPool()
+    Dim doms As Variant: doms = EmailDomainPool()
     Dim total As Long: total = 0
 
     ' Main body.
-    total = total + HighlightPoolInRange(oDoc.content, pool)
+    total = total + HighlightFakesInRange(oDoc.content, pool, doms)
+    If bodyOnly Then
+        HighlightResidualPseudonyms = total
+        Exit Function
+    End If
 
     ' Headers and footers, section by section.
     Dim sec As Section, hf As HeaderFooter
     For Each sec In oDoc.Sections
         For Each hf In sec.Headers
-            If hf.Exists Then total = total + HighlightPoolInRange(hf.Range, pool)
+            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms)
         Next hf
         For Each hf In sec.Footers
-            If hf.Exists Then total = total + HighlightPoolInRange(hf.Range, pool)
+            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms)
         Next hf
     Next sec
 
     ' Footnotes / endnotes, only when present.
     On Error Resume Next
     If oDoc.Footnotes.count > 0 Then _
-        total = total + HighlightPoolInRange(oDoc.StoryRanges(wdFootnotesStory), pool)
+        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdFootnotesStory), pool, doms)
     If oDoc.Endnotes.count > 0 Then _
-        total = total + HighlightPoolInRange(oDoc.StoryRanges(wdEndnotesStory), pool)
+        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdEndnotesStory), pool, doms)
     On Error GoTo 0
 
     HighlightResidualPseudonyms = total
 End Function
 
-' Highlight every occurrence of every pool word in one range. Returns the count.
-Private Function HighlightPoolInRange(ByVal rng As Range, ByVal pool As Variant) As Long
+' Highlight every pool word and every email domain in one range. Returns the
+' count. Words use the case-sensitive first-capital/all-caps rule; domains are
+' matched literally and case-insensitively.
+'
+' This is a few hundred native Find sweeps (one per term per case form). Each is
+' cheap -- a term absent from the document returns immediately -- but DoEvents
+' every few terms lets Word service its message queue, so a long document can
+' never make the pass look like a hang.
+Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant, _
+                                        ByVal doms As Variant) As Long
     Dim total As Long, k As Long
     For k = LBound(pool) To UBound(pool)
         total = total + HighlightWordInRange(rng, CStr(pool(k)))
+        If k Mod 25 = 0 Then DoEvents
     Next k
-    HighlightPoolInRange = total
+    For k = LBound(doms) To UBound(doms)
+        total = total + HighlightLiteralCI(rng, CStr(doms(k)))
+    Next k
+    HighlightFakesInRange = total
+End Function
+
+' Safety valve for the highlight loops below. A pool word can be ordinary English
+' ("Sterling", "Cedar", "Mercer"), so a long document could in principle hold
+' thousands of hits for one term. Highlighting is a review aid -- once a term has
+' this many flags the point is already made -- so each pass stops here rather
+' than grinding on. Far above any real leak count.
+Private Const MAX_HITS_PER_TERM As Long = 500
+
+' Highlight every occurrence of a lowercase literal fake -- an email domain such
+' as "example.com" -- in a range, case-insensitively and even inside a larger
+' token, in pink. Returns the count. Domains are lowercase and contain dots, so
+' the capitalized-word rule used for name fakes does not apply: match verbatim.
+Private Function HighlightLiteralCI(ByVal rng As Range, ByVal term As String) As Long
+    On Error Resume Next
+    If Len(term) = 0 Then Exit Function
+    Dim r As Range: Set r = rng.Duplicate
+    Dim n As Long: n = 0
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .text = term
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = False
+        .MatchWholeWord = False        ' flag the domain even inside a larger token
+        .MatchWildcards = False
+        Do While .Execute
+            r.HighlightColorIndex = wdPink
+            n = n + 1
+            If n >= MAX_HITS_PER_TERM Then Exit Do
+        Loop
+    End With
+    HighlightLiteralCI = n
 End Function
 
 ' Highlight occurrences of one pool word in a range, case-sensitively, in either
@@ -1641,6 +1704,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
         Do While .Execute
             r.HighlightColorIndex = wdPink
             n = n + 1
+            If n >= MAX_HITS_PER_TERM Then Exit Do
         Loop
     End With
     HighlightExact = n
@@ -1648,20 +1712,32 @@ End Function
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,
 ' entity/company words, street names, and city/locality names. Built in chunks
-' (each under VBA's line-length limit) and split on spaces. Juniper and Larkspur
-' appear in more than one category upstream; listed once here.
+' (each under VBA's line-length limit) and split on spaces. Words that appear in
+' more than one category upstream (Juniper, Larkspur) are listed once here.
 Private Function PseudonymPool() As Variant
     Dim s As String
     ' Person surnames
     s = "Ashford Bennett Calder Danforth Ellery Fenwick Garrick Halloran Ingram Jarrett Keswick Langley Marlowe Nash Orwell Prescott Quill Radley Sable Thorne Underwood Vance Whitlock Yardley"
     s = s & " Ashby Brandt Corwin Delacroix Everts Fairfax Grantham Holloway Isley Jennings Kingsley Lathrop Merrick Norwood Ackerly Bramble Colfax Denning Emmett Forsythe Gable Hendry Ivers Joplin Kessler Lorne Mabry Nolan Ondine Pruett Renwick Sterling Tolliver Ursin Verity Waverly Alden Beaumont Carrow Delane"
+    s = s & " Abernathy Alcott Amberly Ashcombe Atwater Balfour Bancroft Barlowe Bexley Blackwood Braddock Brimley Cadwell Calloway Carden Cartwright Chadwick Chamberlin Chetwood Clarendon Cleary Cranston Cresswell Darrow Davenport Deverell Doran Dunhill Eastwick Edgerton Ellsworth Fairbank Fallon Farraday Fenmore Finnegan Gaskell Gearhart Goddard Hadley Halstead Hargrove Hartwell Hawkridge Hemsley Hollis Huxley Ingersoll Jarrow Kimball"
+    s = s & " Kinsley Larkin Ledbetter Linford Lockwood Ludlow Mallory Mansfield Marsden Mayhew Milburn Montrose Mowbray Oakley Ormsby Paget Parrish Pemberton Penrose Prentiss Quenby Ramsey Rathbone Redmond Ridley Rockwell Rutherford Sackett Selwyn Sheridan Sinclair Stanhope Stockton Swinton Thorpe Trafford Tremaine Underhill Vickers Wadsworth Waldron Warwick Wescott Wexford Whitby Winslow Wolcott Wycliffe Yates Yorke"
+    s = s & " Ainsworth Braxton Denholm Harrell Kimbrell Lassiter Mercer Northcott Ravenscar Stroud Thackeray Weatherby Aldous Birkett Crandall Eldridge Fanshawe Grimwood Harkness Loxley Merton Pennington Rushton Sedgwick Tennant Waverley Wharton Yeardley"
     ' Entity / company words
     s = s & " Aldrin Brightwater Cascadia Dunmore Everline Foxglen Granite Havenwood Ironbridge Juniper Kestrel Lumen Meridian Northgate Oakmont Pinnacle Quarry Redwood Silverpeak Torchlight Umbra Vantage Westmark Zephyr Ambrose Beacon Cobalt Drayton Emberly Falcon Gladstone Harborview Ivory Jetstream Kaldor Larkspur Monarch Nimbus Orion Pembroke"
+    s = s & " Arclight Brookstone Cairnwood Clearspring Crestline Dovewood Eastmark Eldergrove Ferncliff Fieldstone Foxbridge Glenrock Goldcrest Graystone Highpoint Hollowmere Ironwood Kirkwall Lakemont Lanternwood Ledgewood Marbury Millbrook Moorland Oakspire Overland Parkhurst Pinehurst Ravenwood Riverton Rockhaven Sablewood Sandpiper Shorewood Silvergate Solstice Springvale Starling Stonehaven Thornfield Timberline Wexmoor Whitfield Wildmere Windermere"
+    s = s & " Ashcroft Brightmoor Coppervale Dawnfield Emberton Frostgate Greenhollow Hartland Ironclad Keystone Lightwell Meadowgate Northwind Opalridge Pinecrest Quillmark Rosemont Stormont Truenorth Umberwood Vanguard Wellspring Yarrowvale"
     ' Street names
     s = s & " Cedar Birch Willow Aspen Laurel Poplar Hawthorn Linden Chestnut Sequoia Cypress Alder Dogwood Hickory Rosewood Foxglove Tamarack Sorrel"
     ' City / locality names
     s = s & " Fairview Brookfield Rosedale Elmwood Kingsbury Northvale Westbrook Clearwater Havenport Stonebridge Marlow Redhill Glenmore Oakhurst Bridgeton"
     PseudonymPool = Split(s)
+End Function
+
+' The placeholder email domains the anonymizer assigns. Matched literally and
+' case-insensitively (they are lowercase and contain dots), unlike the
+' capitalized name/place fakes in PseudonymPool.
+Private Function EmailDomainPool() As Variant
+    EmailDomainPool = Array("example.com", "mailhaven.net", "postbox.org", "letterbox.co")
 End Function
 
 '==============================================================================
