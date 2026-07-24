@@ -212,6 +212,13 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Double spaces
     If CheckDoubleSpaces(Doc) Then issues = True
 
+    ' Leftover anonymizer fakes: every pseudonym-pool word and placeholder email
+    ' domain still in the document, flagged pink -- even when mashed inside a
+    ' larger word -- so a fake that slipped into the draft is caught before the
+    ' document is shared. bodyOnly:=True keeps the pink in the main body, the only
+    ' story this module's highlight clearers sweep.
+    If DeAnonymize.HighlightResidualPseudonyms(Doc, bodyOnly:=True) > 0 Then issues = True
+
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc
 
@@ -598,7 +605,7 @@ End Function
 ' HIGHLIGHT CLEARING
 ' ============================================================
 
-' Removes only the macro's own colors (bright green and cyan).
+' Removes only the macro's own colors (bright green, cyan, and pink).
 ' Called at the start of every check run to clear prior results.
 ' Uses a highlight-seeking Find (jumps between highlighted runs) instead of
 ' walking Doc.Content.Characters one COM call at a time, which froze Word
@@ -615,7 +622,8 @@ Public Sub ClearCheckHighlights(Doc As Document)
         .Wrap = wdFindStop
         Do While .Execute
             If rng.HighlightColorIndex = wdBrightGreen Or _
-               rng.HighlightColorIndex = wdTurquoise Then
+               rng.HighlightColorIndex = wdTurquoise Or _
+               rng.HighlightColorIndex = wdPink Then
                 rng.HighlightColorIndex = wdNoHighlight
             End If
             ' Guard against a zero-progress infinite loop.
@@ -643,8 +651,9 @@ End Sub
 ' ============================================================
 ' USER HIGHLIGHT DETECTION
 ' Finds any highlight color that is not one of the macro's
-' two colors (bright green, cyan). Yellow counts as a user
-' highlight because the user uses it for their own reminders.
+' own colors (bright green, cyan, pink). Yellow counts as a
+' user highlight because the user uses it for their own
+' reminders.
 ' ============================================================
 Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
     Dim rng As Range
@@ -656,7 +665,8 @@ Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
         .Wrap = wdFindStop
         Do While .Execute
             If rng.HighlightColorIndex <> wdBrightGreen And _
-               rng.HighlightColorIndex <> wdTurquoise Then
+               rng.HighlightColorIndex <> wdTurquoise And _
+               rng.HighlightColorIndex <> wdPink Then
                 DocumentHasUserHighlights = True
                 Exit Function
             End If
