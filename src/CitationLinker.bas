@@ -1055,26 +1055,81 @@ Private Sub ResetLinkFormatting(ByVal rng As Range)
     End If
 
     ' Clear the hyperlink style's underline -- but NOT when the link sat inside
-    ' text that is itself underlined (an underlined section heading containing
-    ' a code section). If a character adjacent to the former link is underlined,
-    ' the underline belongs to the surrounding text, so keep it.
-    Dim keepUnderline As Boolean: keepUnderline = False
-    Dim probe As Range
-    If rng.start > 0 Then
-        Set probe = rng.Duplicate
-        probe.SetRange rng.start - 1, rng.start
-        If probe.Font.Underline <> wdUnderlineNone And _
-           probe.Font.Underline <> wdUndefined Then keepUnderline = True
+    ' text that is itself underlined (an underlined section heading containing a
+    ' code section, e.g. "Retaliation Under Labor Code Sections 98.6 and
+    ' 1102.5"). Look past the word-separating spaces to the nearest VISIBLE
+    ' character on each side: probing only the single adjacent character read the
+    ' separating space, and a heading whose underline does not paint those spaces
+    ' (word-style underline, or spaces simply left un-underlined) then looked
+    ' un-underlined on both sides, so the citation's underline was wrongly
+    ' stripped while the surrounding words stayed underlined. When an underlined
+    ' neighbor is found, restore that exact underline style across the range so
+    ' it matches the rest of the heading.
+    Dim nbr As WdUnderline
+    nbr = NeighborUnderline(rng)
+    If nbr <> wdUnderlineNone And nbr <> wdUndefined Then
+        rng.Font.Underline = nbr
+    Else
+        rng.Font.Underline = wdUnderlineNone
     End If
-    If Not keepUnderline Then
-        Set probe = rng.Duplicate
-        probe.SetRange rng.End, rng.End + 1
-        If probe.Font.Underline <> wdUnderlineNone And _
-           probe.Font.Underline <> wdUndefined Then keepUnderline = True
-    End If
-    If Not keepUnderline Then rng.Font.Underline = wdUnderlineNone
     rng.Font.ColorIndex = wdAuto
 End Sub
+
+
+' Underline style of the nearest visible (non-whitespace) character next to rng,
+' scanning left first and then right, but never past rng's own paragraph. Returns
+' wdUnderlineNone when the nearest neighbor on each side is un-underlined (or the
+' paragraph has no other visible character). Used by ResetLinkFormatting to tell
+' a code section embedded in an underlined heading -- where the underline must be
+' kept -- from an ordinary body citation, where it must be cleared. Word-
+' separating spaces are skipped so a heading that underlines words but not the
+' spaces between them is still recognized as underlined.
+Private Function NeighborUnderline(ByVal rng As Range) As WdUnderline
+    On Error Resume Next
+    NeighborUnderline = wdUnderlineNone
+
+    Dim para As Range
+    Set para = rng.Paragraphs(1).Range
+    Dim pStart As Long, pEnd As Long
+    pStart = para.start
+    pEnd = para.End
+
+    Dim pos As Long, u As WdUnderline
+
+    ' Left: first non-whitespace character before the link, within the paragraph.
+    For pos = rng.start - 1 To pStart Step -1
+        If Not IsSkippableChar(ActiveDocument.Range(pos, pos + 1).text) Then
+            u = ActiveDocument.Range(pos, pos + 1).Font.Underline
+            If u <> wdUnderlineNone And u <> wdUndefined Then
+                NeighborUnderline = u
+                Exit Function
+            End If
+            Exit For
+        End If
+    Next pos
+
+    ' Right: first non-whitespace character after the link, within the paragraph.
+    For pos = rng.End To pEnd - 1
+        If Not IsSkippableChar(ActiveDocument.Range(pos, pos + 1).text) Then
+            u = ActiveDocument.Range(pos, pos + 1).Font.Underline
+            If u <> wdUnderlineNone And u <> wdUndefined Then NeighborUnderline = u
+            Exit For
+        End If
+    Next pos
+End Function
+
+
+' True when ch is empty or a single whitespace character (space, tab, non-
+' breaking space, paragraph/line marks, and the Unicode spaces recognized
+' elsewhere in this module). Used to skip word separators when hunting for the
+' nearest visible neighbor of a former link.
+Private Function IsSkippableChar(ByVal ch As String) As Boolean
+    If Len(ch) = 0 Then
+        IsSkippableChar = True
+    Else
+        IsSkippableChar = IsWhitespaceCode(AscW(Left$(ch, 1)))
+    End If
+End Function
 
 
 ' True when rng's paragraph is a standalone code-section heading: the whole
