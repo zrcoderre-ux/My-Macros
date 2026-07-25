@@ -1227,6 +1227,40 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
     Dim handled() As Boolean
     ReDim handled(1 To nMaps)
 
+    ' Defenses against degenerate key rows, both observed in a real key:
+    '
+    ' De-anonymize: pre-retire every mapping whose FAKE is claimed by rows with
+    ' DIFFERENT real values -- a key has shipped with six rows all naming the
+    ' fake "no" (reals "JR.", "Los", "Angeles", "City", "Attorney", "th").
+    ' There is no way to know which real such a token should restore to, and a
+    ' short common-word fake would rewrite every standalone "No." in a caption
+    ' while its substring sweep crawled through every "not" and "notice" in the
+    ' document. The real values are compared CASE-INSENSITIVELY: most duplicate
+    ' fakes are casing pairs of the same name ("GARDELLA"/"Gardella" from the
+    ' caption and the body), which restore identically -- MatchCasing recases
+    ' from the matched text -- and must NOT be retired.
+    '
+    ' Re-anonymize: skip a real value shorter than 3 characters. Rows like
+    ' real "TO" and real "th" are extraction junk, and replacing every
+    ' standalone "to" with a pseudonym would corrupt the shared copy's prose.
+    Dim da As Long, db As Long
+    If useFake Then
+        For da = 1 To nMaps - 1
+            For db = da + 1 To nMaps
+                If StrComp(maps(da).fake, maps(db).fake, vbTextCompare) = 0 Then
+                    If StrComp(maps(da).real, maps(db).real, vbTextCompare) <> 0 Then
+                        handled(da) = True
+                        handled(db) = True
+                    End If
+                End If
+            Next db
+        Next da
+    Else
+        For da = 1 To nMaps
+            If Len(maps(da).real) < 3 Then handled(da) = True
+        Next da
+    End If
+
     Dim distinctHits As Long: distinctHits = 0
     Dim pass As Long, passHits As Long, i As Long
     Dim stories() As StoryRef, nStories As Long
@@ -1369,6 +1403,19 @@ End Sub
 ' Replace findText with replaceText in every collected story that contains it.
 ' Returns the number of stories in which a replacement was made.
 '
+' Each qualifying story gets two phases:
+'   1. NativeReplacePasses -- Word's own wdReplaceAll handles ALL occurrences of
+'      the common casing forms in one COM call per form. This is where the bulk
+'      of the hits go, at native speed. The old per-hit VBA loop cost ~15 COM
+'      round trips per occurrence (Find setup, boundary probes, text assignment),
+'      so a key whose names appear hundreds of times each froze Word for the
+'      whole stretch -- and DoEvents never ran inside a mapping, so the window
+'      was marked "Not Responding" on top of being slow.
+'   2. ReplaceInRange -- the careful per-hit sweep, now only mopping up what the
+'      native passes' stricter matching missed: possessives ("Thorne's"),
+'      tokens Word's whole-word logic skips against parentheses/quotes, and odd
+'      mixed casings. Typically zero or a handful of hits.
+'
 ' The per-story containment test is the same superset-safe filter used elsewhere:
 ' lowercase both sides and compare binary, matching Find's MatchCase = False for
 ' the ASCII names and case numbers a key holds. The cached text can only go stale
@@ -1396,15 +1443,84 @@ Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As
     Dim needle As String: needle = LCase$(findText)
 
     Dim k As Long
+    Dim changed As Boolean
     For k = 1 To nStories
         If InStr(1, stories(k).lower, needle, vbBinaryCompare) > 0 Then
+            changed = NativeReplacePasses(stories(k).rng, findText, replaceText, _
+                                          whole, protectCitations)
             If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
-                total = total + 1
+                changed = True
             End If
+            If changed Then total = total + 1
         End If
     Next k
 
     ReplaceInStories = total
+End Function
+
+' Bulk phase: run Word's native wdReplaceAll once per DISTINCT casing form of
+' findText -- as stored ("Nash"), ALL CAPS ("NASH"), all lowercase ("nash") --
+' each with MatchCase = True and a replacement PRE-cased through the same
+' MatchCasing used by the per-hit loop, so the output is identical for those
+' forms. MatchCase = True also means Word inserts the replacement literally: the
+' smart-case mangling that ruled wdReplaceAll out under MatchCase = False (the
+' original reason for the per-hit loop) never engages.
+'
+' Correctness relative to the per-hit sweep that follows:
+'   - Boundaries: the native passes use Word's MatchWholeWord for single-token
+'     terms, which is only ever STRICTER than our WholeTokenBoundaries (it
+'     treats an apostrophe as a word character and balks at some
+'     parenthesis/quote-hugged tokens). Stricter = it can only MISS occurrences,
+'     never rewrite inside a larger word that our own check would protect; the
+'     manual sweep still catches everything it misses.
+'   - Italic protection: with protectCitations the native Find carries
+'     .Font.Italic = False, so a fully-italic cited case name is never matched.
+'     A partially-italic span fails the uniform-format criterion and is left for
+'     the manual sweep, whose existing rule (skip only when the WHOLE match is
+'     italic) then decides it -- same outcome as before.
+'   - Odd mixed casings ("nAsH") match none of the three forms and fall through
+'     to the manual sweep, exactly as they always did.
+' Returns True when any pass replaced something.
+Private Function NativeReplacePasses(ByVal rng As Range, ByVal findText As String, _
+                                     ByVal replaceText As String, ByVal whole As Boolean, _
+                                     ByVal protectCitations As Boolean) As Boolean
+    On Error Resume Next
+
+    ' Distinct casing forms only: duplicate forms with MatchCase = True would be
+    ' the same search twice. A term with no cased letters (a case number) yields
+    ' a single form.
+    Dim forms(1 To 3) As String
+    Dim nF As Long: nF = 1
+    forms(1) = findText
+    If UCase$(findText) <> findText Then
+        nF = nF + 1: forms(nF) = UCase$(findText)
+    End If
+    If LCase$(findText) <> findText And LCase$(findText) <> UCase$(findText) Then
+        nF = nF + 1: forms(nF) = LCase$(findText)
+    End If
+
+    Dim k As Long, repl As String, r As Range
+    For k = 1 To nF
+        repl = MatchCasing(forms(k), replaceText)
+        ' Find's Replacement.Text caps at 255 characters; longer values fall
+        ' through to the manual sweep, which assigns Range.Text directly.
+        If Len(repl) <= 255 Then
+            Set r = rng.Duplicate
+            With r.Find
+                .ClearFormatting
+                .Replacement.ClearFormatting
+                If protectCitations Then .Font.Italic = False
+                .text = forms(k)
+                .Replacement.text = repl
+                .Forward = True
+                .Wrap = wdFindStop
+                .MatchCase = True
+                .MatchWholeWord = whole
+                .MatchWildcards = False
+                If .Execute(Replace:=wdReplaceAll) Then NativeReplacePasses = True
+            End With
+        End If
+    Next k
 End Function
 
 ' Replace every occurrence of findText with replaceText in one range. Returns
@@ -1430,7 +1546,14 @@ Private Function ReplaceInRange(ByVal rng As Range, _
     On Error Resume Next
     Dim scan As Range: Set scan = rng.Duplicate
     Dim madeChange As Boolean
+    Dim swept As Long: swept = 0
     Do
+        ' Pump the message queue every few hits WITHIN a term, not just between
+        ' terms: a single name with hundreds of occurrences used to run this
+        ' whole loop without a DoEvents, and Windows marks Word "Not Responding"
+        ' after a few silent seconds even though work is progressing.
+        swept = swept + 1
+        If swept Mod 20 = 0 Then DoEvents
         With scan.Find
             .ClearFormatting
             .Replacement.ClearFormatting
@@ -1814,6 +1937,7 @@ Private Function HighlightLiteralCI(ByVal rng As Range, ByVal term As String) As
             r.HighlightColorIndex = wdPink
             n = n + 1
             If n >= MAX_HITS_PER_TERM Then Exit Do
+            If n Mod 50 = 0 Then DoEvents   ' keep Word's queue serviced mid-term
         Loop
     End With
     HighlightLiteralCI = n
@@ -1851,6 +1975,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
             r.HighlightColorIndex = wdPink
             n = n + 1
             If n >= MAX_HITS_PER_TERM Then Exit Do
+            If n Mod 50 = 0 Then DoEvents   ' keep Word's queue serviced mid-term
         Loop
     End With
     HighlightExact = n
