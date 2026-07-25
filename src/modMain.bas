@@ -642,14 +642,46 @@ End Sub
 
 ' Removes all highlight colors except yellow (the user's own color).
 ' Called when the user chooses No (close anyway) after a full-run prompt.
+' Uses a highlight-seeking Find (jumps straight between highlighted runs) --
+' the same rewrite ClearCheckHighlights got, for the same reason: this used to
+' walk Doc.Content.Characters one COM call per character, freezing Word for the
+' length of the document at the exact moment the user had asked to close it.
 Public Sub ClearAllHighlightsExceptYellow(Doc As Document)
-    Dim rng As Range
-    For Each rng In Doc.content.Characters
-        If rng.HighlightColorIndex <> wdYellow And _
-           rng.HighlightColorIndex <> wdNoHighlight Then
-            rng.HighlightColorIndex = wdNoHighlight
-        End If
-    Next rng
+    Dim rng     As Range
+    Dim lastEnd As Long
+    Set rng = Doc.content
+    lastEnd = -1
+    With rng.Find
+        .ClearFormatting
+        .text = ""
+        .Highlight = True
+        .Wrap = wdFindStop
+        Do While .Execute
+            Dim hci As Long
+            hci = rng.HighlightColorIndex
+            If hci = wdUndefined Then
+                ' The found run mixes colors (e.g. yellow butted against green).
+                ' Resolve per character WITHIN this run only -- a handful of
+                ' characters -- so yellow inside the run survives and the
+                ' whole-body character walk never returns.
+                Dim ch As Range
+                For Each ch In rng.Characters
+                    If ch.HighlightColorIndex <> wdYellow And _
+                       ch.HighlightColorIndex <> wdNoHighlight Then
+                        ch.HighlightColorIndex = wdNoHighlight
+                    End If
+                Next ch
+            ElseIf hci <> wdYellow And hci <> wdNoHighlight Then
+                rng.HighlightColorIndex = wdNoHighlight
+            End If
+            ' Guard against a zero-progress infinite loop.
+            If rng.End <= lastEnd Then Exit Do
+            lastEnd = rng.End
+            rng.Collapse Direction:=wdCollapseEnd
+            rng.End = Doc.content.End
+            If rng.start >= rng.End Then Exit Do
+        Loop
+    End With
 End Sub
 
 ' ============================================================
