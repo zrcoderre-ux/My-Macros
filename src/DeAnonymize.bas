@@ -11,7 +11,12 @@ Attribute VB_Name = "DeAnonymize"
 ' The key file PDF-Linker writes is "pseudonym_key.xlsx", a worksheet with the
 ' columns:
 '     Category | Real Value | Replacement | Source | Occurrences
-' where "Replacement" is the fake that appears in the anonymized draft.
+' where "Replacement" is USUALLY the fake that appears in the anonymized draft.
+' It can instead hold an operator KEEP instruction -- "no" (leave this Real Value
+' verbatim) or a "[bracketed]" keep-spec -- which is NOT a pseudonym and never
+' appeared in the document. IsKeepDecisionCell recognizes those and
+' ReadPseudonymKey drops them; see that function for why reading them literally
+' corrupts the text in both directions.
 '
 ' MACROS YOU RUN:
 '   DeAnonymizeTentative - locate the key, then replace every fake with its
@@ -116,8 +121,8 @@ Public Sub DeAnonymizeTentative()
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
 
     Dim maps() As Mapping
-    Dim nMaps As Long
-    If Not ReadPseudonymKey(keyPath, maps, nMaps) Then
+    Dim nMaps As Long, nKeepRows As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
                "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
@@ -199,7 +204,8 @@ Public Sub DeAnonymizeTentative()
     End If
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s), and filled in the court-identity header " & _
-           "(department, judge, staff)." & sFlagLine & vbCrLf & vbCrLf & _
+           "(department, judge, staff)." & KeepRowsNote(nKeepRows) & _
+           sFlagLine & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -234,8 +240,8 @@ Public Sub ReAnonymizeTentative()
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
 
     Dim maps() As Mapping
-    Dim nMaps As Long
-    If Not ReadPseudonymKey(keyPath, maps, nMaps) Then
+    Dim nMaps As Long, nKeepRows As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
                "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
@@ -379,7 +385,8 @@ Public Sub ReAnonymizeTentative()
     End If
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-           " value(s) and blanked the court-identity header." & vbCrLf & vbCrLf & _
+           " value(s) and blanked the court-identity header." & _
+           KeepRowsNote(nKeepRows) & vbCrLf & vbCrLf & _
            "Names inside italic cited case names were left as-is so a party " & _
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
@@ -1091,12 +1098,15 @@ End Function
 '==============================================================================
 ' Opens the workbook read-only via Excel automation, finds the "Real Value"
 ' and "Replacement" columns by header, and fills maps(1..nMaps). Returns False
-' on any error or if no usable rows were found.
+' on any error or if no usable rows were found. nKeepRows reports how many rows
+' were operator KEEP instructions rather than pseudonyms (see IsKeepDecisionCell).
 Private Function ReadPseudonymKey(ByVal path As String, _
                                    ByRef maps() As Mapping, _
-                                   ByRef nMaps As Long) As Boolean
+                                   ByRef nMaps As Long, _
+                                   Optional ByRef nKeepRows As Long) As Boolean
     On Error GoTo Fail
     nMaps = 0
+    nKeepRows = 0
 
     Dim xl As Object
     Dim startedXl As Boolean: startedXl = False
@@ -1162,9 +1172,13 @@ Private Function ReadPseudonymKey(ByVal path As String, _
         rv = Trim$(CStr(NzText(data(r, realCol))))
         fk = Trim$(CStr(NzText(data(r, fakeCol))))
         If Len(rv) > 0 And Len(fk) > 0 And StrComp(rv, fk, vbBinaryCompare) <> 0 Then
-            nMaps = nMaps + 1
-            maps(nMaps).real = rv
-            maps(nMaps).fake = fk
+            If IsKeepDecisionCell(rv, fk) Then
+                nKeepRows = nKeepRows + 1       ' operator instruction, not a fake
+            Else
+                nMaps = nMaps + 1
+                maps(nMaps).real = rv
+                maps(nMaps).fake = fk
+            End If
         End If
     Next r
 
@@ -1202,6 +1216,71 @@ Private Function NzText(ByVal v As Variant) As String
     End If
 End Function
 
+' One line for the result dialog when the key carried operator KEEP rows, so it
+' is clear those were recognized and deliberately not treated as pseudonyms
+' rather than silently lost. Empty when there were none.
+Private Function KeepRowsNote(ByVal nKeepRows As Long) As String
+    If nKeepRows <= 0 Then Exit Function
+    KeepRowsNote = vbCrLf & vbCrLf & "Skipped " & nKeepRows & " KEEP row(s) in " & _
+                   "the key (a ""no"" or a [bracketed] keep-spec). Those are " & _
+                   "operator instructions to leave a value alone, not " & _
+                   "pseudonyms, so there is nothing to swap for them."
+End Function
+
+' True when the key's Replacement cell holds an operator KEEP INSTRUCTION rather
+' than a pseudonym, in which case the row is not a mapping at all and must be
+' skipped in BOTH directions.
+'
+' PDF-Linker's key loader (_pn_load_key) accepts the same control vocabulary the
+' LEAKS "Fix?" column does. Such a row builds NO faking term -- the Real Value
+' was deliberately left VERBATIM in the anonymized text:
+'
+'   "no" / "n"      KEEP: leave this Real Value alone, never fake it.
+'   "[bracketed]"   keep-spec: keep the bracketed part(s) verbatim and auto-fake
+'                   the rest. The cell records the operator's INSTRUCTION, not
+'                   any fake that was used.
+'
+' Read literally these look like pseudonyms, which is exactly how a real key went
+' wrong here. Six rows reading "no" made de-anonymize try to restore the word
+' "no" -- it would rewrite a caption's standalone "No." and crawl every "not" and
+' "notice" on the way -- and rows like "[HONORABLE]" or "[DEMURRER TO]" would
+' have been written INTO the shared copy by re-anonymize as literal bracketed
+' text. Neither value was ever a fake.
+'
+' Mirrors _pn_bracket_keep's fall-through exactly: when a bracketed part is NOT a
+' substring of the Real Value, PDF-Linker abandons the keep reading and treats
+' the cell as an ordinary explicit replacement, so we do too.
+Private Function IsKeepDecisionCell(ByVal realValue As String, ByVal cell As String) As Boolean
+    Dim c As String: c = Trim$(cell)
+    If Len(c) = 0 Then Exit Function
+
+    Dim lc As String: lc = LCase$(c)
+    If lc = "no" Or lc = "n" Then
+        IsKeepDecisionCell = True
+        Exit Function
+    End If
+
+    If InStr(1, c, "[") = 0 Then Exit Function
+
+    ' Every non-empty bracketed part must occur in the Real Value; otherwise this
+    ' is not a keep-spec and the cell is a literal replacement after all.
+    Dim found As Boolean: found = False
+    Dim p As Long, q As Long, part As String
+    p = InStr(1, c, "[")
+    Do While p > 0
+        q = InStr(p + 1, c, "]")
+        If q = 0 Then Exit Do
+        part = Trim$(Mid$(c, p + 1, q - p - 1))
+        If Len(part) > 0 Then
+            If InStr(1, realValue, part, vbTextCompare) = 0 Then Exit Function
+            found = True
+        End If
+        p = InStr(q + 1, c, "[")
+    Loop
+
+    IsKeepDecisionCell = found
+End Function
+
 ' Run every mapping against the document, skipping the ones whose search term
 ' isn't in it. Shared by all three callers (manual de-anonymize, re-anonymize,
 ' and the on-close hook) so they all get the same pre-filter and progress
@@ -1227,22 +1306,23 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
     Dim handled() As Boolean
     ReDim handled(1 To nMaps)
 
-    ' Defenses against degenerate key rows, both observed in a real key:
+    ' Defenses against degenerate key rows, both observed in a real key.
+    ' (Operator KEEP instructions -- "no" and "[bracketed]" keep-specs -- are a
+    ' different thing entirely and never reach here: ReadPseudonymKey drops them
+    ' at load time via IsKeepDecisionCell, because they were never fakes.)
     '
     ' De-anonymize: pre-retire every mapping whose FAKE is claimed by rows with
-    ' DIFFERENT real values -- a key has shipped with six rows all naming the
-    ' fake "no" (reals "JR.", "Los", "Angeles", "City", "Attorney", "th").
-    ' There is no way to know which real such a token should restore to, and a
-    ' short common-word fake would rewrite every standalone "No." in a caption
-    ' while its substring sweep crawled through every "not" and "notice" in the
-    ' document. The real values are compared CASE-INSENSITIVELY: most duplicate
-    ' fakes are casing pairs of the same name ("GARDELLA"/"Gardella" from the
-    ' caption and the body), which restore identically -- MatchCasing recases
-    ' from the matched text -- and must NOT be retired.
+    ' DIFFERENT real values. A key has shipped with one fake address bound to two
+    ' distinct real ones ("1330 N Cahuenga Blvd." and "1331 N. Cahuenga Blvd."),
+    ' and there is no way to know which such a token should restore to. The real
+    ' values are compared CASE-INSENSITIVELY: most duplicate fakes are casing
+    ' pairs of the same name ("GARDELLA"/"Gardella", from the caption and the
+    ' body), which restore identically -- MatchCasing recases from the matched
+    ' text -- and must NOT be retired.
     '
     ' Re-anonymize: skip a real value shorter than 3 characters. Rows like
-    ' real "TO" and real "th" are extraction junk, and replacing every
-    ' standalone "to" with a pseudonym would corrupt the shared copy's prose.
+    ' real "JR" and real "TO" are extraction junk, and replacing every standalone
+    ' "to" with a pseudonym would corrupt the shared copy's prose.
     Dim da As Long, db As Long
     If useFake Then
         For da = 1 To nMaps - 1
