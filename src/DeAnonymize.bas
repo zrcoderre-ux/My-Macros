@@ -66,6 +66,13 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 ' cleared) and from the user's own yellow, so these leak flags stand out. Used
 ' directly at the highlight site; a wd* enum member isn't a valid Const value.
 
+' Safety valve for the pseudonym highlight passes. A pool word can be ordinary
+' English ("Sterling", "Cedar", "Mercer"), so a long document could in principle
+' hold thousands of hits for one term. Highlighting is a review aid -- once a
+' term has this many flags the point is already made -- so each pass stops here
+' rather than grinding on. Far above any real leak count.
+Private Const MAX_HITS_PER_TERM As Long = 500
+
 ' Document variables (persisted inside the .docx) that gate the automatic
 ' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
 ' REANON_CREATED marks a document produced by the re-anonymize macro, which must
@@ -1638,13 +1645,6 @@ Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant
     Next k
     HighlightFakesInRange = total
 End Function
-
-' Safety valve for the highlight loops below. A pool word can be ordinary English
-' ("Sterling", "Cedar", "Mercer"), so a long document could in principle hold
-' thousands of hits for one term. Highlighting is a review aid -- once a term has
-' this many flags the point is already made -- so each pass stops here rather
-' than grinding on. Far above any real leak count.
-Private Const MAX_HITS_PER_TERM As Long = 500
 
 ' Highlight every occurrence of a lowercase literal fake -- an email domain such
 ' as "example.com" -- in a range, case-insensitively and even inside a larger
