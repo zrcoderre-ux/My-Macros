@@ -92,6 +92,15 @@ Private Type Mapping
     fake As String
 End Type
 
+' One searchable story (main body, a non-empty header/footer, the footnote or
+' endnote story, or a shape's text frame) plus a lowercased copy of its text.
+' Collected ONCE per replacement run so the per-mapping loop neither re-walks the
+' Sections/Shapes collections nor sweeps stories the search term isn't in.
+Private Type StoryRef
+    rng As Range
+    lower As String
+End Type
+
 '==============================================================================
 ' ENTRY POINT
 '==============================================================================
@@ -1200,7 +1209,7 @@ End Function
 '
 '   useFake  = True  -> search maps().fake, write maps().real  (de-anonymize)
 '              False -> search maps().real, write maps().fake  (re-anonymize)
-'   protect  passes through to ReplaceEverywhere's protectCitations.
+'   protect  passes through to ReplaceInStories' protectCitations.
 '
 ' Two rounds, not one: replacing a fake inserts a real value, and an inserted
 ' value can in principle contain another mapping's search term that wasn't in the
@@ -1220,33 +1229,34 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
 
     Dim distinctHits As Long: distinctHits = 0
     Dim pass As Long, passHits As Long, i As Long
-    Dim hay As String, term As String
+    Dim stories() As StoryRef, nStories As Long
 
     For pass = 1 To 2
-        hay = DocSearchTextLower(oDoc)
+        ' Collect the stories (and their text) ONCE per pass, not once per
+        ' mapping. Rebuilding on pass 2 also refreshes the cached text so a term
+        ' revealed by an earlier insertion is seen.
+        nStories = CollectStories(oDoc, stories)
+        If nStories = 0 Then Exit For
         passHits = 0
 
         For i = 1 To nMaps
             If Not handled(i) Then
-                If useFake Then term = maps(i).fake Else term = maps(i).real
-                If TermMaybePresent(hay, term) Then
-                    handled(i) = True       ' set before the call: process once, period
-                    Dim n As Long
-                    If useFake Then
-                        n = ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real, protect)
-                    Else
-                        n = ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake, protect)
-                    End If
-                    If n > 0 Then
-                        distinctHits = distinctHits + 1
-                        passHits = passHits + 1
-                    End If
+                handled(i) = True           ' set before the call: process once, period
+                Dim n As Long
+                If useFake Then
+                    n = ReplaceInStories(stories, nStories, maps(i).fake, maps(i).real, protect)
+                Else
+                    n = ReplaceInStories(stories, nStories, maps(i).real, maps(i).fake, protect)
+                End If
+                If n > 0 Then
+                    distinctHits = distinctHits + 1
+                    passHits = passHits + 1
                 End If
             End If
 
             ' Keep Word's queue serviced so the window stays responsive, and show
             ' progress so a long key doesn't look like a hang.
-            If i Mod 25 = 0 Then
+            If i Mod 10 = 0 Then
                 On Error Resume Next
                 Application.StatusBar = progressLabel & ": " & i & " of " & nMaps & " ..."
                 On Error GoTo 0
@@ -1255,7 +1265,7 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
         Next i
 
         ' Nothing changed this pass, so no insertion can have revealed a new
-        ' term: another pass would re-read the document for nothing.
+        ' term: another pass would re-collect the stories for nothing.
         If passHits = 0 Then Exit For
     Next pass
 
@@ -1269,53 +1279,16 @@ End Function
 '==============================================================================
 ' PRESENCE PRE-FILTER  (performance)
 '==============================================================================
-' A key with a few hundred rows made the macros look frozen: the replacement loop
-' ran ReplaceEverywhere for EVERY mapping, and each of those is ~10 full native
-' Find scans (body, each header/footer, notes, each shape) whether or not the
-' search term occurs anywhere in the document. At 300 mappings that is ~3,000
-' whole-document scans, nearly all of them finding nothing.
+' Shared superset-safe containment test. Used by the residual-pseudonym
+' highlighter to skip a native Find sweep for a term that isn't in the story at
+' all; the replacement path does the same test inline, per story, in
+' ReplaceInStories.
 '
-' These two helpers replace that with one in-memory text read plus a fast binary
-' InStr per term, so a term that is not in the document costs a string search
-' instead of ten document scans. Only terms that survive the filter pay for a
-' real Find.
-'
-' Correctness: the filter only ever has to be a SUPERSET of what Word's Find
-' would match. It lowercases both sides and compares binary, matching Find's
-' MatchCase = False behavior for the ASCII names and case numbers a key holds. If
-' the text cannot be read the haystack comes back empty, which TermMaybePresent
-' reports as "present" -- a replacement is never skipped on a guess.
-Private Function DocSearchTextLower(ByVal oDoc As Document) As String
-    On Error GoTo Bail
-    Dim sb As String
-    sb = oDoc.content.text
-
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then sb = sb & vbLf & hf.Range.text
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then sb = sb & vbLf & hf.Range.text
-        Next hf
-    Next sec
-
-    If oDoc.Footnotes.count > 0 Then sb = sb & vbLf & oDoc.StoryRanges(wdFootnotesStory).text
-    If oDoc.Endnotes.count > 0 Then sb = sb & vbLf & oDoc.StoryRanges(wdEndnotesStory).text
-
-    Dim shp As Shape
-    For Each shp In oDoc.Shapes
-        If shp.TextFrame.HasText Then sb = sb & vbLf & shp.TextFrame.TextRange.text
-    Next shp
-
-    DocSearchTextLower = LCase$(sb)
-    Exit Function
-Bail:
-    DocSearchTextLower = ""
-End Function
-
-' True when term may occur in the pre-read document text. An empty haystack means
-' the text could not be read, so answer True and let the real Find decide.
+' The filter only ever has to be a SUPERSET of what Word's Find would match. It
+' lowercases both sides and compares binary, matching Find's MatchCase = False
+' behavior for the ASCII names and case numbers a key holds. An empty haystack
+' means the text could not be read, so answer True and let the real Find decide
+' -- work is never skipped on a guess.
 Private Function TermMaybePresent(ByVal hayLower As String, ByVal term As String) As Boolean
     If Len(hayLower) = 0 Then
         TermMaybePresent = True
@@ -1328,15 +1301,80 @@ End Function
 '==============================================================================
 ' REPLACEMENT
 '==============================================================================
-' Replace findText with replaceText across the document's stable stories: the
-' main body, each section's headers/footers, footnotes/endnotes when present,
-' and each shape's own text frame. Returns the number of those ranges in which
-' a replacement was made.
+' Collect every searchable story ONCE: the main body, each section's non-empty
+' headers/footers, footnotes/endnotes when present, and each shape's own text
+' frame -- each paired with a lowercased copy of its text.
+'
+' Doing this once per pass instead of once per mapping is the whole point. The
+' old ReplaceEverywhere re-walked oDoc.Sections (building three Header and three
+' Footer objects per section, then sweeping even the empty ones) and oDoc.Shapes
+' for EVERY mapping, so a 300-row key meant ~3,000 story sweeps plus 300 rounds
+' of collection-walking. With the stories cached, a mapping only pays for the
+' stories whose text actually contains its search term -- for almost every name
+' that is the body alone.
 '
 ' This deliberately does NOT walk StoryRanges/NextStoryRange: enumerating that
 ' chain while replacing inside the loop can destabilize and crash Word. The
-' collections below (Sections, Footnotes, Shapes with per-shape TextRange) stay
-' valid across text replacement, so iterating them is safe.
+' collections used here (Sections, Footnotes, Shapes with per-shape TextRange)
+' stay valid across text replacement, so iterating them is safe.
+Private Function CollectStories(ByVal oDoc As Document, ByRef arr() As StoryRef) As Long
+    Dim n As Long: n = 0
+    ReDim arr(1 To 64)
+
+    On Error Resume Next
+
+    ' Main body (caption, party block, and prose are all here in a plain draft).
+    AddStory arr, n, oDoc.content
+
+    ' Headers and footers, section by section. Empty ones are dropped by AddStory.
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then AddStory arr, n, hf.Range
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then AddStory arr, n, hf.Range
+        Next hf
+    Next sec
+
+    ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
+    If oDoc.Footnotes.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdFootnotesStory)
+    If oDoc.Endnotes.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdEndnotesStory)
+
+    ' Text boxes / shapes, each one's own text frame directly.
+    Dim shp As Shape
+    For Each shp In oDoc.Shapes
+        If shp.TextFrame.HasText Then AddStory arr, n, shp.TextFrame.TextRange
+    Next shp
+
+    On Error GoTo 0
+    CollectStories = n
+End Function
+
+' Append one story and its lowercased text. Stories with no text (the usual case
+' for most of a section's six header/footer slots) are skipped outright -- they
+' can't contain a search term, and sweeping them was pure cost.
+Private Sub AddStory(ByRef arr() As StoryRef, ByRef n As Long, ByVal r As Range)
+    On Error Resume Next
+    If r Is Nothing Then Exit Sub
+    Dim t As String
+    t = r.text
+    If Len(t) = 0 Then Exit Sub
+    n = n + 1
+    If n > UBound(arr) Then ReDim Preserve arr(1 To UBound(arr) + 64)
+    Set arr(n).rng = r
+    arr(n).lower = LCase$(t)
+End Sub
+
+' Replace findText with replaceText in every collected story that contains it.
+' Returns the number of stories in which a replacement was made.
+'
+' The per-story containment test is the same superset-safe filter used elsewhere:
+' lowercase both sides and compare binary, matching Find's MatchCase = False for
+' the ASCII names and case numbers a key holds. The cached text can only go stale
+' by losing occurrences (replacement removes the search term), so a stale hit
+' costs one wasted sweep -- it can never skip a story that still needs one.
+'
 ' protectCitations (re-anonymize only): leave any match that sits in italic text
 ' untouched, so a real party name that also appears inside a cited case name
 ' (e.g. "Nash v. Superior Court") is not rewritten in the shared copy. This
@@ -1344,62 +1382,29 @@ End Function
 ' decision is a worse failure than leaving a party name in -- and its caption
 ' exemption: a brief italicizes cited authorities but not its own caption/prose,
 ' so the current parties still get replaced while published cites are preserved.
-Private Function ReplaceEverywhere(ByVal oDoc As Document, _
-                                    ByVal findText As String, _
-                                    ByVal replaceText As String, _
-                                    Optional ByVal protectCitations As Boolean = False) As Long
+Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As Long, _
+                                   ByVal findText As String, ByVal replaceText As String, _
+                                   Optional ByVal protectCitations As Boolean = False) As Long
     Dim total As Long: total = 0
     If Len(findText) = 0 Then Exit Function
     ' Word's Find raises on search terms longer than 255 characters; under the
-    ' resume-next handling below that used to fall through in a dangerous state.
-    ' Skip such mappings outright (re-anonymize warns about them up front).
+    ' resume-next handling in ReplaceInRange that used to fall through in a
+    ' dangerous state. Skip such mappings outright.
     If Len(findText) > 255 Then Exit Function
 
     Dim whole As Boolean: whole = ShouldWholeWord(findText)
+    Dim needle As String: needle = LCase$(findText)
 
-    ' Main body (caption, party block, and prose are all here in a plain draft).
-    If ReplaceInRange(oDoc.content, findText, replaceText, whole, protectCitations) Then total = total + 1
-
-    ' Headers and footers, section by section.
-    Dim sec As Section
-    Dim hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then
-                If ReplaceInRange(hf.Range, findText, replaceText, whole, protectCitations) Then total = total + 1
+    Dim k As Long
+    For k = 1 To nStories
+        If InStr(1, stories(k).lower, needle, vbBinaryCompare) > 0 Then
+            If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
+                total = total + 1
             End If
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then
-                If ReplaceInRange(hf.Range, findText, replaceText, whole, protectCitations) Then total = total + 1
-            End If
-        Next hf
-    Next sec
-
-    ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
-    On Error Resume Next
-    If oDoc.Footnotes.count > 0 Then
-        If ReplaceInRange(oDoc.StoryRanges(wdFootnotesStory), findText, replaceText, whole, protectCitations) Then total = total + 1
-    End If
-    If oDoc.Endnotes.count > 0 Then
-        If ReplaceInRange(oDoc.StoryRanges(wdEndnotesStory), findText, replaceText, whole, protectCitations) Then total = total + 1
-    End If
-    On Error GoTo 0
-
-    ' Text boxes / shapes, each one's own text frame directly. (Walking the
-    ' wdTextFrameStory NextStoryRange chain is what crashes Word; touching each
-    ' shape's TextRange individually is stable.) Without this, a name in a
-    ' text box survived re-anonymize into the shared copy.
-    On Error Resume Next
-    Dim shp As Shape
-    For Each shp In oDoc.Shapes
-        If shp.TextFrame.HasText Then
-            If ReplaceInRange(shp.TextFrame.TextRange, findText, replaceText, whole, protectCitations) Then total = total + 1
         End If
-    Next shp
-    On Error GoTo 0
+    Next k
 
-    ReplaceEverywhere = total
+    ReplaceInStories = total
 End Function
 
 ' Replace every occurrence of findText with replaceText in one range. Returns
