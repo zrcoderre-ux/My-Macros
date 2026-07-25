@@ -163,12 +163,7 @@ Public Sub DeAnonymizeTentative()
     ' document (dozens of terms, each many hits) into one custom undo record
     ' overflows and crashes Word. Word still records normal (multi-step) undo.
     Dim distinctHits As Long, i As Long
-    For i = 1 To nMaps
-        If ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real) > 0 Then
-            distinctHits = distinctHits + 1
-        End If
-        If i Mod 5 = 0 Then DoEvents      ' let Word service its queue; avoids overflow
-    Next i
+    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, True, False, "De-anonymizing")
 
     On Error Resume Next
     oDoc.AutoSaveOn = prevAutoSave
@@ -210,6 +205,7 @@ ErrH:
         oDoc.AutoSaveOn = prevAutoSave
     End If
     Application.ScreenUpdating = True
+    Application.StatusBar = False        ' don't strand a progress message
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & eN & ": " & eD, vbExclamation, "De-Anonymize"
 End Sub
@@ -298,12 +294,7 @@ Public Sub ReAnonymizeTentative()
     ' also names a published case isn't rewritten in the shared copy. No custom
     ' undo record (it overflows and crashes Word on large documents).
     Dim distinctHits As Long
-    For i = 1 To nMaps
-        If ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake, True) > 0 Then
-            distinctHits = distinctHits + 1
-        End If
-        If i Mod 5 = 0 Then DoEvents
-    Next i
+    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, False, True, "Re-anonymizing")
 
     ' Blank the court-identity header (Department 515, judge, courtroom staff) so
     ' the shared copy doesn't reveal them. ApplyCourtIdentity also scrubs the
@@ -398,6 +389,7 @@ ErrH:
     ' original cloud file before the user can close without saving.
     If bStateSaved Then oDoc.TrackRevisions = prevTrack
     Application.ScreenUpdating = True
+    Application.StatusBar = False        ' don't strand a progress message
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & reN & ": " & reD & vbCrLf & vbCrLf & _
            "If the error happened before the .md file was written, this window " & _
@@ -881,11 +873,7 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     ' inside a link's display text has been missed on exactly this first pass.
     StripHyperlinksEverywhere Doc
 
-    Dim i As Long
-    For i = 1 To nMaps
-        ReplaceEverywhere Doc, maps(i).fake, maps(i).real
-        If i Mod 5 = 0 Then DoEvents
-    Next i
+    ReplaceAllMappings Doc, maps, nMaps, True, False, "De-anonymizing"
 
     ' Restore the court-identity header (Department 515, judge, courtroom staff).
     ApplyCourtIdentity Doc, True
@@ -1203,6 +1191,138 @@ Private Function NzText(ByVal v As Variant) As String
     Else
         NzText = CStr(v)
     End If
+End Function
+
+' Run every mapping against the document, skipping the ones whose search term
+' isn't in it. Shared by all three callers (manual de-anonymize, re-anonymize,
+' and the on-close hook) so they all get the same pre-filter and progress
+' reporting. Returns the number of mappings that actually changed something.
+'
+'   useFake  = True  -> search maps().fake, write maps().real  (de-anonymize)
+'              False -> search maps().real, write maps().fake  (re-anonymize)
+'   protect  passes through to ReplaceEverywhere's protectCitations.
+'
+' Two rounds, not one: replacing a fake inserts a real value, and an inserted
+' value can in principle contain another mapping's search term that wasn't in the
+' document when the filter ran. A second round re-reads the text and picks up any
+' mapping that was skipped the first time. Each mapping is still processed AT
+' MOST ONCE (the done() flags), so this always terminates and never re-replaces
+' its own output -- and it strictly covers more than the old single pass, which
+' would have missed such a reveal for any mapping earlier in the sort order.
+Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapping, _
+                                     ByVal nMaps As Long, ByVal useFake As Boolean, _
+                                     ByVal protect As Boolean, _
+                                     ByVal progressLabel As String) As Long
+    ' "handled", not "done": Done: is used as a label elsewhere in this module.
+    ' "pass", not "round": Round is a built-in VBA function.
+    Dim handled() As Boolean
+    ReDim handled(1 To nMaps)
+
+    Dim distinctHits As Long: distinctHits = 0
+    Dim pass As Long, passHits As Long, i As Long
+    Dim hay As String, term As String
+
+    For pass = 1 To 2
+        hay = DocSearchTextLower(oDoc)
+        passHits = 0
+
+        For i = 1 To nMaps
+            If Not handled(i) Then
+                If useFake Then term = maps(i).fake Else term = maps(i).real
+                If TermMaybePresent(hay, term) Then
+                    handled(i) = True       ' set before the call: process once, period
+                    Dim n As Long
+                    If useFake Then
+                        n = ReplaceEverywhere(oDoc, maps(i).fake, maps(i).real, protect)
+                    Else
+                        n = ReplaceEverywhere(oDoc, maps(i).real, maps(i).fake, protect)
+                    End If
+                    If n > 0 Then
+                        distinctHits = distinctHits + 1
+                        passHits = passHits + 1
+                    End If
+                End If
+            End If
+
+            ' Keep Word's queue serviced so the window stays responsive, and show
+            ' progress so a long key doesn't look like a hang.
+            If i Mod 25 = 0 Then
+                On Error Resume Next
+                Application.StatusBar = progressLabel & ": " & i & " of " & nMaps & " ..."
+                On Error GoTo 0
+                DoEvents
+            End If
+        Next i
+
+        ' Nothing changed this pass, so no insertion can have revealed a new
+        ' term: another pass would re-read the document for nothing.
+        If passHits = 0 Then Exit For
+    Next pass
+
+    On Error Resume Next
+    Application.StatusBar = False           ' hand the status bar back to Word
+    On Error GoTo 0
+
+    ReplaceAllMappings = distinctHits
+End Function
+
+'==============================================================================
+' PRESENCE PRE-FILTER  (performance)
+'==============================================================================
+' A key with a few hundred rows made the macros look frozen: the replacement loop
+' ran ReplaceEverywhere for EVERY mapping, and each of those is ~10 full native
+' Find scans (body, each header/footer, notes, each shape) whether or not the
+' search term occurs anywhere in the document. At 300 mappings that is ~3,000
+' whole-document scans, nearly all of them finding nothing.
+'
+' These two helpers replace that with one in-memory text read plus a fast binary
+' InStr per term, so a term that is not in the document costs a string search
+' instead of ten document scans. Only terms that survive the filter pay for a
+' real Find.
+'
+' Correctness: the filter only ever has to be a SUPERSET of what Word's Find
+' would match. It lowercases both sides and compares binary, matching Find's
+' MatchCase = False behavior for the ASCII names and case numbers a key holds. If
+' the text cannot be read the haystack comes back empty, which TermMaybePresent
+' reports as "present" -- a replacement is never skipped on a guess.
+Private Function DocSearchTextLower(ByVal oDoc As Document) As String
+    On Error GoTo Bail
+    Dim sb As String
+    sb = oDoc.content.text
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In oDoc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then sb = sb & vbLf & hf.Range.text
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then sb = sb & vbLf & hf.Range.text
+        Next hf
+    Next sec
+
+    If oDoc.Footnotes.count > 0 Then sb = sb & vbLf & oDoc.StoryRanges(wdFootnotesStory).text
+    If oDoc.Endnotes.count > 0 Then sb = sb & vbLf & oDoc.StoryRanges(wdEndnotesStory).text
+
+    Dim shp As Shape
+    For Each shp In oDoc.Shapes
+        If shp.TextFrame.HasText Then sb = sb & vbLf & shp.TextFrame.TextRange.text
+    Next shp
+
+    DocSearchTextLower = LCase$(sb)
+    Exit Function
+Bail:
+    DocSearchTextLower = ""
+End Function
+
+' True when term may occur in the pre-read document text. An empty haystack means
+' the text could not be read, so answer True and let the real Find decide.
+Private Function TermMaybePresent(ByVal hayLower As String, ByVal term As String) As Boolean
+    If Len(hayLower) = 0 Then
+        TermMaybePresent = True
+        Exit Function
+    End If
+    If Len(term) = 0 Then Exit Function
+    TermMaybePresent = (InStr(1, hayLower, LCase$(term), vbBinaryCompare) > 0)
 End Function
 
 '==============================================================================
@@ -1629,20 +1749,41 @@ End Function
 ' count. Words use the case-sensitive first-capital/all-caps rule; domains are
 ' matched literally and case-insensitively.
 '
-' This is a few hundred native Find sweeps (one per term per case form). Each is
-' cheap -- a term absent from the document returns immediately -- but DoEvents
-' every few terms lets Word service its message queue, so a long document can
-' never make the pass look like a hang.
+' Read this story's text ONCE and use a fast in-memory InStr to decide which
+' terms are worth a real Find. Without that filter the pass is ~330 pool words in
+' two case forms plus the domains -- around 660 native scans of every story, per
+' document -- which is a large part of what made a long key feel like a hang.
+' Now a term that isn't in the story costs a string search instead of a scan.
+'
+' The filter is deliberately case-INSENSITIVE while the highlighters below are
+' case-sensitive: it only has to be a superset. A word absent case-insensitively
+' is absent in every case form, and an empty haystack (text unreadable) falls
+' through to scanning everything, so nothing is ever missed.
 Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant, _
                                         ByVal doms As Variant) As Long
     Dim total As Long, k As Long
+
+    Dim hayLower As String
+    On Error Resume Next
+    hayLower = LCase$(rng.text)
+    On Error GoTo 0
+
+    Dim term As String
     For k = LBound(pool) To UBound(pool)
-        total = total + HighlightWordInRange(rng, CStr(pool(k)))
-        If k Mod 25 = 0 Then DoEvents
+        term = CStr(pool(k))
+        If TermMaybePresent(hayLower, term) Then
+            total = total + HighlightWordInRange(rng, term)
+        End If
+        If k Mod 50 = 0 Then DoEvents
     Next k
+
     For k = LBound(doms) To UBound(doms)
-        total = total + HighlightLiteralCI(rng, CStr(doms(k)))
+        term = CStr(doms(k))
+        If TermMaybePresent(hayLower, term) Then
+            total = total + HighlightLiteralCI(rng, term)
+        End If
     Next k
+
     HighlightFakesInRange = total
 End Function
 
