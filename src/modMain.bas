@@ -559,24 +559,29 @@ End Function
 ' DOUBLE SPACE CHECK � FULL RUN
 ' Highlights ALL double-space runs in bright green.
 ' Returns True if any are found.
+'
+' BODY ONLY, deliberately -- unlike the other checks, which span the
+' headers and footers too. A running header lays out its caption with
+' runs of spaces on purpose, so flagging them is noise, not a defect.
+' The checks that DO cover the header are the ones where a header hit
+' means something: a leftover pseudonym, an unmatched bracket, a stray
+' "blank".
 ' ============================================================
 Private Function CheckDoubleSpaces(Doc As Document) As Boolean
-    Dim story As Range, rng As Range
-    For Each story In ReviewStories(Doc)
-        Set rng = story.Duplicate
-        With rng.Find
-            .ClearFormatting
-            .text = "  "                ' two literal spaces
-            .MatchCase = False
-            .MatchWholeWord = False
-            .MatchWildcards = False
-            .Wrap = wdFindStop
-            Do While .Execute
-                rng.HighlightColorIndex = wdBrightGreen
-                CheckDoubleSpaces = True
-            Loop
-        End With
-    Next story
+    Dim rng As Range
+    Set rng = Doc.content
+    With rng.Find
+        .ClearFormatting
+        .text = "  "                ' two literal spaces
+        .MatchCase = False
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        .Wrap = wdFindStop
+        Do While .Execute
+            rng.HighlightColorIndex = wdBrightGreen
+            CheckDoubleSpaces = True
+        Loop
+    End With
 End Function
 
 ' ============================================================
