@@ -177,22 +177,28 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Smart double quotes
     If CheckUnmatchedPairs(Doc, ChrW(8220), ChrW(8221), HL_GREEN) Then issues = True
 
-    ' Straight double quotes (odd count � highlight the last one)
+    ' Straight double quotes (odd count � highlight the last one). CountChar spans
+    ' every reviewed story, so the search for the last one has to as well -- a
+    ' header quote used to be counted but then flagged on the wrong character in
+    ' the body, or on nothing at all.
     If (CountChar(Doc, Chr(34)) Mod 2) <> 0 Then
+        Dim qStory As Range
         Dim rng  As Range
         Dim last As Range
-        Set rng = Doc.content
-        With rng.Find
-            .ClearFormatting
-            .MatchCase = True
-            .MatchWholeWord = False
-            .MatchWildcards = False
-            .Wrap = wdFindStop
-            .text = Chr(34)
-            Do While .Execute
-                Set last = rng.Duplicate
-            Loop
-        End With
+        For Each qStory In ReviewStories(Doc)
+            Set rng = qStory.Duplicate
+            With rng.Find
+                .ClearFormatting
+                .MatchCase = True
+                .MatchWholeWord = False
+                .MatchWildcards = False
+                .Wrap = wdFindStop
+                .text = Chr(34)
+                Do While .Execute
+                    Set last = rng.Duplicate
+                Loop
+            End With
+        Next qStory
         If Not last Is Nothing Then
             last.HighlightColorIndex = wdBrightGreen
         End If
@@ -215,12 +221,16 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Leftover anonymizer fakes: every pseudonym-pool word and placeholder email
     ' domain still in the document, flagged pink -- even when mashed inside a
     ' larger word -- so a fake that slipped into the draft is caught before the
-    ' document is shared. bodyOnly:=True keeps the pink in the main body, the only
-    ' story this module's highlight clearers sweep. The scan is a few hundred
-    ' native Find sweeps; suspend screen redraw so they run fast and flicker-free.
+    ' document is shared. Covers headers and footers as well as the body: the
+    ' running header carries the court identity and the party names, so a fake
+    ' left there is the most damaging one to miss. (This used to pass
+    ' bodyOnly:=True because the clearers only swept the body; they now sweep
+    ' every reviewed story, so a header flag can no longer be stranded.) The scan
+    ' is a few hundred native Find sweeps; suspend screen redraw so they run fast
+    ' and flicker-free.
     Dim prevSU As Boolean: prevSU = Application.ScreenUpdating
     Application.ScreenUpdating = False
-    If DeAnonymize.HighlightResidualPseudonyms(Doc, bodyOnly:=True) > 0 Then issues = True
+    If DeAnonymize.HighlightResidualPseudonyms(Doc) > 0 Then issues = True
     Application.ScreenUpdating = prevSU
 
     ' Apostrophe conversion (always runs, no prompt)
@@ -242,6 +252,7 @@ End Sub
 ' Returns True if any are found. Used by RunAllDocumentChecks.
 Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
                                      closer As String, color As Long) As Boolean
+    Dim story       As Range
     Dim PARA        As Paragraph
     Dim paraRng     As Range
     Dim oRng        As Range
@@ -253,7 +264,12 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
     Dim stackTop    As Long
     Dim i           As Long
 
-    For Each PARA In Doc.Paragraphs
+    ' Every reviewed story, not just Doc.Paragraphs (the body). The collected
+    ' positions are coordinates in the CURRENT story, so the ranges built from
+    ' them below are cut from that story too -- Doc.Range(...) would resolve them
+    ' against the body and highlight unrelated text for a header hit.
+    For Each story In ReviewStories(Doc)
+    For Each PARA In story.Paragraphs
         Set paraRng = PARA.Range
         count = 0
         ReDim positions(0)
@@ -321,9 +337,10 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
                 If stackTop > 0 Then
                     stackTop = stackTop - 1         ' Matched � pop
                 Else
-                    ' Unmatched closer � highlight it
+                    ' Unmatched closer � highlight it, cut from THIS story
                     Dim closeRng As Range
-                    Set closeRng = Doc.Range(positions(i), positions(i) + 1)
+                    Set closeRng = story.Duplicate
+                    closeRng.SetRange positions(i), positions(i) + 1
                     closeRng.HighlightColorIndex = RGBToHighlightIndex(color)
                     CheckUnmatchedPairs = True
                 End If
@@ -333,13 +350,15 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
         ' Anything left on the stack is an unmatched opener
         For i = 1 To stackTop
             Dim openRng As Range
-            Set openRng = Doc.Range(stack(i), stack(i) + 1)
+            Set openRng = story.Duplicate
+            openRng.SetRange stack(i), stack(i) + 1
             openRng.HighlightColorIndex = RGBToHighlightIndex(color)
             CheckUnmatchedPairs = True
         Next i
 
 NextParaFull:
     Next PARA
+    Next story
 End Function
 
 ' Single-hit variant: highlights only the FIRST unmatched character found
@@ -542,20 +561,22 @@ End Function
 ' Returns True if any are found.
 ' ============================================================
 Private Function CheckDoubleSpaces(Doc As Document) As Boolean
-    Dim rng As Range
-    Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .text = "  "                ' two literal spaces
-        .MatchCase = False
-        .MatchWholeWord = False
-        .MatchWildcards = False
-        .Wrap = wdFindStop
-        Do While .Execute
-            rng.HighlightColorIndex = wdBrightGreen
-            CheckDoubleSpaces = True
-        Loop
-    End With
+    Dim story As Range, rng As Range
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        With rng.Find
+            .ClearFormatting
+            .text = "  "                ' two literal spaces
+            .MatchCase = False
+            .MatchWholeWord = False
+            .MatchWildcards = False
+            .Wrap = wdFindStop
+            Do While .Execute
+                rng.HighlightColorIndex = wdBrightGreen
+                CheckDoubleSpaces = True
+            Loop
+        End With
+    Next story
 End Function
 
 ' ============================================================
@@ -564,32 +585,99 @@ End Function
 ' ============================================================
 Private Function HighlightWord(Doc As Document, word As String, _
                                 color As Long) As Boolean
+    Dim story      As Range
     Dim rng        As Range
-    Dim charBefore As String
-    Dim charAfter  As String
     Dim exempt     As Boolean
 
-    Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .text = word
-        .MatchCase = False
-        .MatchWholeWord = True
-        .MatchWildcards = False
-        .Wrap = wdFindStop
-        Do While .Execute
-            exempt = False
-            If rng.start > 0 And rng.End < Doc.content.End Then
-                charBefore = Doc.Range(rng.start - 1, rng.start).text
-                charAfter = Doc.Range(rng.End, rng.End + 1).text
-                If charBefore = "*" And charAfter = "*" Then exempt = True
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        With rng.Find
+            .ClearFormatting
+            .text = word
+            .MatchCase = False
+            .MatchWholeWord = True
+            .MatchWildcards = False
+            .Wrap = wdFindStop
+            Do While .Execute
+                ' *blank* marks an intentional use. Probe within the match's OWN
+                ' story -- the old Doc.Range(...) probe used body coordinates,
+                ' which would read unrelated body text for a header match.
+                exempt = (CharBeforeRange(rng) = "*" And CharAfterRange(rng) = "*")
+                If Not exempt Then
+                    rng.HighlightColorIndex = RGBToHighlightIndex(color)
+                    HighlightWord = True
+                End If
+            Loop
+        End With
+    Next story
+End Function
+
+' ============================================================
+' REVIEW STORIES
+' Every story the close review inspects: the main body plus
+' each section's NON-EMPTY headers and footers, and the
+' footnote/endnote stories when present.
+'
+' The review used to read Doc.Content alone -- the body. A
+' running header is a separate story, so nothing in it was ever
+' checked: not a leftover pseudonym, not a double space, not an
+' unmatched bracket. That is the worst place to miss one, since
+' the header is where the court identity and the party names
+' sit and it repeats on every page.
+'
+' Empty header/footer slots (most of a section's six) hold
+' nothing but a paragraph mark and are dropped here so no check
+' pays for them.
+' ============================================================
+Private Function ReviewStories(Doc As Document) As Collection
+    Dim c As New Collection
+    On Error Resume Next
+
+    c.Add Doc.content
+
+    Dim sec As Section, hf As HeaderFooter
+    For Each sec In Doc.Sections
+        For Each hf In sec.Headers
+            If hf.Exists Then
+                If StoryHasText(hf.Range) Then c.Add hf.Range
             End If
-            If Not exempt Then
-                rng.HighlightColorIndex = RGBToHighlightIndex(color)
-                HighlightWord = True
+        Next hf
+        For Each hf In sec.Footers
+            If hf.Exists Then
+                If StoryHasText(hf.Range) Then c.Add hf.Range
             End If
-        Loop
-    End With
+        Next hf
+    Next sec
+
+    If Doc.Footnotes.count > 0 Then c.Add Doc.StoryRanges(wdFootnotesStory)
+    If Doc.Endnotes.count > 0 Then c.Add Doc.StoryRanges(wdEndnotesStory)
+
+    Set ReviewStories = c
+End Function
+
+' True when a story holds something other than paragraph/cell marks.
+Private Function StoryHasText(rng As Range) As Boolean
+    On Error Resume Next
+    Dim t As String
+    t = rng.text
+    StoryHasText = (Len(Trim$(Replace(Replace(t, vbCr, ""), Chr$(7), ""))) > 0)
+End Function
+
+' The character immediately before / after a range, WITHIN the range's own
+' story. Doc.Range(pos - 1, pos) cannot be used for this: its coordinates are
+' the BODY's, so probing a header match that way reads unrelated body text.
+Private Function CharBeforeRange(rng As Range) As String
+    On Error Resume Next
+    Dim p As Range: Set p = rng.Duplicate
+    p.Collapse Direction:=wdCollapseStart
+    If p.MoveStart(wdCharacter, -1) <> 0 Then CharBeforeRange = p.text
+End Function
+
+Private Function CharAfterRange(rng As Range) As String
+    On Error Resume Next
+    Dim p As Range: Set p = rng.Duplicate
+    p.Collapse Direction:=wdCollapseEnd
+    If p.MoveEnd(wdCharacter, 1) <> 0 Then CharAfterRange = p.text
 End Function
 
 ' ============================================================
@@ -614,30 +702,36 @@ End Function
 ' Uses a highlight-seeking Find (jumps between highlighted runs) instead of
 ' walking Doc.Content.Characters one COM call at a time, which froze Word
 ' for minutes on long documents.
+' Sweeps every reviewed story, not just the body: the checks now flag issues in
+' headers and footers, so their colors have to be clearable there too or a stale
+' flag would be stranded where nothing can remove it.
 Public Sub ClearCheckHighlights(Doc As Document)
+    Dim story   As Range
     Dim rng     As Range
     Dim lastEnd As Long
-    Set rng = Doc.content
-    lastEnd = -1
-    With rng.Find
-        .ClearFormatting
-        .text = ""
-        .Highlight = True
-        .Wrap = wdFindStop
-        Do While .Execute
-            If rng.HighlightColorIndex = wdBrightGreen Or _
-               rng.HighlightColorIndex = wdTurquoise Or _
-               rng.HighlightColorIndex = wdPink Then
-                rng.HighlightColorIndex = wdNoHighlight
-            End If
-            ' Guard against a zero-progress infinite loop.
-            If rng.End <= lastEnd Then Exit Do
-            lastEnd = rng.End
-            rng.Collapse Direction:=wdCollapseEnd
-            rng.End = Doc.content.End
-            If rng.start >= rng.End Then Exit Do
-        Loop
-    End With
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        lastEnd = -1
+        With rng.Find
+            .ClearFormatting
+            .text = ""
+            .Highlight = True
+            .Wrap = wdFindStop
+            Do While .Execute
+                If rng.HighlightColorIndex = wdBrightGreen Or _
+                   rng.HighlightColorIndex = wdTurquoise Or _
+                   rng.HighlightColorIndex = wdPink Then
+                    rng.HighlightColorIndex = wdNoHighlight
+                End If
+                ' Guard against a zero-progress infinite loop.
+                If rng.End <= lastEnd Then Exit Do
+                lastEnd = rng.End
+                rng.Collapse Direction:=wdCollapseEnd
+                rng.End = story.End
+                If rng.start >= rng.End Then Exit Do
+            Loop
+        End With
+    Next story
 End Sub
 
 ' Removes all highlight colors except yellow (the user's own color).
@@ -647,41 +741,44 @@ End Sub
 ' walk Doc.Content.Characters one COM call per character, freezing Word for the
 ' length of the document at the exact moment the user had asked to close it.
 Public Sub ClearAllHighlightsExceptYellow(Doc As Document)
+    Dim story   As Range
     Dim rng     As Range
     Dim lastEnd As Long
-    Set rng = Doc.content
-    lastEnd = -1
-    With rng.Find
-        .ClearFormatting
-        .text = ""
-        .Highlight = True
-        .Wrap = wdFindStop
-        Do While .Execute
-            Dim hci As Long
-            hci = rng.HighlightColorIndex
-            If hci = wdUndefined Then
-                ' The found run mixes colors (e.g. yellow butted against green).
-                ' Resolve per character WITHIN this run only -- a handful of
-                ' characters -- so yellow inside the run survives and the
-                ' whole-body character walk never returns.
-                Dim ch As Range
-                For Each ch In rng.Characters
-                    If ch.HighlightColorIndex <> wdYellow And _
-                       ch.HighlightColorIndex <> wdNoHighlight Then
-                        ch.HighlightColorIndex = wdNoHighlight
-                    End If
-                Next ch
-            ElseIf hci <> wdYellow And hci <> wdNoHighlight Then
-                rng.HighlightColorIndex = wdNoHighlight
-            End If
-            ' Guard against a zero-progress infinite loop.
-            If rng.End <= lastEnd Then Exit Do
-            lastEnd = rng.End
-            rng.Collapse Direction:=wdCollapseEnd
-            rng.End = Doc.content.End
-            If rng.start >= rng.End Then Exit Do
-        Loop
-    End With
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        lastEnd = -1
+        With rng.Find
+            .ClearFormatting
+            .text = ""
+            .Highlight = True
+            .Wrap = wdFindStop
+            Do While .Execute
+                Dim hci As Long
+                hci = rng.HighlightColorIndex
+                If hci = wdUndefined Then
+                    ' The found run mixes colors (e.g. yellow butted against
+                    ' green). Resolve per character WITHIN this run only -- a
+                    ' handful of characters -- so yellow inside the run survives
+                    ' and the whole-story character walk never returns.
+                    Dim ch As Range
+                    For Each ch In rng.Characters
+                        If ch.HighlightColorIndex <> wdYellow And _
+                           ch.HighlightColorIndex <> wdNoHighlight Then
+                            ch.HighlightColorIndex = wdNoHighlight
+                        End If
+                    Next ch
+                ElseIf hci <> wdYellow And hci <> wdNoHighlight Then
+                    rng.HighlightColorIndex = wdNoHighlight
+                End If
+                ' Guard against a zero-progress infinite loop.
+                If rng.End <= lastEnd Then Exit Do
+                lastEnd = rng.End
+                rng.Collapse Direction:=wdCollapseEnd
+                rng.End = story.End
+                If rng.start >= rng.End Then Exit Do
+            Loop
+        End With
+    Next story
 End Sub
 
 ' ============================================================
@@ -692,22 +789,24 @@ End Sub
 ' reminders.
 ' ============================================================
 Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
-    Dim rng As Range
-    Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .text = ""
-        .Highlight = True
-        .Wrap = wdFindStop
-        Do While .Execute
-            If rng.HighlightColorIndex <> wdBrightGreen And _
-               rng.HighlightColorIndex <> wdTurquoise And _
-               rng.HighlightColorIndex <> wdPink Then
-                DocumentHasUserHighlights = True
-                Exit Function
-            End If
-        Loop
-    End With
+    Dim story As Range, rng As Range
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        With rng.Find
+            .ClearFormatting
+            .text = ""
+            .Highlight = True
+            .Wrap = wdFindStop
+            Do While .Execute
+                If rng.HighlightColorIndex <> wdBrightGreen And _
+                   rng.HighlightColorIndex <> wdTurquoise And _
+                   rng.HighlightColorIndex <> wdPink Then
+                    DocumentHasUserHighlights = True
+                    Exit Function
+                End If
+            Loop
+        End With
+    Next story
 End Function
 
 ' ============================================================
@@ -719,16 +818,19 @@ End Function
 ' intentional and isolated to this one function.
 ' ============================================================
 Private Sub RestoreIntentionalBlanks(Doc As Document)
-    With Doc.content.Find
-        .ClearFormatting
-        .Replacement.ClearFormatting
-        .text = "\*blank\*"
-        .Replacement.text = "blank"
-        .MatchCase = False
-        .MatchWildcards = True
-        .Wrap = wdFindContinue
-        .Execute Replace:=wdReplaceAll
-    End With
+    Dim story As Range
+    For Each story In ReviewStories(Doc)
+        With story.Duplicate.Find
+            .ClearFormatting
+            .Replacement.ClearFormatting
+            .text = "\*blank\*"
+            .Replacement.text = "blank"
+            .MatchCase = False
+            .MatchWildcards = True
+            .Wrap = wdFindStop      ' story-scoped: wdFindContinue would escape it
+            .Execute Replace:=wdReplaceAll
+        End With
+    Next story
 End Sub
 
 ' ============================================================
@@ -744,54 +846,63 @@ End Sub
 ' attempt regardless of whether issues were found.
 ' ============================================================
 Private Sub ConvertStraightApostrophes(Doc As Document)
-    Dim rng As Range: Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .text = Chr(39)
-        .MatchWildcards = False
-        .Wrap = wdFindStop
-        .Forward = True
-        Do While .Execute
-            Dim bOpen As Boolean: bOpen = False
-            If rng.start = 0 Then
-                bOpen = True
-            Else
-                Select Case Doc.Range(rng.start - 1, rng.start).text
-                    Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
-                        bOpen = True
-                End Select
-            End If
-            If bOpen Then
-                rng.text = ChrW(8216)
-            Else
-                rng.text = ChrW(8217)
-            End If
-            rng.Collapse Direction:=wdCollapseEnd
-        Loop
-    End With
+    Dim story As Range, rng As Range
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        With rng.Find
+            .ClearFormatting
+            .text = Chr(39)
+            .MatchWildcards = False
+            .Wrap = wdFindStop
+            .Forward = True
+            Do While .Execute
+                ' Probe the preceding character within the match's OWN story;
+                ' Doc.Range(...) would read body coordinates for a header hit.
+                Dim bOpen As Boolean: bOpen = False
+                Dim prev As String: prev = CharBeforeRange(rng)
+                If Len(prev) = 0 Then
+                    bOpen = True                 ' start of the story
+                Else
+                    Select Case prev
+                        Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
+                            bOpen = True
+                    End Select
+                End If
+                If bOpen Then
+                    rng.text = ChrW(8216)
+                Else
+                    rng.text = ChrW(8217)
+                End If
+                rng.Collapse Direction:=wdCollapseEnd
+            Loop
+        End With
+    Next story
 End Sub
 
 ' ============================================================
 ' CHAR COUNT HELPER
-' Simple whole-document count of a single character.
+' Counts a single character across every reviewed story.
 ' Used only for the straight double quote odd/even test.
 ' ============================================================
 Private Function CountChar(Doc As Document, ch As String) As Long
-    Dim rng As Range
-    Dim n   As Long
+    Dim story As Range
+    Dim rng   As Range
+    Dim n     As Long
     n = 0
-    Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .MatchCase = True
-        .MatchWholeWord = False
-        .MatchWildcards = False
-        .Wrap = wdFindStop
-        .text = ch
-        Do While .Execute
-            n = n + 1
-        Loop
-    End With
+    For Each story In ReviewStories(Doc)
+        Set rng = story.Duplicate
+        With rng.Find
+            .ClearFormatting
+            .MatchCase = True
+            .MatchWholeWord = False
+            .MatchWildcards = False
+            .Wrap = wdFindStop
+            .text = ch
+            Do While .Execute
+                n = n + 1
+            Loop
+        End With
+    Next story
     CountChar = n
 End Function
 
