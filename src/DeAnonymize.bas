@@ -120,6 +120,11 @@ Public Sub DeAnonymizeTentative()
     keyPath = ResolveKeyPath(oDoc)
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
 
+    ' Per-phase timings, reported at the end when the run was slow. Guessing at
+    ' which phase dominates has been unreliable; this measures it.
+    Dim sTimes As String, tMark As Single, tRun As Single
+    tMark = Timer
+
     Dim maps() As Mapping
     Dim nMaps As Long, nKeepRows As Long
     If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows) Then
@@ -130,6 +135,7 @@ Public Sub DeAnonymizeTentative()
                vbExclamation, "De-Anonymize"
         Exit Sub
     End If
+    sTimes = sTimes & "  Read key (Excel): " & PhaseSecs(tMark) & vbCrLf
 
     ' Longest fake first: a bare token like "Thorne" must not rewrite part of a
     ' longer fake like "Barry Thorne" before that longer one is handled.
@@ -155,6 +161,7 @@ Public Sub DeAnonymizeTentative()
               vbYesNo + vbQuestion, "De-Anonymize") <> vbYes Then Exit Sub
 
     Application.ScreenUpdating = False
+    tRun = Timer                     ' start of the timed work (after the prompts)
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
 
@@ -171,13 +178,18 @@ Public Sub DeAnonymizeTentative()
     ' practice (e.g. a linked "(Surname Decl.)" record cite) and was only
     ' caught on a re-run after the close review had removed the links. The
     ' close review strips every link anyway, so do it up front here.
+    SetPhase "Removing hyperlinks"
+    tMark = Timer
     StripHyperlinksEverywhere oDoc
+    sTimes = sTimes & "  Strip hyperlinks: " & PhaseSecs(tMark) & vbCrLf
 
     ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
     ' document (dozens of terms, each many hits) into one custom undo record
     ' overflows and crashes Word. Word still records normal (multi-step) undo.
     Dim distinctHits As Long, i As Long
+    tMark = Timer
     distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, True, False, "De-anonymizing")
+    sTimes = sTimes & "  Replace " & nMaps & " mapping(s): " & PhaseSecs(tMark) & vbCrLf
 
     On Error Resume Next
     oDoc.AutoSaveOn = prevAutoSave
@@ -185,13 +197,20 @@ Public Sub DeAnonymizeTentative()
     oDoc.TrackRevisions = prevTrack
 
     ' Restore the court-identity header (Department 515, judge, courtroom staff).
+    SetPhase "Restoring court header"
+    tMark = Timer
     ApplyCourtIdentity oDoc, True
+    sTimes = sTimes & "  Court header: " & PhaseSecs(tMark) & vbCrLf
 
     ' Safety net: flag any pseudonym-pool word still present (even inside a
     ' larger word) in pink, so a fake the key missed doesn't slip through.
+    SetPhase "Scanning for leftover pseudonyms"
+    tMark = Timer
     Dim nFlags As Long
     nFlags = HighlightResidualPseudonyms(oDoc)
+    sTimes = sTimes & "  Pseudonym scan: " & PhaseSecs(tMark) & vbCrLf
 
+    SetPhase ""
     Application.ScreenUpdating = True
 
     SetDocFlag oDoc, DEANON_DONE_VAR      ' don't auto-run again on close
@@ -205,7 +224,7 @@ Public Sub DeAnonymizeTentative()
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s), and filled in the court-identity header " & _
            "(department, judge, staff)." & KeepRowsNote(nKeepRows) & _
-           sFlagLine & vbCrLf & vbCrLf & _
+           sFlagLine & TimingNote(sTimes, tRun) & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -1216,6 +1235,39 @@ Private Function NzText(ByVal v As Variant) As String
     End If
 End Function
 
+'==============================================================================
+' PHASE TIMING  (diagnostics)
+'==============================================================================
+' Seconds elapsed since tFrom, formatted for the result dialog. Timer is seconds
+' since midnight, so a run spanning midnight would go negative -- fold that.
+Private Function PhaseSecs(ByVal tFrom As Single) As String
+    Dim d As Single: d = Timer - tFrom
+    If d < 0 Then d = d + 86400#
+    PhaseSecs = Format$(d, "0.0") & "s"
+End Function
+
+' Show the phase breakdown only when the run was actually slow, so a normal fast
+' run keeps a clean dialog. The threshold is deliberately low enough that anyone
+' who notices a wait gets the numbers.
+Private Function TimingNote(ByVal sTimes As String, ByVal tRun As Single) As String
+    Dim d As Single: d = Timer - tRun
+    If d < 0 Then d = d + 86400#
+    If d < 8 Then Exit Function
+    TimingNote = vbCrLf & vbCrLf & "Took " & Format$(d, "0.0") & "s. Where the " & _
+                 "time went:" & vbCrLf & sTimes
+End Function
+
+' Name the running phase in the status bar so a long run shows what it is doing.
+' Pass "" to hand the status bar back to Word.
+Private Sub SetPhase(ByVal s As String)
+    On Error Resume Next
+    If Len(s) = 0 Then
+        Application.StatusBar = False
+    Else
+        Application.StatusBar = "De-Anonymize: " & s & " ..."
+    End If
+End Sub
+
 ' One line for the result dialog when the key carried operator KEEP rows, so it
 ' is clear those were recognized and deliberately not treated as pseudonyms
 ' rather than silently lost. Empty when there were none.
@@ -1473,7 +1525,11 @@ Private Sub AddStory(ByRef arr() As StoryRef, ByRef n As Long, ByVal r As Range)
     If r Is Nothing Then Exit Sub
     Dim t As String
     t = r.text
-    If Len(t) = 0 Then Exit Sub
+    ' Nothing but paragraph/cell marks is an EMPTY story -- most of a section's
+    ' six header/footer slots -- and can hold no search term. Len(t) = 0 alone
+    ' missed these: an empty header's text is a bare vbCr, so they were kept and
+    ' swept for every mapping.
+    If Len(Trim$(Replace(Replace(t, vbCr, ""), Chr$(7), ""))) = 0 Then Exit Sub
     n = n + 1
     If n > UBound(arr) Then ReDim Preserve arr(1 To UBound(arr) + 64)
     Set arr(n).rng = r
@@ -1526,6 +1582,7 @@ Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As
     Dim changed As Boolean
     For k = 1 To nStories
         If InStr(1, stories(k).lower, needle, vbBinaryCompare) > 0 Then
+            ' Reset per story: this tracks whether THIS story changed.
             changed = NativeReplacePasses(stories(k).rng, findText, replaceText, _
                                           whole, protectCitations)
             If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
@@ -1971,10 +2028,22 @@ Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant
                                         ByVal doms As Variant) As Long
     Dim total As Long, k As Long
 
-    Dim hayLower As String
+    Dim raw As String, hayLower As String
+    Dim readOK As Boolean: readOK = False
     On Error Resume Next
-    hayLower = LCase$(rng.text)
+    raw = rng.text
+    readOK = (Err.Number = 0)
     On Error GoTo 0
+    hayLower = LCase$(raw)
+
+    ' An EMPTY story (most of a section's six header/footer slots hold nothing
+    ' but a paragraph mark) contains no term, so skip it outright. Without this
+    ' it fell into TermMaybePresent's "couldn't read the text, assume present"
+    ' fallback -- which is right for a READ FAILURE but wrong for a genuinely
+    ' empty story, and it made every blank header pay all ~660 native sweeps.
+    If readOK And Len(Trim$(Replace(Replace(hayLower, vbCr, ""), Chr$(7), ""))) = 0 Then
+        Exit Function
+    End If
 
     Dim term As String
     For k = LBound(pool) To UBound(pool)
