@@ -97,6 +97,18 @@ Private Type Mapping
     fake As String
 End Type
 
+' Word settings that silently multiply the cost of a bulk edit run. Background
+' repagination re-flows the document after edits, and check-as-you-type re-proofs
+' every range we touch; with hundreds of replacements those two cost far more
+' than the replacement work itself, and ScreenUpdating = False does NOT disable
+' them. Saved so the user's own preferences are restored exactly.
+Private Type PerfState
+    saved As Boolean
+    pagination As Boolean
+    spell As Boolean
+    grammar As Boolean
+End Type
+
 ' One searchable story (main body, a non-empty header/footer, the footnote or
 ' endnote story, or a shape's text frame) plus a lowercased copy of its text.
 ' Collected ONCE per replacement run so the per-mapping loop neither re-walks the
@@ -162,6 +174,13 @@ Public Sub DeAnonymizeTentative()
 
     Application.ScreenUpdating = False
     tRun = Timer                     ' start of the timed work (after the prompts)
+
+    ' Background repagination and check-as-you-type re-process the document after
+    ' EVERY edit; with hundreds of replacements they cost more than the whole
+    ' replacement pass. ScreenUpdating alone does not disable them.
+    Dim perf As PerfState: perf = PerfSuppress()
+    Dim nRevs As Long: nRevs = RevisionLoad(oDoc)
+
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
 
@@ -211,6 +230,7 @@ Public Sub DeAnonymizeTentative()
     sTimes = sTimes & "  Pseudonym scan: " & PhaseSecs(tMark) & vbCrLf
 
     SetPhase ""
+    PerfRestore perf
     Application.ScreenUpdating = True
 
     SetDocFlag oDoc, DEANON_DONE_VAR      ' don't auto-run again on close
@@ -224,7 +244,7 @@ Public Sub DeAnonymizeTentative()
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s), and filled in the court-identity header " & _
            "(department, judge, staff)." & KeepRowsNote(nKeepRows) & _
-           sFlagLine & TimingNote(sTimes, tRun) & vbCrLf & vbCrLf & _
+           sFlagLine & TimingNote(sTimes, tRun, nRevs) & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -238,6 +258,7 @@ ErrH:
         oDoc.TrackRevisions = prevTrack
         oDoc.AutoSaveOn = prevAutoSave
     End If
+    PerfRestore perf                     ' never leave proofing/pagination off
     Application.ScreenUpdating = True
     Application.StatusBar = False        ' don't strand a progress message
     MsgBox "De-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
@@ -302,6 +323,9 @@ Public Sub ReAnonymizeTentative()
     On Error GoTo ErrH
 
     Application.ScreenUpdating = False
+    ' See PerfSuppress: repagination and check-as-you-type re-process the
+    ' document after every edit and dominate a bulk run.
+    Dim perf As PerfState: perf = PerfSuppress()
 
     ' The real->fake scrub runs IN MEMORY on the open document ONLY -- so italic
     ' cited authorities can be detected and preserved -- and the result is then
@@ -351,6 +375,7 @@ Public Sub ReAnonymizeTentative()
     If Len(oDoc.path) > 0 Then origPath = oDoc.FullName
     On Error GoTo ErrH
 
+    PerfRestore perf
     Application.ScreenUpdating = True
 
     Dim closedOK As Boolean: closedOK = False
@@ -423,6 +448,7 @@ ErrH:
     ' real->fake edits, and re-enabling AutoSave would push them to the
     ' original cloud file before the user can close without saving.
     If bStateSaved Then oDoc.TrackRevisions = prevTrack
+    PerfRestore perf                     ' never leave proofing/pagination off
     Application.ScreenUpdating = True
     Application.StatusBar = False        ' don't strand a progress message
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
@@ -897,6 +923,9 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
     SortMappingsByLenDesc maps, nMaps, True
 
     Application.ScreenUpdating = False
+    ' See PerfSuppress: these dominate a bulk edit run, and this hook runs while
+    ' the user is waiting on a close.
+    Dim perf As PerfState: perf = PerfSuppress()
     Dim prevTrack As Boolean: prevTrack = Doc.TrackRevisions
     Doc.TrackRevisions = False
     Dim prevAutoSave As Boolean: prevAutoSave = False
@@ -915,6 +944,7 @@ Public Sub RunDeAnonymizeOnClose(ByVal Doc As Document)
 
     Doc.AutoSaveOn = prevAutoSave
     Doc.TrackRevisions = prevTrack
+    PerfRestore perf
     Application.ScreenUpdating = True
 
     SetDocFlag Doc, DEANON_DONE_VAR
@@ -1236,6 +1266,49 @@ Private Function NzText(ByVal v As Variant) As String
 End Function
 
 '==============================================================================
+' BULK-EDIT PERFORMANCE
+'==============================================================================
+' Turn off the two background services that re-process the document after every
+' single edit, and return the previous settings for PerfRestore. ScreenUpdating
+' = False does not cover these: background repagination still re-flows the whole
+' document and check-as-you-type still re-proofs each range touched, so a run of
+' hundreds of replacements pays both costs hundreds of times over.
+Private Function PerfSuppress() As PerfState
+    Dim p As PerfState
+    On Error Resume Next
+    p.pagination = Application.Options.Pagination
+    p.spell = Application.Options.CheckSpellingAsYouType
+    p.grammar = Application.Options.CheckGrammarAsYouType
+    p.saved = True
+    Application.Options.Pagination = False
+    Application.Options.CheckSpellingAsYouType = False
+    Application.Options.CheckGrammarAsYouType = False
+    On Error GoTo 0
+    PerfSuppress = p
+End Function
+
+' Put the user's own settings back exactly. Safe to call twice and safe when
+' PerfSuppress never ran (saved = False).
+Private Sub PerfRestore(ByRef p As PerfState)
+    If Not p.saved Then Exit Sub
+    On Error Resume Next
+    Application.Options.Pagination = p.pagination
+    Application.Options.CheckSpellingAsYouType = p.spell
+    Application.Options.CheckGrammarAsYouType = p.grammar
+    p.saved = False
+    On Error GoTo 0
+End Sub
+
+' Count of tracked revisions across the document. A document carrying thousands
+' of revision marks makes every Find and every text assignment dramatically more
+' expensive, which no amount of tuning here can undo -- so the timing note
+' surfaces it rather than leaving the user to wonder.
+Private Function RevisionLoad(ByVal oDoc As Document) As Long
+    On Error Resume Next
+    RevisionLoad = oDoc.Revisions.count
+End Function
+
+'==============================================================================
 ' PHASE TIMING  (diagnostics)
 '==============================================================================
 ' Seconds elapsed since tFrom, formatted for the result dialog. Timer is seconds
@@ -1249,12 +1322,19 @@ End Function
 ' Show the phase breakdown only when the run was actually slow, so a normal fast
 ' run keeps a clean dialog. The threshold is deliberately low enough that anyone
 ' who notices a wait gets the numbers.
-Private Function TimingNote(ByVal sTimes As String, ByVal tRun As Single) As String
+Private Function TimingNote(ByVal sTimes As String, ByVal tRun As Single, _
+                            Optional ByVal nRevs As Long = 0) As String
     Dim d As Single: d = Timer - tRun
     If d < 0 Then d = d + 86400#
     If d < 8 Then Exit Function
+    Dim sRev As String
+    If nRevs > 0 Then
+        sRev = "  (Document carries " & nRevs & " tracked revision(s), which " & _
+               "makes every search and edit markedly slower -- accepting or " & _
+               "rejecting them first will speed this up.)" & vbCrLf
+    End If
     TimingNote = vbCrLf & vbCrLf & "Took " & Format$(d, "0.0") & "s. Where the " & _
-                 "time went:" & vbCrLf & sTimes
+                 "time went:" & vbCrLf & sTimes & sRev
 End Function
 
 ' Name the running phase in the status bar so a long run shows what it is doing.
@@ -1585,14 +1665,36 @@ Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As
             ' Reset per story: this tracks whether THIS story changed.
             changed = NativeReplacePasses(stories(k).rng, findText, replaceText, _
                                           whole, protectCitations)
-            If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
-                changed = True
+
+            ' Only run the careful per-hit sweep when the term SURVIVED the
+            ' native passes. Both phases can only ever REMOVE occurrences, so if
+            ' the term is gone from the story's text there is nothing left for
+            ' the sweep to find -- and skipping it avoids a full Find plus a
+            ' boundary probe (~8 COM calls) on every substring occurrence buried
+            ' inside a larger word, which is the sweep's real cost. One text read
+            ' replaces all of that.
+            If StillPresent(stories(k).rng, needle) Then
+                If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
+                    changed = True
+                End If
             End If
             If changed Then total = total + 1
         End If
     Next k
 
     ReplaceInStories = total
+End Function
+
+' True when needle (already lowercased) still occurs in the story's CURRENT text.
+' Read fresh, not from the cached snapshot, because the native passes just edited
+' it. On a read failure answer True so the careful sweep still runs -- never skip
+' replacement work on a guess.
+Private Function StillPresent(ByVal rng As Range, ByVal needle As String) As Boolean
+    On Error GoTo Assume
+    StillPresent = (InStr(1, LCase$(rng.text), needle, vbBinaryCompare) > 0)
+    Exit Function
+Assume:
+    StillPresent = True
 End Function
 
 ' Bulk phase: run Word's native wdReplaceAll once per DISTINCT casing form of
