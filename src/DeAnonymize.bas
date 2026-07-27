@@ -78,6 +78,12 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 ' rather than grinding on. Far above any real leak count.
 Private Const MAX_HITS_PER_TERM As Long = 500
 
+' How many embedded-only matches make a key row worth REPORTING as extraction
+' debris (see LooksLikeFragment). Not a correctness threshold: an embedded-only
+' term is skipped however rare it is, because for a whole-token term replacing it
+' is a no-op either way. This only decides what the result dialog mentions.
+Private Const FRAGMENT_MAX_HITS As Long = 8
+
 ' Document variables (persisted inside the .docx) that gate the automatic
 ' de-anonymize-on-close: DEANON_DONE marks a document already de-anonymized;
 ' REANON_CREATED marks a document produced by the re-anonymize macro, which must
@@ -128,13 +134,19 @@ Public Sub DeAnonymizeTentative()
     Set oDoc = ActiveDocument
     If oDoc Is Nothing Then Exit Sub
 
-    Dim keyPath As String
-    keyPath = ResolveKeyPath(oDoc)
-    If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
-
     ' Per-phase timings, reported at the end when the run was slow. Guessing at
     ' which phase dominates has been unreliable; this measures it.
     Dim sTimes As String, tMark As Single, tRun As Single
+    tMark = Timer
+
+    ' Timed too: locating the key enumerates every file in the document's folder
+    ' and stats each one. On a OneDrive/SharePoint folder that can stall on cloud
+    ' metadata long before any document work starts, which the earlier timings
+    ' would have blamed on nothing at all.
+    Dim keyPath As String
+    keyPath = ResolveKeyPath(oDoc)
+    If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
+    sTimes = sTimes & "  Locate key file: " & PhaseSecs(tMark) & vbCrLf
     tMark = Timer
 
     Dim maps() As Mapping
@@ -205,9 +217,10 @@ Public Sub DeAnonymizeTentative()
     ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
     ' document (dozens of terms, each many hits) into one custom undo record
     ' overflows and crashes Word. Word still records normal (multi-step) undo.
-    Dim distinctHits As Long, i As Long
+    Dim distinctHits As Long, i As Long, nFragmentSkips As Long
     tMark = Timer
-    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, True, False, "De-anonymizing")
+    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, True, False, "De-anonymizing", _
+                                      nFragmentSkips)
     sTimes = sTimes & "  Replace " & nMaps & " mapping(s): " & PhaseSecs(tMark) & vbCrLf
 
     On Error Resume Next
@@ -244,7 +257,8 @@ Public Sub DeAnonymizeTentative()
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s), and filled in the court-identity header " & _
            "(department, judge, staff)." & KeepRowsNote(nKeepRows) & _
-           sFlagLine & TimingNote(sTimes, tRun, nRevs) & vbCrLf & vbCrLf & _
+           FragmentNote(nFragmentSkips) & sFlagLine & _
+           TimingNote(sTimes, tRun, nRevs) & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
 
@@ -1348,6 +1362,18 @@ Private Sub SetPhase(ByVal s As String)
     End If
 End Sub
 
+' One line for the result dialog when key rows were skipped as extraction debris
+' -- a term that matched many times but never once stood on its own. Reported so
+' a skip is visible rather than silent; empty when there were none.
+Private Function FragmentNote(ByVal nSkips As Long) As String
+    If nSkips <= 0 Then Exit Function
+    FragmentNote = vbCrLf & vbCrLf & "Skipped " & nSkips & " key row(s) whose " & _
+                   "search term never appeared on its own -- only buried inside " & _
+                   "longer words (e.g. ""ES"" inside ""cases""). Those are " & _
+                   "extraction fragments, not pseudonyms; replacing them would " & _
+                   "have rewritten ordinary prose."
+End Function
+
 ' One line for the result dialog when the key carried operator KEEP rows, so it
 ' is clear those were recognized and deliberately not treated as pseudonyms
 ' rather than silently lost. Empty when there were none.
@@ -1432,7 +1458,8 @@ End Function
 Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapping, _
                                      ByVal nMaps As Long, ByVal useFake As Boolean, _
                                      ByVal protect As Boolean, _
-                                     ByVal progressLabel As String) As Long
+                                     ByVal progressLabel As String, _
+                                     Optional ByRef nFragmentSkips As Long = 0) As Long
     ' "handled", not "done": Done: is used as a label elsewhere in this module.
     ' "pass", not "round": Round is a built-in VBA function.
     Dim handled() As Boolean
@@ -1455,18 +1482,35 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
     ' Re-anonymize: skip a real value shorter than 3 characters. Rows like
     ' real "JR" and real "TO" are extraction junk, and replacing every standalone
     ' "to" with a pseudonym would corrupt the shared copy's prose.
-    Dim da As Long, db As Long
+    Dim da As Long
     If useFake Then
-        For da = 1 To nMaps - 1
-            For db = da + 1 To nMaps
-                If StrComp(maps(da).fake, maps(db).fake, vbTextCompare) = 0 Then
-                    If StrComp(maps(da).real, maps(db).real, vbTextCompare) <> 0 Then
-                        handled(da) = True
-                        handled(db) = True
-                    End If
+        ' Group by lowercased fake in ONE pass with a Dictionary. The previous
+        ' nested scan was O(n^2) locale-aware StrComp -- ~40,000 comparisons on a
+        ' 200-row key, each one slow.
+        Dim seenAt As Object, ambiguous As Object
+        Set seenAt = CreateObject("Scripting.Dictionary")
+        Set ambiguous = CreateObject("Scripting.Dictionary")
+        Dim fk As String
+        For da = 1 To nMaps
+            fk = LCase$(maps(da).fake)
+            If seenAt.Exists(fk) Then
+                ' Same fake claimed again: ambiguous only when the REAL values
+                ' differ. Duplicate fakes are usually casing pairs of one name
+                ' ("GARDELLA"/"Gardella", from the caption and the body) which
+                ' restore identically -- MatchCasing recases from the matched
+                ' text -- and must NOT be retired.
+                If StrComp(maps(da).real, maps(seenAt(fk)).real, vbTextCompare) <> 0 Then
+                    ambiguous(fk) = True
                 End If
-            Next db
+            Else
+                seenAt(fk) = da
+            End If
         Next da
+        If ambiguous.count > 0 Then
+            For da = 1 To nMaps
+                If ambiguous.Exists(LCase$(maps(da).fake)) Then handled(da) = True
+            Next da
+        End If
     Else
         For da = 1 To nMaps
             If Len(maps(da).real) < 3 Then handled(da) = True
@@ -1490,9 +1534,11 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
                 handled(i) = True           ' set before the call: process once, period
                 Dim n As Long
                 If useFake Then
-                    n = ReplaceInStories(stories, nStories, maps(i).fake, maps(i).real, protect)
+                    n = ReplaceInStories(stories, nStories, maps(i).fake, maps(i).real, _
+                                         protect, nFragmentSkips)
                 Else
-                    n = ReplaceInStories(stories, nStories, maps(i).real, maps(i).fake, protect)
+                    n = ReplaceInStories(stories, nStories, maps(i).real, maps(i).fake, _
+                                         protect, nFragmentSkips)
                 End If
                 If n > 0 Then
                     distinctHits = distinctHits + 1
@@ -1647,7 +1693,8 @@ End Sub
 ' so the current parties still get replaced while published cites are preserved.
 Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As Long, _
                                    ByVal findText As String, ByVal replaceText As String, _
-                                   Optional ByVal protectCitations As Boolean = False) As Long
+                                   Optional ByVal protectCitations As Boolean = False, _
+                                   Optional ByRef nFragmentSkips As Long = 0) As Long
     Dim total As Long: total = 0
     If Len(findText) = 0 Then Exit Function
     ' Word's Find raises on search terms longer than 255 characters; under the
@@ -1662,39 +1709,148 @@ Private Function ReplaceInStories(ByRef stories() As StoryRef, ByVal nStories As
     Dim changed As Boolean
     For k = 1 To nStories
         If InStr(1, stories(k).lower, needle, vbBinaryCompare) > 0 Then
+
+            ' Contained in other words, never on its own -> skip this story
+            ' entirely. For a whole-token term every embedded hit would be
+            ' refused by the boundary check anyway, so the replacement is a
+            ' no-op and this removes only the scanning. It is what makes a
+            ' debris row like "ES" (151 hits inside "cases"/"issues", none
+            ' standalone) cost nothing instead of a full sweep, while a term
+            ' that DOES stand alone somewhere is still replaced there.
+            If whole Then
+                If OnlyEmbedded(stories(k).lower, needle) Then
+                    If LooksLikeFragment(stories(k).lower, needle) Then
+                        nFragmentSkips = nFragmentSkips + 1
+                    End If
+                    GoTo NextStory
+                End If
+            End If
+
             ' Reset per story: this tracks whether THIS story changed.
             changed = NativeReplacePasses(stories(k).rng, findText, replaceText, _
                                           whole, protectCitations)
 
-            ' Only run the careful per-hit sweep when the term SURVIVED the
-            ' native passes. Both phases can only ever REMOVE occurrences, so if
-            ' the term is gone from the story's text there is nothing left for
-            ' the sweep to find -- and skipping it avoids a full Find plus a
-            ' boundary probe (~8 COM calls) on every substring occurrence buried
-            ' inside a larger word, which is the sweep's real cost. One text read
-            ' replaces all of that.
-            If StillPresent(stories(k).rng, needle) Then
+            ' Only run the careful per-hit sweep when it actually has work. Both
+            ' phases can only ever REMOVE occurrences, so one in-memory read of
+            ' the story's current text settles it -- and for a whole-token term
+            ' it answers the real question (is there a STANDALONE occurrence
+            ' left?), not merely whether the letters appear somewhere. That is
+            ' the sweep's whole cost: a Find plus a ~8-COM-call boundary probe
+            ' for every occurrence buried inside a larger word.
+            If NeedsManualSweep(stories(k).rng, needle, whole) Then
                 If ReplaceInRange(stories(k).rng, findText, replaceText, whole, protectCitations) Then
                     changed = True
                 End If
             End If
             If changed Then total = total + 1
         End If
+NextStory:
     Next k
 
     ReplaceInStories = total
 End Function
 
-' True when needle (already lowercased) still occurs in the story's CURRENT text.
+' True when the careful per-hit sweep still has work to do in this story, decided
+' from ONE in-memory read of the story's current text.
+'
 ' Read fresh, not from the cached snapshot, because the native passes just edited
-' it. On a read failure answer True so the careful sweep still runs -- never skip
+' it. On a read failure answer True so the sweep still runs -- never skip
 ' replacement work on a guess.
-Private Function StillPresent(ByVal rng As Range, ByVal needle As String) As Boolean
+'
+' For a whole-token term this asks the real question: is there an occurrence with
+' NON-ALPHANUMERIC characters on both sides? Plain containment is not enough and
+' was the expensive mistake. A key can bind fragment fakes like "COU" or "ES",
+' which occur inside "court", "counsel", "cases" hundreds of times but never
+' stand alone; containment said "present", so the sweep ran and spent ~8 COM
+' calls per occurrence discovering each was embedded. HasWholeToken settles all
+' of them from the string already in hand.
+'
+' It mirrors WholeTokenBoundaries exactly, so the cases the sweep exists for
+' still qualify: a possessive ("Thorne's") and a quote- or paren-hugged token
+' ("(Nash)") both have non-alphanumeric neighbours and still return True.
+Private Function NeedsManualSweep(ByVal rng As Range, ByVal needleLower As String, _
+                                  ByVal whole As Boolean) As Boolean
     On Error GoTo Assume
-    StillPresent = (InStr(1, LCase$(rng.text), needle, vbBinaryCompare) > 0)
+    Dim t As String: t = LCase$(rng.text)
+    If whole Then
+        NeedsManualSweep = HasWholeToken(t, needleLower)
+    Else
+        NeedsManualSweep = (InStr(1, t, needleLower, vbBinaryCompare) > 0)
+    End If
     Exit Function
 Assume:
-    StillPresent = True
+    NeedsManualSweep = True
+End Function
+
+' True when needleLower occurs in textLower as a whole alphanumeric token.
+Private Function HasWholeToken(ByVal textLower As String, ByVal needleLower As String) As Boolean
+    HasWholeToken = (CountWholeToken(textLower, needleLower, 1) > 0)
+End Function
+
+' Number of whole-alphanumeric-token occurrences of needleLower in textLower.
+' Both arguments must already be lowercased; the module has no Option Compare, so
+' Like is binary and "[a-z0-9]" tests exactly the lowercase class.
+'
+' stopAt > 0 returns as soon as that many have been found -- callers only ever
+' need "any?" or "more than N?", so a fragment that appears everywhere never
+' costs a full scan.
+Private Function CountWholeToken(ByVal textLower As String, ByVal needleLower As String, _
+                                 Optional ByVal stopAt As Long = 0) As Long
+    Dim L As Long, n As Long, p As Long, c As Long
+    L = Len(textLower): n = Len(needleLower)
+    If n = 0 Or L = 0 Then Exit Function
+
+    p = InStr(1, textLower, needleLower, vbBinaryCompare)
+    Do While p > 0
+        Dim okL As Boolean, okR As Boolean
+        okL = (p = 1)
+        If Not okL Then okL = Not (Mid$(textLower, p - 1, 1) Like "[a-z0-9]")
+        okR = (p + n > L)
+        If Not okR Then okR = Not (Mid$(textLower, p + n, 1) Like "[a-z0-9]")
+        If okL And okR Then
+            c = c + 1
+            If stopAt > 0 And c >= stopAt Then Exit Do
+        End If
+        p = InStr(p + 1, textLower, needleLower, vbBinaryCompare)
+    Loop
+    CountWholeToken = c
+End Function
+
+' True when the term occurs in this story ONLY inside larger words -- never on
+' its own. "ES" buried in "cases"/"issues", "COU" in "court"/"counsel".
+'
+' For a whole-token term this makes the story skippable for FREE, not merely
+' cheaply: WholeTokenBoundaries already refuses every embedded hit, so with no
+' standalone occurrence the replacement is a no-op and skipping removes only the
+' scan. Nothing that would have been replaced stops being replaced -- "COU" is
+' still replaced in the stories where it does stand alone; only the wholly
+' embedded ones drop out.
+'
+' This is a better discriminator than term length, which was the first attempt.
+' In the user's own keys the legitimate party name "Bernards" occurs 36 times and
+' the debris row "HNT" 14, so no frequency cutoff separates them and no length
+' cutoff is principled -- but "stands alone somewhere?" separates them exactly.
+Private Function OnlyEmbedded(ByVal storyLower As String, ByVal needleLower As String) As Boolean
+    OnlyEmbedded = (CountWholeToken(storyLower, needleLower, 1) = 0)
+End Function
+
+' True when the term matched more than FRAGMENT_MAX_HITS times in the story.
+' Used only to decide whether an OnlyEmbedded skip is worth REPORTING: a term
+' that appeared once inside one longer word is unremarkable, whereas one that
+' appeared dozens of times and never once stood alone is extraction debris the
+' user should know about. Stops counting at the threshold.
+Private Function LooksLikeFragment(ByVal storyLower As String, ByVal needleLower As String) As Boolean
+    If Len(needleLower) = 0 Then Exit Function
+    Dim p As Long, n As Long
+    p = InStr(1, storyLower, needleLower, vbBinaryCompare)
+    Do While p > 0
+        n = n + 1
+        If n > FRAGMENT_MAX_HITS Then
+            LooksLikeFragment = True
+            Exit Function
+        End If
+        p = InStr(p + 1, storyLower, needleLower, vbBinaryCompare)
+    Loop
 End Function
 
 ' Bulk phase: run Word's native wdReplaceAll once per DISTINCT casing form of
