@@ -10,8 +10,19 @@ Attribute VB_Name = "DeAnonymize"
 '
 ' The key file PDF-Linker writes is "pseudonym_key.xlsx", a worksheet with the
 ' columns:
-'     Category | Real Value | Replacement | Source | Occurrences
-' where "Replacement" is USUALLY the fake that appears in the anonymized draft.
+'     Category | Real Value | Replacement | Status | Source | Occurrences
+' (columns are located by HEADER NAME, so a key from an older version that lacks
+' Status still reads). Two Status values change what a row means here:
+'   "alt spelling"  the Real Value is a synthetic spelling PDF-Linker invented
+'                   to widen matching, sharing the CANONICAL row's fake. Usable
+'                   real -> fake only; see Mapping.forwardOnly.
+'   "no match"      the fake was never written into the exported text -- the key
+'                   pins the binding for a party this batch of filings never
+'                   mentioned -- so it cannot appear in a draft written from
+'                   those exports.
+' Neither can be a de-anonymize MISS, so both are counted out of the result
+' dialog's tally rather than left to read as failures.
+' "Replacement" is USUALLY the fake that appears in the anonymized draft.
 ' It can instead hold an operator KEEP instruction -- "no" (leave this Real Value
 ' verbatim) or a "[bracketed]" keep-spec -- which is NOT a pseudonym and never
 ' appeared in the document. IsKeepDecisionCell recognizes those and
@@ -101,6 +112,15 @@ Private g_ReAnonThisSession As Boolean
 Private Type Mapping
     real As String
     fake As String
+    ' FORWARD-ONLY row (key Status = "alt spelling"): a synthetic spelling
+    ' PDF-Linker invented to widen matching -- a hyphenated surname a line wrap
+    ' split open ("Ardeshirpour- Zartoshti"), an OCR near-miss ("Sarra" for
+    ' "Sara") -- registered against the CANONICAL value's fake so that every
+    ' spelling gets scrubbed. Real -> fake is right, so re-anonymize uses it.
+    ' Fake -> real is not: two rows then claim one pseudonym and there is no way
+    ' to know which spelling to restore. PDF-Linker marks the non-canonical one
+    ' so exactly one row owns each reversal; de-anonymize skips these.
+    forwardOnly As Boolean
 End Type
 
 ' Word settings that silently multiply the cost of a bulk edit run. Background
@@ -150,8 +170,8 @@ Public Sub DeAnonymizeTentative()
     tMark = Timer
 
     Dim maps() As Mapping
-    Dim nMaps As Long, nKeepRows As Long
-    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows) Then
+    Dim nMaps As Long, nKeepRows As Long, nUnusedRows As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows, nUnusedRows) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
                "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
@@ -217,10 +237,10 @@ Public Sub DeAnonymizeTentative()
     ' Deliberately NO custom UndoRecord: wrapping every replacement across a large
     ' document (dozens of terms, each many hits) into one custom undo record
     ' overflows and crashes Word. Word still records normal (multi-step) undo.
-    Dim distinctHits As Long, i As Long, nFragmentSkips As Long
+    Dim distinctHits As Long, i As Long, nFragmentSkips As Long, nAmbiguous As Long
     tMark = Timer
     distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, True, False, "De-anonymizing", _
-                                      nFragmentSkips)
+                                      nFragmentSkips, nAmbiguous)
     sTimes = sTimes & "  Replace " & nMaps & " mapping(s): " & PhaseSecs(tMark) & vbCrLf
 
     On Error Resume Next
@@ -256,7 +276,8 @@ Public Sub DeAnonymizeTentative()
     End If
     MsgBox "De-anonymized: restored " & distinctHits & " of " & nMaps & _
            " pseudonym(s), and filled in the court-identity header " & _
-           "(department, judge, staff)." & KeepRowsNote(nKeepRows) & _
+           "(department, judge, staff)." & UnusedRowsNote(nUnusedRows) & _
+           AmbiguousNote(nAmbiguous) & KeepRowsNote(nKeepRows) & _
            FragmentNote(nFragmentSkips) & sFlagLine & _
            TimingNote(sTimes, tRun, nRevs) & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
@@ -1166,10 +1187,12 @@ End Function
 Private Function ReadPseudonymKey(ByVal path As String, _
                                    ByRef maps() As Mapping, _
                                    ByRef nMaps As Long, _
-                                   Optional ByRef nKeepRows As Long) As Boolean
+                                   Optional ByRef nKeepRows As Long, _
+                                   Optional ByRef nUnusedRows As Long) As Boolean
     On Error GoTo Fail
     nMaps = 0
     nKeepRows = 0
+    nUnusedRows = 0
 
     Dim xl As Object
     Dim startedXl As Boolean: startedXl = False
@@ -1218,20 +1241,23 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     rLo = LBound(data, 1): rHi = UBound(data, 1)
     cLo = LBound(data, 2): cHi = UBound(data, 2)
 
-    ' Locate the two columns we need from the header row.
-    Dim realCol As Long, fakeCol As Long, c As Long
-    realCol = 0: fakeCol = 0
+    ' Locate the columns we need from the header row. Real Value and Replacement
+    ' are required; Status is optional (a key from an older version of
+    ' PDF-Linker may not have it) and carries the two verdicts below.
+    Dim realCol As Long, fakeCol As Long, statCol As Long, c As Long
+    realCol = 0: fakeCol = 0: statCol = 0
     For c = cLo To cHi
         Dim hd As String: hd = LCase$(Trim$(CStr(NzText(data(rLo, c)))))
         If hd = "real value" Then realCol = c
         If hd = "replacement" Then fakeCol = c
+        If hd = "status" Then statCol = c
     Next c
     If realCol = 0 Or fakeCol = 0 Then GoTo CleanFail
 
     ReDim maps(1 To (rHi - rLo + 1))
     Dim r As Long
     For r = rLo + 1 To rHi
-        Dim rv As String, fk As String
+        Dim rv As String, fk As String, st As String
         rv = Trim$(CStr(NzText(data(r, realCol))))
         fk = Trim$(CStr(NzText(data(r, fakeCol))))
         If Len(rv) > 0 And Len(fk) > 0 And StrComp(rv, fk, vbBinaryCompare) <> 0 Then
@@ -1241,6 +1267,23 @@ Private Function ReadPseudonymKey(ByVal path As String, _
                 nMaps = nMaps + 1
                 maps(nMaps).real = rv
                 maps(nMaps).fake = fk
+                ' PDF-Linker's own verdict on the row. Two of its values say
+                ' this row cannot be a de-anonymize MISS, so the result dialog
+                ' can stop them reading as failures:
+                '   "alt spelling" - a synthetic spelling of another row's
+                '                    value, sharing that row's fake. Forward
+                '                    only; see Mapping.forwardOnly.
+                '   "no match"     - the fake was never written into the
+                '                    exported text (the key pins the binding for
+                '                    a party this batch never mentioned), so it
+                '                    cannot be in a draft written from those
+                '                    exports.
+                If statCol > 0 Then
+                    st = LCase$(Trim$(CStr(NzText(data(r, statCol)))))
+                    maps(nMaps).forwardOnly = (st = "alt spelling")
+                    If st = "alt spelling" Or st = "no match" Then _
+                        nUnusedRows = nUnusedRows + 1
+                End If
             End If
         End If
     Next r
@@ -1374,6 +1417,35 @@ Private Function FragmentNote(ByVal nSkips As Long) As String
                    "have rewritten ordinary prose."
 End Function
 
+' One line for the result dialog when key rows were retired as AMBIGUOUS -- one
+' fake claimed by two different real values, so there is no way to know which to
+' restore (see ReplaceAllMappings). The mapping is skipped, which is safe but
+' leaves that pseudonym in the document, so say so: the pink highlight will show
+' where, and the user has to pick the right name by hand. Empty when none.
+Private Function AmbiguousNote(ByVal nAmbiguous As Long) As String
+    If nAmbiguous <= 0 Then Exit Function
+    AmbiguousNote = vbCrLf & vbCrLf & "Left " & nAmbiguous & " key row(s) " & _
+                    "alone: their pseudonym is claimed by more than one real " & _
+                    "value, so there is no way to tell which to restore. Those " & _
+                    "names are still pseudonyms in the document -- look for the " & _
+                    "pink highlights and correct them by hand."
+End Function
+
+' One line for the result dialog when the key holds rows that cannot be restored
+' HERE and are not misses: a binding the anonymizer never wrote into the exported
+' text (Status "no match" -- a party this batch never mentioned) or an alternate
+' spelling whose fake another row already reverses (Status "alt spelling").
+' Without this they read as a large de-anonymize failure in the "restored X of Y"
+' count. Empty when there were none.
+Private Function UnusedRowsNote(ByVal nUnusedRows As Long) As String
+    If nUnusedRows <= 0 Then Exit Function
+    UnusedRowsNote = vbCrLf & vbCrLf & "That total includes " & nUnusedRows & _
+                     " mapping(s) that could not apply here -- the key pins them " & _
+                     "for parties this batch of filings never mentioned, or they " & _
+                     "are alternate spellings another row already restores -- so " & _
+                     "they are not misses."
+End Function
+
 ' One line for the result dialog when the key carried operator KEEP rows, so it
 ' is clear those were recognized and deliberately not treated as pseudonyms
 ' rather than silently lost. Empty when there were none.
@@ -1459,7 +1531,8 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
                                      ByVal nMaps As Long, ByVal useFake As Boolean, _
                                      ByVal protect As Boolean, _
                                      ByVal progressLabel As String, _
-                                     Optional ByRef nFragmentSkips As Long = 0) As Long
+                                     Optional ByRef nFragmentSkips As Long = 0, _
+                                     Optional ByRef nAmbiguous As Long = 0) As Long
     ' "handled", not "done": Done: is used as a label elsewhere in this module.
     ' "pass", not "round": Round is a built-in VBA function.
     Dim handled() As Boolean
@@ -1479,6 +1552,22 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
     ' body), which restore identically -- MatchCasing recases from the matched
     ' text -- and must NOT be retired.
     '
+    ' Retiring is FAIL-SAFE (the fake is left standing and the pink residual
+    ' scan flags it) but it is still a name the user must fix by hand, so the
+    ' count is reported rather than swallowed.
+    '
+    ' Forward-only rows are dropped BEFORE that grouping, not caught by it.
+    ' PDF-Linker registers SYNTHETIC spellings of a name against that name's own
+    ' fake so that every spelling scrubs -- a wrap-split hyphen ("Ardeshirpour-
+    ' Zartoshti"), an OCR near-miss ("Sarra" for "Sara") -- and each is its own
+    ' key row. Left in, they made the fake of every hyphenated party look
+    ' ambiguous and retired the real mapping with them, so no hyphenated name
+    ' de-anonymized at all. PDF-Linker marks the non-canonical row (Status =
+    ' "alt spelling"); skipping those first leaves exactly one row per fake and
+    ' the guard sees a clean key. The guard still matters: it is the only thing
+    ' standing between a genuine collision -- or a key written before the marker
+    ' existed -- and a wrong restore.
+    '
     ' Re-anonymize: skip a real value shorter than 3 characters. Rows like
     ' real "JR" and real "TO" are extraction junk, and replacing every standalone
     ' "to" with a pseudonym would corrupt the shared copy's prose.
@@ -1491,24 +1580,36 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
         Set seenAt = CreateObject("Scripting.Dictionary")
         Set ambiguous = CreateObject("Scripting.Dictionary")
         Dim fk As String
+        ' Forward-only rows are out of this direction entirely, so retire them
+        ' before grouping -- otherwise they are the duplicate.
         For da = 1 To nMaps
-            fk = LCase$(maps(da).fake)
-            If seenAt.Exists(fk) Then
-                ' Same fake claimed again: ambiguous only when the REAL values
-                ' differ. Duplicate fakes are usually casing pairs of one name
-                ' ("GARDELLA"/"Gardella", from the caption and the body) which
-                ' restore identically -- MatchCasing recases from the matched
-                ' text -- and must NOT be retired.
-                If StrComp(maps(da).real, maps(seenAt(fk)).real, vbTextCompare) <> 0 Then
-                    ambiguous(fk) = True
+            If maps(da).forwardOnly Then handled(da) = True
+        Next da
+        For da = 1 To nMaps
+            If Not handled(da) Then
+                fk = LCase$(maps(da).fake)
+                If seenAt.Exists(fk) Then
+                    ' Same fake claimed again: ambiguous only when the REAL
+                    ' values differ. Duplicate fakes are usually casing pairs of
+                    ' one name ("GARDELLA"/"Gardella", from the caption and the
+                    ' body) which restore identically -- MatchCasing recases
+                    ' from the matched text -- and must NOT be retired.
+                    If StrComp(maps(da).real, maps(seenAt(fk)).real, vbTextCompare) <> 0 Then
+                        ambiguous(fk) = True
+                    End If
+                Else
+                    seenAt(fk) = da
                 End If
-            Else
-                seenAt(fk) = da
             End If
         Next da
         If ambiguous.count > 0 Then
             For da = 1 To nMaps
-                If ambiguous.Exists(LCase$(maps(da).fake)) Then handled(da) = True
+                If Not handled(da) Then
+                    If ambiguous.Exists(LCase$(maps(da).fake)) Then
+                        handled(da) = True
+                        nAmbiguous = nAmbiguous + 1
+                    End If
+                End If
             Next da
         End If
     Else
