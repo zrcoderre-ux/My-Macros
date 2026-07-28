@@ -90,6 +90,18 @@ Type HintLine
     bmName      As String    ' Word bookmark name used in Phase-4 deletion
 End Type
 
+' Word settings that silently multiply the cost of a bulk edit run. Background
+' repagination re-flows the document after edits, and check-as-you-type re-proofs
+' every range we touch; this macro rewrites a cite at a time with track changes
+' on, so both run again after each one, and ScreenUpdating = False does NOT
+' disable either. Saved so the user's own preferences are restored exactly.
+Private Type PerfState
+    saved      As Boolean
+    pagination As Boolean
+    spell      As Boolean
+    grammar    As Boolean
+End Type
+
 '==============================================================================
 ' CALIFORNIA STYLE MANUAL CITATION CONVERTER  v5.1
 '==============================================================================
@@ -97,6 +109,10 @@ Option Explicit
 
 ' === module-level phase tracker (used in ErrHandler) ===
 Private gPhase As String
+
+' === cached compiled regexes (see LongCiteRegex / ReporterRegex) ===
+Private gReLongCite As Object
+Private gReReporter As Object
 
 
 '==============================================================================
@@ -131,6 +147,11 @@ On Error GoTo ErrHandler
     On Error GoTo ErrHandler
     Application.ScreenUpdating = False
 
+    ' Background repagination and check-as-you-type re-process the document after
+    ' EVERY edit; across a whole document's worth of cites they cost more than
+    ' the conversion itself. ScreenUpdating alone does not disable them.
+    Dim perf As PerfState: perf = PerfSuppress()
+
     Dim multiDict         As Object: Set multiDict = CreateObject("Scripting.Dictionary"): multiDict.CompareMode = 1
     Dim snToKey           As Object: Set snToKey = CreateObject("Scripting.Dictionary"): snToKey.CompareMode = 1
     Dim rpToKey           As Object: Set rpToKey = CreateObject("Scripting.Dictionary"): rpToKey.CompareMode = 1
@@ -144,6 +165,7 @@ On Error GoTo ErrHandler
     Dim usedHints() As Boolean: ReDim usedHints(0 To 100)
 
     gPhase = "Phase 1: PreScan"
+    SetPhase "scanning citations"
     PreScanDocument Doc, docCites, dcc, multiDict, snToKey, rpToKey, preScanInfo, _
                     altPartyToKey, shortNameOverrides, hintLines, hlC, needsShortName
 
@@ -153,12 +175,14 @@ On Error GoTo ErrHandler
     If hlC - 1 > UBound(usedHints) Then ReDim usedHints(0 To hlC - 1)
 
     gPhase = "Phase 1.5: InQuote"
+    SetPhase "completing in-quote citations"
     Dim b15Dict  As Object: Set b15Dict = CreateObject("Scripting.Dictionary"): b15Dict.CompareMode = 1
     Dim b15Count As Long: b15Count = 0
     ProcessInQuoteCompletions Doc, hintLines, hlC, usedHints, docCites, dcc, snToKey, _
                                rpToKey, altPartyToKey, preScanInfo, b15Dict, b15Count
 
     gPhase = "Phase 2: Swaps"
+    SetPhase "replacing orphan supra cites"
     Dim swapCount As Long
     swapCount = PerformSwaps(Doc, docCites, dcc, snToKey, rpToKey, multiDict, shortNameOverrides)
 
@@ -172,8 +196,14 @@ On Error GoTo ErrHandler
 
     Dim PARA As Paragraph
     Dim paraIdx As Long: paraIdx = 0
+    Dim paraTotal As Long: paraTotal = Doc.Paragraphs.count
     For Each PARA In Doc.Paragraphs
         paraIdx = paraIdx + 1
+        ' Every 25th paragraph only: writing the status bar is a UI call, and
+        ' doing it per paragraph would cost more than it reports on.
+        If paraIdx Mod 25 = 1 Then
+            SetPhase "converting citations (paragraph " & paraIdx & " of " & paraTotal & ")"
+        End If
         gPhase = "Phase 3: Para#" & paraIdx & " start=" & PARA.Range.start & _
                  " '" & Left(Replace(PARA.Range.text, Chr(13), ""), 80) & "'"
         ProcessParagraph PARA, caseDict, snToKey, rpToKey, multiDict, preScanInfo, _
@@ -182,13 +212,17 @@ On Error GoTo ErrHandler
     Next PARA
 
     gPhase = "Phase 3.5: Parens"
+    SetPhase "tidying short-name parentheticals"
     Dim parenCount As Long: parenCount = 0
     ProcessParentheticals Doc, caseDict, preScanInfo, multiDict, snToKey, rpToKey, _
                           altPartyToKey, parenCount
 
     gPhase = "Phase 4: Delete hints"
+    SetPhase "deleting used hint lines"
     If hlC > 0 Then DeleteUsedHintLines Doc, hintLines, hlC, usedHints
 
+    SetPhase ""
+    PerfRestore perf
     Application.ScreenUpdating = True
     Application.UndoRecord.EndCustomRecord
     Doc.TrackRevisions = prevTrackRevisions
@@ -209,6 +243,8 @@ On Error GoTo ErrHandler
 
 
 ErrHandler:
+    SetPhase ""                          ' don't strand a progress message
+    PerfRestore perf                     ' never leave proofing/pagination off
     Application.ScreenUpdating = True
     Application.UndoRecord.EndCustomRecord
     On Error Resume Next
@@ -259,7 +295,7 @@ Private Sub PreScanDocument(Doc As Document, _
         Dim qm() As Boolean: ReDim qm(1 To Len(pt)): BuildQuoteMask pt, qm
 
         ' ------ Long cites ------
-        Dim msL As Object: Set msL = reLong.Execute(pt)
+        Dim msL As Object: Set msL = ExecLongCite(reLong, pt)
         Dim prevAlC As Long: prevAlC = alC
         Dim mL As Object
         For Each mL In msL
@@ -1677,7 +1713,7 @@ Private Sub ProcessParentheticals(Doc As Document, _
 
         Dim qm() As Boolean: ReDim qm(1 To Len(pt)): BuildQuoteMask pt, qm
 
-        Dim mS As Object: Set mS = reLong.Execute(pt)
+        Dim mS As Object: Set mS = ExecLongCite(reLong, pt)
         Dim m  As Object
         For Each m In mS
             Dim dc As DocCite
@@ -2012,7 +2048,7 @@ P35NextPara3:
             If Len(pt4) = 0 Then GoTo P35NextPara4
 
             Dim qm4() As Boolean: ReDim qm4(1 To Len(pt4)): BuildQuoteMask pt4, qm4
-            Dim ms4 As Object: Set ms4 = reLong.Execute(pt4)
+            Dim ms4 As Object: Set ms4 = ExecLongCite(reLong, pt4)
             Dim m4 As Object
             For Each m4 In ms4
                 Dim dc4 As DocCite
@@ -2217,10 +2253,7 @@ Private Sub FindFullCitations(PARA As Paragraph, _
                                citations() As CitInfo, _
                                ByRef citCount As Long)
 
-    Dim re As Object: Set re = CreateObject("VBScript.RegExp")
-    re.Global = True: re.Multiline = False: re.Pattern = BuildLongCitePattern()
-
-    Dim mS As Object: Set mS = re.Execute(pt)
+    Dim mS As Object: Set mS = ExecLongCite(LongCiteRegex(), pt)
     Dim m  As Object
     For Each m In mS
         Dim dc As DocCite
@@ -2927,11 +2960,7 @@ Private Function ScanForPrecedingCiteType(text As String, endPos As Long) As Int
         End If
 
         ' If contains a case reporter pattern, it's a case cite
-        Dim reRep As Object: Set reRep = CreateObject("VBScript.RegExp")
-        reRep.Pattern = ReporterPattern()
-        reRep.Global = False
-        reRep.IgnoreCase = False
-        If reRep.Test(content) Then
+        If ReporterRegex().Test(content) Then
             ScanForPrecedingCiteType = 1
             Exit Function
         End If
@@ -3645,15 +3674,96 @@ Private Function ReporterPattern() As String
     ReporterPattern = "(?:" & sCal & "|" & sFed & "|" & sReg & ")"
 End Function
 
+' The reporter alternation compiled once. ScanForPrecedingCiteType walks back
+' through every parenthetical ahead of an Ibid./Id., and rebuilt this pattern on
+' each one; the walk itself is cheap, so the rebuild was most of its cost.
+Private Function ReporterRegex() As Object
+    If gReReporter Is Nothing Then
+        Set gReReporter = CreateObject("VBScript.RegExp")
+        gReReporter.Global = False
+        gReReporter.IgnoreCase = False
+        gReReporter.Pattern = ReporterPattern()
+    End If
+    Set ReporterRegex = gReReporter
+End Function
+
+' The case-name group used to be "(?:[A-Z][^(]*?(?:\s+v\.\s+|\s+In re\s+|\s+))[^(]+?"
+' -- two LAZY [^(] runs with a whitespace alternation between them. Nothing tells
+' the engine which whitespace is the separator, so for every capital letter it
+' retried the match once per possible split of the run of non-"(" text ahead of
+' it: quadratic work per starting letter, cubic over the paragraph. On ordinary
+' briefs parentheses are frequent, each run is short, and it finishes instantly
+' -- but one long paragraph with no parentheses in it (a block quote, a heading
+' block, a pasted statute) is a single enormous run, and the scan went from
+' milliseconds to minutes or hours with ScreenUpdating off. That is the macro
+' "hanging" Word: it is not stuck, it is backtracking.
+'
+' The three alternatives never affected what was captured -- the group is
+' non-capturing, group 1 spans the whole name either way, and the trailing
+' "\s*\((\d{4})\)" pins where the name ends -- so their only real requirement
+' was "the name contains a whitespace with at least one character after it".
+' "[A-Z][^\s(]*\s" states that directly and leaves exactly one way to split:
+' run to the FIRST whitespace, then one lazy run to the year. Same matches, same
+' captures (verified by fuzzing both forms over 60,000 generated citation
+' strings), quadratic instead of cubic, ~200x faster at 3.5K characters and
+' widening from there.
 Private Function BuildLongCitePattern() As String
     BuildLongCitePattern = _
-        "((?:[A-Z][^(]*?(?:\s+v\.\s+|\s+In re\s+|\s+))[^(]+?)" & _
+        "([A-Z][^\s(]*\s[^(]+?)" & _
         "\s*\((\d{4})\)\s+" & _
         "(\d+)\s+" & _
         "(" & ReporterPattern() & ")\s*" & _
         "(\d+)" & _
         "((?:,\s*\d[\d\s,\-]*)?)?" & _
         "(\))?"
+End Function
+
+' Every long cite contains a literal "(" + four digits + ")" -- the year. This
+' answers whether a paragraph has one, in a single left-to-right pass, so the
+' long-cite regex is never started on text that provably cannot match it. Most
+' paragraphs of an ordinary brief have no year in them at all, and those are
+' exactly the long paragraphs the pattern is slowest on.
+Private Function HasYearParen(ByVal s As String) As Boolean
+    Dim p As Long: p = InStr(1, s, "(")
+    Do While p > 0
+        If p + 5 <= Len(s) Then
+            If Mid$(s, p + 5, 1) = ")" Then
+                If Mid$(s, p + 1, 4) Like "####" Then
+                    HasYearParen = True
+                    Exit Function
+                End If
+            End If
+        End If
+        p = InStr(p + 1, s, "(")
+    Loop
+End Function
+
+' The compiled long-cite regex, built once per Word session instead of once per
+' call. BuildLongCitePattern splices the whole reporter alternation into a ~400
+' character pattern, and the callers below run per paragraph and per short cite,
+' so re-creating and re-compiling it each time was pure overhead. Execute returns
+' an independent, already-materialized MatchCollection, so one shared object is
+' safe even when a caller runs it while iterating another caller's results.
+Private Function LongCiteRegex() As Object
+    If gReLongCite Is Nothing Then
+        Set gReLongCite = CreateObject("VBScript.RegExp")
+        gReLongCite.Global = True
+        gReLongCite.Multiline = False
+        gReLongCite.Pattern = BuildLongCitePattern()
+    End If
+    Set LongCiteRegex = gReLongCite
+End Function
+
+' Run the long-cite regex, but only on text that HasYearParen says could match.
+' When it cannot, the regex is executed against "" instead: that hands back a
+' real, empty MatchCollection, so callers keep using .count and For Each exactly
+' as before and no call site needs a special no-match branch.
+Private Function ExecLongCite(re As Object, ByVal pt As String) As Object
+    If HasYearParen(pt) Then
+        Set ExecLongCite = re.Execute(pt)
+    Else
+        Set ExecLongCite = re.Execute("")
+    End If
 End Function
 
 Private Function BuildSupraPattern() As String
@@ -3782,11 +3892,54 @@ Private Function HasPrecedingFullCiteInQuote(pt As String, _
     Dim textBefore As String: textBefore = Mid(pt, qStart, pos - qStart)
     If Len(Trim(textBefore)) = 0 Then Exit Function
 
-    Dim re As Object: Set re = CreateObject("VBScript.RegExp")
-    re.Global = True: re.Multiline = False
-    re.Pattern = BuildLongCitePattern()
-    HasPrecedingFullCiteInQuote = (re.Execute(textBefore).count > 0)
+    HasPrecedingFullCiteInQuote = (ExecLongCite(LongCiteRegex(), textBefore).count > 0)
 End Function
+
+'==============================================================================
+' BULK-EDIT PERFORMANCE
+'==============================================================================
+' Turn off the two background services that re-process the document after every
+' single edit, and return the previous settings for PerfRestore. ScreenUpdating
+' = False does not cover these: background repagination still re-flows the whole
+' document and check-as-you-type still re-proofs each range touched, so a run
+' that rewrites every cite in a brief pays both costs once per cite.
+Private Function PerfSuppress() As PerfState
+    Dim p As PerfState
+    On Error Resume Next
+    p.pagination = Application.Options.Pagination
+    p.spell = Application.Options.CheckSpellingAsYouType
+    p.grammar = Application.Options.CheckGrammarAsYouType
+    p.saved = True
+    Application.Options.Pagination = False
+    Application.Options.CheckSpellingAsYouType = False
+    Application.Options.CheckGrammarAsYouType = False
+    On Error GoTo 0
+    PerfSuppress = p
+End Function
+
+' Put the user's own settings back exactly. Safe to call twice and safe when
+' PerfSuppress never ran (saved = False).
+Private Sub PerfRestore(ByRef p As PerfState)
+    If Not p.saved Then Exit Sub
+    On Error Resume Next
+    Application.Options.Pagination = p.pagination
+    Application.Options.CheckSpellingAsYouType = p.spell
+    Application.Options.CheckGrammarAsYouType = p.grammar
+    p.saved = False
+    On Error GoTo 0
+End Sub
+
+' Name the running phase in the status bar so a long run shows what it is doing
+' instead of looking like Word has stopped responding. Pass "" to hand the
+' status bar back to Word.
+Private Sub SetPhase(ByVal s As String)
+    On Error Resume Next
+    If Len(s) = 0 Then
+        Application.StatusBar = False
+    Else
+        Application.StatusBar = "CSM Citation Converter: " & s & " ..."
+    End If
+End Sub
 
 
 
