@@ -1330,6 +1330,17 @@ End Function
 ' = False does not cover these: background repagination still re-flows the whole
 ' document and check-as-you-type still re-proofs each range touched, so a run of
 ' hundreds of replacements pays both costs hundreds of times over.
+' Yield to Windows so a long sweep doesn't get marked "Not Responding" -- EXCEPT
+' while the close hook is on the stack. There, Word has already committed to
+' closing the document, and pumping the queue mid-run lets a queued close (an
+' impatient second click on the X) re-enter a document that is half torn down.
+' The sweeps that call this are the same ones the close hook drives, so the
+' choice has to be made here rather than at each call site.
+Private Sub PumpQueue()
+    If modMain.gInCloseReview Then Exit Sub
+    DoEvents
+End Sub
+
 Private Function PerfSuppress() As PerfState
     Dim p As PerfState
     On Error Resume Next
@@ -1653,7 +1664,7 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
                 On Error Resume Next
                 Application.StatusBar = progressLabel & ": " & i & " of " & nMaps & " ..."
                 On Error GoTo 0
-                DoEvents
+                PumpQueue
             End If
         Next i
 
@@ -2049,7 +2060,7 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         ' whole loop without a DoEvents, and Windows marks Word "Not Responding"
         ' after a few silent seconds even though work is progressing.
         swept = swept + 1
-        If swept Mod 20 = 0 Then DoEvents
+        If swept Mod 20 = 0 Then PumpQueue
         With scan.Find
             .ClearFormatting
             .Replacement.ClearFormatting
@@ -2328,12 +2339,12 @@ End Function
 ' clears those by eye. The email domains are lowercase with dots, so they are
 ' matched literally and case-insensitively instead.
 '
-' bodyOnly: the close-review caller (modMain.RunAllDocumentChecks) passes True so
-' the pink it adds stays in the main body -- the only story its highlight
-' clearers (ClearCheckHighlights / ClearAllHighlightsExceptYellow) sweep, so a
-' flag can never be stranded in a header or footnote after the user chooses
-' "close and remove highlights." The manual de-anonymize caller leaves it False
-' for full coverage: it manages its own pink and never runs those clearers.
+' bodyOnly: kept for callers that want the body alone. The close review used to
+' pass True, because its highlight clearers (ClearCheckHighlights /
+' ClearAllHighlightsExceptYellow) swept only the body and a flag left in a header
+' could never be removed. Those clearers now sweep every reviewed story, so the
+' close review leaves this False and gets the full coverage the manual
+' de-anonymize caller has always had.
 Public Function HighlightResidualPseudonyms(ByVal oDoc As Document, _
                                             Optional ByVal bodyOnly As Boolean = False) As Long
     Dim pool As Variant: pool = PseudonymPool()
@@ -2410,7 +2421,7 @@ Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant
         If TermMaybePresent(hayLower, term) Then
             total = total + HighlightWordInRange(rng, term)
         End If
-        If k Mod 50 = 0 Then DoEvents
+        If k Mod 50 = 0 Then PumpQueue
     Next k
 
     For k = LBound(doms) To UBound(doms)
@@ -2445,7 +2456,7 @@ Private Function HighlightLiteralCI(ByVal rng As Range, ByVal term As String) As
             r.HighlightColorIndex = wdPink
             n = n + 1
             If n >= MAX_HITS_PER_TERM Then Exit Do
-            If n Mod 50 = 0 Then DoEvents   ' keep Word's queue serviced mid-term
+            If n Mod 50 = 0 Then PumpQueue  ' keep Word's queue serviced mid-term
         Loop
     End With
     HighlightLiteralCI = n
@@ -2483,7 +2494,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
             r.HighlightColorIndex = wdPink
             n = n + 1
             If n >= MAX_HITS_PER_TERM Then Exit Do
-            If n Mod 50 = 0 Then DoEvents   ' keep Word's queue serviced mid-term
+            If n Mod 50 = 0 Then PumpQueue  ' keep Word's queue serviced mid-term
         Loop
     End With
     HighlightExact = n
