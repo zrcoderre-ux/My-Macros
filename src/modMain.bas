@@ -196,9 +196,9 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' repagination, check-as-you-type and AutoSave each re-process the document
     ' after every edit -- and on a synced OneDrive file AutoSave also pushes it
     ' back to the server, from inside the event that is closing it. Borrow all
-    ' four settings for the run and hand them back on every path, error included:
-    ' this is the same suppression the de-anonymize close hook already does for
-    ' the same reason.
+    ' five settings for the run -- those three plus spelling and screen redraw --
+    ' and hand them back on every path, error included: this is the same
+    ' suppression the de-anonymize close hook already does for the same reason.
     Dim st As ReviewState
     st = SuppressForReview(Doc)
 
@@ -298,12 +298,12 @@ End Sub
 
 ' ============================================================
 ' REVIEW STATE
-' Borrow the four application settings that turn a close-time
+' Borrow the five application settings that turn a close-time
 ' review into a document-wide reprocessing storm, and hand them
 ' back exactly. Pagination, spell and grammar re-run after every
 ' edit and are not covered by ScreenUpdating; AutoSave on a
 ' synced OneDrive file also uploads, from inside the event that
-' is closing the document.
+' is closing the document; ScreenUpdating itself is the fifth.
 ' ============================================================
 Private Function SuppressForReview(ByVal Doc As Document) As ReviewState
     Dim s As ReviewState
