@@ -8,8 +8,28 @@ Option Private Module
 Public gAppEvents       As clsAppEvents
 Public gSkipCloseChecks As Boolean          ' Set True by mail merge to suppress checks
 
+' True for as long as App_DocumentBeforeClose is on the stack. Word has already
+' committed to closing the document by then, so anything that yields to the
+' message pump mid-run (DoEvents) can let a queued close -- an impatient second
+' click on the X -- re-enter a document that is half torn down. The long sweeps
+' the close hook calls read this and skip their yields; run by hand from Alt+F8
+' they still yield as before, which is where the yields earn their keep.
+Public gInCloseReview   As Boolean
+
 Private Const HL_GREEN As Long = 1          ' maps to wdBrightGreen
 Private Const HL_CYAN  As Long = 2          ' maps to wdTurquoise
+
+' The application settings the review borrows for the length of a run, so they
+' can be put back exactly -- including on the error path.
+Private Type ReviewState
+    saved      As Boolean
+    screen     As Boolean
+    pagination As Boolean
+    spell      As Boolean
+    grammar    As Boolean
+    autoSave   As Boolean
+    autoSaved  As Boolean       ' False when AutoSaveOn couldn't be read
+End Type
 
 ' ============================================================
 ' INITIALIZE GLOBAL EVENT HANDLER
@@ -172,6 +192,19 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     issues = False
     userHighlights = False
 
+    ' Everything below runs from inside DocumentBeforeClose. Background
+    ' repagination, check-as-you-type and AutoSave each re-process the document
+    ' after every edit -- and on a synced OneDrive file AutoSave also pushes it
+    ' back to the server, from inside the event that is closing it. Borrow all
+    ' four settings for the run and hand them back on every path, error included:
+    ' this is the same suppression the de-anonymize close hook already does for
+    ' the same reason.
+    Dim st As ReviewState
+    st = SuppressForReview(Doc)
+
+    Dim eN As Long, eD As String
+    On Error GoTo Fail
+
     ClearCheckHighlights Doc
 
     ' Smart double quotes
@@ -182,11 +215,13 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' header quote used to be counted but then flagged on the wrong character in
     ' the body, or on nothing at all.
     If (CountChar(Doc, Chr(34)) Mod 2) <> 0 Then
-        Dim qStory As Range
-        Dim rng  As Range
-        Dim last As Range
+        Dim qStory  As Range
+        Dim rng     As Range
+        Dim last    As Range
+        Dim qLastEnd As Long
         For Each qStory In ReviewStories(Doc)
             Set rng = qStory.Duplicate
+            qLastEnd = -1
             With rng.Find
                 .ClearFormatting
                 .MatchCase = True
@@ -195,7 +230,13 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
                 .Wrap = wdFindStop
                 .text = Chr(34)
                 Do While .Execute
-                    Set last = rng.Duplicate
+                    ' Only a real straight quote counts: Word hands curly ones
+                    ' back for this search too (see CountChar).
+                    If rng.text = Chr(34) Then Set last = rng.Duplicate
+                    ' Nothing in this loop changes the document, so a Find that
+                    ' ever stopped advancing would spin here forever.
+                    If rng.End <= qLastEnd Then Exit Do
+                    qLastEnd = rng.End
                 Loop
             End With
         Next qStory
@@ -226,12 +267,9 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' left there is the most damaging one to miss. (This used to pass
     ' bodyOnly:=True because the clearers only swept the body; they now sweep
     ' every reviewed story, so a header flag can no longer be stranded.) The scan
-    ' is a few hundred native Find sweeps; suspend screen redraw so they run fast
-    ' and flicker-free.
-    Dim prevSU As Boolean: prevSU = Application.ScreenUpdating
-    Application.ScreenUpdating = False
+    ' is a few hundred native Find sweeps; screen redraw is already suspended for
+    ' the whole run by SuppressForReview, so they run fast and flicker-free.
     If DeAnonymize.HighlightResidualPseudonyms(Doc) > 0 Then issues = True
-    Application.ScreenUpdating = prevSU
 
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc
@@ -239,6 +277,73 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' User highlight check (runs after macro colors are in place)
     If DocumentHasUserHighlights(Doc) Then userHighlights = True
 
+    GoTo Cleanup
+
+Fail:
+    eN = Err.Number
+    eD = Err.Description
+
+Cleanup:
+    RestoreAfterReview Doc, st
+    If eN <> 0 Then
+        ' Never let this escape into App_DocumentBeforeClose. An unhandled error
+        ' inside a Word application event fires with the document already half
+        ' closed, and Word has no safe way to unwind it.
+        MsgBox "The document review hit an error and stopped:" & vbCrLf & vbCrLf & _
+               "Error " & eN & ": " & eD & vbCrLf & vbCrLf & _
+               "Anything found before that point is still highlighted.", _
+               vbExclamation, "Document Check"
+    End If
+End Sub
+
+' ============================================================
+' REVIEW STATE
+' Borrow the four application settings that turn a close-time
+' review into a document-wide reprocessing storm, and hand them
+' back exactly. Pagination, spell and grammar re-run after every
+' edit and are not covered by ScreenUpdating; AutoSave on a
+' synced OneDrive file also uploads, from inside the event that
+' is closing the document.
+' ============================================================
+Private Function SuppressForReview(ByVal Doc As Document) As ReviewState
+    Dim s As ReviewState
+    On Error Resume Next
+
+    s.screen = Application.ScreenUpdating
+    s.pagination = Application.Options.Pagination
+    s.spell = Application.Options.CheckSpellingAsYouType
+    s.grammar = Application.Options.CheckGrammarAsYouType
+    s.saved = True
+
+    Application.ScreenUpdating = False
+    Application.Options.Pagination = False
+    Application.Options.CheckSpellingAsYouType = False
+    Application.Options.CheckGrammarAsYouType = False
+
+    ' AutoSaveOn is missing on older builds and raises on some document types,
+    ' so track separately whether we actually took it.
+    Err.Clear
+    s.autoSave = Doc.AutoSaveOn
+    If Err.Number = 0 Then
+        Doc.AutoSaveOn = False
+        s.autoSaved = (Err.Number = 0)
+    End If
+
+    On Error GoTo 0
+    SuppressForReview = s
+End Function
+
+' Safe to call twice, and safe when SuppressForReview never ran (saved = False).
+Private Sub RestoreAfterReview(ByVal Doc As Document, ByRef s As ReviewState)
+    If Not s.saved Then Exit Sub
+    On Error Resume Next
+    If s.autoSaved Then Doc.AutoSaveOn = s.autoSave
+    Application.Options.Pagination = s.pagination
+    Application.Options.CheckSpellingAsYouType = s.spell
+    Application.Options.CheckGrammarAsYouType = s.grammar
+    Application.ScreenUpdating = s.screen
+    s.saved = False
+    On Error GoTo 0
 End Sub
 
 ' ============================================================
@@ -792,11 +897,23 @@ End Sub
 ' own colors (bright green, cyan, pink). Yellow counts as a
 ' user highlight because the user uses it for their own
 ' reminders.
+'
+' This is the third highlight-seeking sweep in this module, and the only one
+' that never modifies what it finds -- so it is the one that most needs the
+' manual advance the other two carry. Its siblings remove the highlight, which
+' is what moved them along; here a run painted one of the macro's own colors
+' matches the criteria on every pass, and without the advance below the loop
+' re-finds the same run until Word stops responding. That is exactly the state
+' this function is called in: it runs LAST in RunAllDocumentChecks, after the
+' checks have painted green, cyan and pink over the document.
 ' ============================================================
 Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
-    Dim story As Range, rng As Range
+    Dim story   As Range
+    Dim rng     As Range
+    Dim lastEnd As Long
     For Each story In ReviewStories(Doc)
         Set rng = story.Duplicate
+        lastEnd = -1
         With rng.Find
             .ClearFormatting
             .text = ""
@@ -809,6 +926,13 @@ Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
                     DocumentHasUserHighlights = True
                     Exit Function
                 End If
+                ' Step past this run by hand, and guard against a zero-progress
+                ' loop -- the same pair ClearCheckHighlights uses.
+                If rng.End <= lastEnd Then Exit Do
+                lastEnd = rng.End
+                rng.Collapse Direction:=wdCollapseEnd
+                rng.End = story.End
+                If rng.start >= rng.End Then Exit Do
             Loop
         End With
     Next story
@@ -849,10 +973,35 @@ End Sub
 ' closing quotes. (Elisions like 'tis after a space still get
 ' 8216; that rarity is accepted.) Always runs on every close
 ' attempt regardless of whether issues were found.
+'
+' TWO GATES, and they are the whole point of this pass being safe to run from
+' inside DocumentBeforeClose.
+'
+' Word's Find does not honor the distinction this macro is built on. With
+' AutoCorrect's "straight quotes with smart quotes" on -- the default -- a search
+' for Chr(39) matches the CURLY forms as well. So on an ordinary ruling, where
+' every apostrophe is already curly, this loop matched all of them and assigned
+' Range.Text to each one: dozens of delete-and-reinsert edits that changed
+' nothing, made from a live Find loop, while Word was already tearing the
+' document down and AutoSave was pushing each one back to OneDrive. That is the
+' only write the whole close review performs, and it scaled with the number of
+' apostrophes in the document rather than with the number of straight ones --
+' which on every document that reaches this review is zero.
+'
+' So: skip a story outright unless its text really holds a Chr(39), and re-read
+' each hit before writing it, passing over the curly quotes Word hands back. A
+' document with no straight quotes now leaves the review a pure read, and a
+' document that has them is edited exactly where it needs to be.
 ' ============================================================
 Private Sub ConvertStraightApostrophes(Doc As Document)
     Dim story As Range, rng As Range
+    Dim bOpen As Boolean
+    Dim prev  As String
+
     For Each story In ReviewStories(Doc)
+        ' Gate 1: no straight quote in this story, nothing to convert.
+        If Not StoryHasChar(story, Chr(39)) Then GoTo NextStory
+
         Set rng = story.Duplicate
         With rng.Find
             .ClearFormatting
@@ -861,41 +1010,83 @@ Private Sub ConvertStraightApostrophes(Doc As Document)
             .Wrap = wdFindStop
             .Forward = True
             Do While .Execute
-                ' Probe the preceding character within the match's OWN story;
-                ' Doc.Range(...) would read body coordinates for a header hit.
-                Dim bOpen As Boolean: bOpen = False
-                Dim prev As String: prev = CharBeforeRange(rng)
-                If Len(prev) = 0 Then
-                    bOpen = True                 ' start of the story
-                Else
-                    Select Case prev
-                        Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
-                            bOpen = True
-                    End Select
+                ' Gate 2: this hit may be a curly quote Word matched for us.
+                If rng.text = Chr(39) Then
+                    ' Probe the preceding character within the match's OWN story;
+                    ' Doc.Range(...) would read body coordinates for a header hit.
+                    bOpen = False
+                    prev = CharBeforeRange(rng)
+                    If Len(prev) = 0 Then
+                        bOpen = True                 ' start of the story
+                    Else
+                        Select Case prev
+                            Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
+                                bOpen = True
+                        End Select
+                    End If
+                    If bOpen Then
+                        rng.text = ChrW(8216)
+                    Else
+                        rng.text = ChrW(8217)
+                    End If
                 End If
-                If bOpen Then
-                    rng.text = ChrW(8216)
-                Else
-                    rng.text = ChrW(8217)
-                End If
+                ' Collapse whether or not the hit was ours, so a curly quote is
+                ' stepped over rather than found again.
                 rng.Collapse Direction:=wdCollapseEnd
             Loop
         End With
+
+NextStory:
     Next story
 End Sub
+
+' True when a story's text really contains ch. Word's Find cannot answer this for
+' a quote character -- it treats the straight and curly forms as the same thing
+' (see ConvertStraightApostrophes) -- so read the story once and ask the string.
+'
+' Fails OPEN, the same way the pseudonym scan's filter does: a story whose text
+' can't be read, or that reads back empty when it plainly isn't, reports True and
+' pays for a Find sweep. This gate is only ever an optimization, so a false True
+' costs a scan that writes nothing, while a false False would silently stop
+' converting a document's straight quotes.
+Private Function StoryHasChar(rng As Range, ch As String) As Boolean
+    Dim t      As String
+    Dim readOK As Boolean
+
+    On Error Resume Next
+    t = rng.text
+    readOK = (Err.Number = 0)
+    On Error GoTo 0
+
+    If Not readOK Then
+        StoryHasChar = True
+    ElseIf Len(t) = 0 And rng.End > rng.start Then
+        StoryHasChar = True
+    Else
+        StoryHasChar = (InStr(1, t, ch, vbBinaryCompare) > 0)
+    End If
+End Function
 
 ' ============================================================
 ' CHAR COUNT HELPER
 ' Counts a single character across every reviewed story.
 ' Used only for the straight double quote odd/even test.
+'
+' Each hit is re-read before it is counted. A search for Chr(34) matches the
+' curly quotes too (see ConvertStraightApostrophes), so this used to count every
+' smart quote in the document as a straight one -- and any ruling with an odd
+' number of them was reported as having an unmatched straight double quote,
+' highlighted on a character the user never typed straight.
 ' ============================================================
 Private Function CountChar(Doc As Document, ch As String) As Long
-    Dim story As Range
-    Dim rng   As Range
-    Dim n     As Long
+    Dim story   As Range
+    Dim rng     As Range
+    Dim n       As Long
+    Dim lastEnd As Long
     n = 0
     For Each story In ReviewStories(Doc)
         Set rng = story.Duplicate
+        lastEnd = -1
         With rng.Find
             .ClearFormatting
             .MatchCase = True
@@ -904,7 +1095,11 @@ Private Function CountChar(Doc As Document, ch As String) As Long
             .Wrap = wdFindStop
             .text = ch
             Do While .Execute
-                n = n + 1
+                If rng.text = ch Then n = n + 1
+                ' Nothing here changes the document, so a Find that ever stopped
+                ' advancing would spin forever.
+                If rng.End <= lastEnd Then Exit Do
+                lastEnd = rng.End
             Loop
         End With
     Next story
