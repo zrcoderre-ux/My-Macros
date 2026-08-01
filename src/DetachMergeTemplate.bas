@@ -14,8 +14,10 @@ Attribute VB_Name = "DetachMergeTemplate"
 ' swapping to Normal cannot pull Normal's styles into the
 ' document the next time it opens.
 '
-' AutoOpen handles this automatically for documents it sees;
-' this is the manual override for one document on demand.
+' Run on demand from Alt+F8, one document at a time. An
+' AutoOpen that did this automatically was removed while
+' tracking down macros not loading at startup; this module is
+' the only path for now.
 ' ============================================================
 Option Explicit
 
