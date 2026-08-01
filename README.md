@@ -61,6 +61,11 @@ first to pull that change back into `src/`, then commit.
   rebuild is skipped with a warning; close it and re-run.
 - If a rebuild ever fails, nothing is lost: fix the issue, close Word, and run
   `build/Import-Macros.ps1` by hand.
+- The build renames this template's VBA project to `MyMacros`. Word would
+  otherwise name it `TemplateProject`, which collides with any other loaded
+  template using the default name, and an attached template outranks this
+  global add-in when Word resolves a macro name. See
+  `docs/vba-project-name-collision.md`.
 
 ## Troubleshooting: a change merged but Word still runs the old macro
 

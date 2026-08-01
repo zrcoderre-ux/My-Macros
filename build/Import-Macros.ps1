@@ -136,6 +136,21 @@ function Invoke-TemplateRebuild {
         }
         $comps = $doc.VBProject.VBComponents
 
+        # 0) Give this project a unique VBA project name. Word names a new
+        #    template's project "TemplateProject" by default, and so is the Mail
+        #    Merge Order Template's project. Two loaded projects sharing a name
+        #    makes macro and key-binding resolution ambiguous, and a document's
+        #    attached template outranks this global add-in, so the wrong project
+        #    wins. Non-fatal: a rename failure must not abort the rebuild.
+        try {
+            if ($doc.VBProject.Name -ne "MyMacros") {
+                $doc.VBProject.Name = "MyMacros"
+                Write-Host "  [macros] VBA project renamed to MyMacros." -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  [macros] project rename skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+
         # 1) Remove existing standard + class modules (keep ThisDocument + any form).
         $toRemove = @()
         foreach ($c in $comps) {

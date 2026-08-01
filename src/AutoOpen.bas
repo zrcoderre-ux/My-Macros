@@ -7,7 +7,18 @@ Sub AutoOpen()
     On Error Resume Next
     Set Doc = ActiveDocument
     docPath = LCase(Doc.FullName)
-    
+
+    ' Merged tentative drafts leave the mail merge with AttachedTemplate still
+    ' pointing at the Mail Merge Order Template, a macro-bearing .dotm. Word
+    ' loads that template's VBA project alongside the document and gives it
+    ' precedence over this add-in, so its macros and key bindings shadow ours.
+    ' Detach on open. Scoped by name so no other template is ever touched.
+    If InStr(LCase(Doc.AttachedTemplate.Name), "mail merge order template") = 1 Then
+        Doc.UpdateStylesOnOpen = False
+        Doc.AttachedTemplate = ""
+        If Doc.ReadOnly = False Then Doc.Save
+    End If
+
     ' Add or remove folder paths as needed
     Dim folders(1) As String
     folders(0) = LCase("C:\Users\ZCoderre\OneDrive - Los Angeles Superior Court\")
