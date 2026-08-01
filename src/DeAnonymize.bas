@@ -2172,26 +2172,67 @@ End Function
 '                                        Smith"); an already-mixed stored value
 '                                        like "McDonald" is left untouched.
 '   no cased letters (e.g. a number)  -> stored value untouched
+' Casing is decided WORD BY WORD when the two sides have the same word count,
+' and only phrase-wide when they do not.
+'
+' The whole-phrase rule below has one branch that cannot be right for a
+' multi-word row: "title / mixed case". A phrase like "that Yardley" is neither
+' all-caps nor all-lowercase, so it lands there, and because the stored
+' replacement "That Lin" is itself mixed the rule says "already mixed -- leave
+' as authored" and writes the KEY's capitalization into the document. A key
+' carrying "That Lin -> That Yardley" therefore capitalized "that" mid-sentence
+' everywhere the phrase appeared:
+'
+'     "...on the ground that Lin was a sham defendant"     (as filed)
+'     "...on the ground That Lin was a sham defendant"     (as restored)
+'
+' Word by word the same pair is decided correctly: "that" is all-lowercase, so
+' its counterpart lowercases; "Yardley" is title case, so "Lin" is left as
+' authored. The document's own capitalization survives the round trip, which is
+' the property that matters -- the key says what a name IS, never how a
+' sentence capitalizes it.
+'
+' Falls back to the phrase-wide rule when the word counts differ (a one-word
+' fake for a two-word real, an address, an e-mail), where there is no
+' correspondence to walk.
 Private Function MatchCasing(ByVal matched As String, _
+                              ByVal replaceText As String) As String
+    Dim mw() As String, rw() As String
+    mw = Split(matched, " ")
+    rw = Split(replaceText, " ")
+    If UBound(mw) > 0 And UBound(mw) = UBound(rw) Then
+        Dim i As Long, out As String
+        For i = 0 To UBound(mw)
+            If i > 0 Then out = out & " "
+            out = out & MatchCasingWord(mw(i), rw(i))
+        Next i
+        MatchCasing = out
+        Exit Function
+    End If
+    MatchCasing = MatchCasingWord(matched, replaceText)
+End Function
+
+' The original phrase-wide rule, now applied per word by MatchCasing above.
+Private Function MatchCasingWord(ByVal matched As String, _
                               ByVal replaceText As String) As String
     Dim u As String: u = UCase$(matched)
     Dim l As String: l = LCase$(matched)
     If u = l Then                       ' no cased letters (e.g. a case number)
-        MatchCasing = replaceText
+        MatchCasingWord = replaceText
     ElseIf matched = u Then             ' ALL CAPS
-        MatchCasing = UCase$(replaceText)
+        MatchCasingWord = UCase$(replaceText)
     ElseIf matched = l Then             ' all lowercase
-        MatchCasing = LCase$(replaceText)
+        MatchCasingWord = LCase$(replaceText)
     Else                                ' title / mixed case
         Dim ru As String: ru = UCase$(replaceText)
         Dim rl As String: rl = LCase$(replaceText)
         If replaceText = ru Or replaceText = rl Then
             ' Stored value is mono-case (ALL CAPS or all lowercase): rebuild
             ' title case so an all-caps key row still reads as a proper name.
-            MatchCasing = ProperCase(replaceText)
+            MatchCasingWord = ProperCase(replaceText)
         Else
             ' Already mixed (e.g. "McDonald", "John Smith") -- leave as authored.
-            MatchCasing = replaceText
+            MatchCasingWord = replaceText
         End If
     End If
 End Function
