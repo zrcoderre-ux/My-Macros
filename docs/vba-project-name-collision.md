@@ -78,19 +78,16 @@ Three pieces, all in this repo:
    `MacroKeyBindings` reapplies every key binding at each Word launch, so the
    rename orphans nothing.
 
-2. **`AutoOpen` detaches on open.** `src/AutoOpen.bas` checks whether the
-   document being opened is attached to a template whose name begins with
-   `mail merge order template`; if so it clears `UpdateStylesOnOpen`, reattaches
-   the document to `Normal`, and saves. The match is anchored to the start of the
-   name so it fires on that one template and nothing else, and it runs before the
-   folder loop because merged drafts land in `Downloads`, which the folder list
-   does not cover.
-
-3. **`DetachFromMergeTemplate` is the manual repair.** `Alt+F8` >
-   `DetachFromMergeTemplate` does the same thing on demand for the active
-   document, whatever template it is attached to. Use it for a document that
-   `AutoOpen` did not catch. It clears `UpdateStylesOnOpen` first, so swapping to
+2. **`DetachFromMergeTemplate` is the repair.** `Alt+F8` >
+   `DetachFromMergeTemplate` detaches the active document from whatever template
+   it is attached to. It clears `UpdateStylesOnOpen` first, so swapping to
    `Normal` cannot pull Normal's styles into the document on its next open.
+
+   An `AutoOpen` in `src/AutoOpen.bas` used to do this automatically for every
+   document opened from that template. It was **removed** while tracking down a
+   separate problem — no macros loading at Word startup, for any file — so the
+   detach is a manual step for now. If `AutoOpen` turns out not to be the cause,
+   restoring it is a `git revert` of the commit that deleted it.
 
 ## Verifying After a Rebuild
 
