@@ -36,8 +36,14 @@ Attribute VB_Name = "DeAnonymize"
 '                          then export the anonymized text as a NEW Markdown
 '                          (.md) file so it is safe to share. Hyperlinks are
 '                          stripped (keeping their display text) before the
-'                          replacement pass, and the export's default filename
-'                          is the faked version of the document's own title.
+'                          replacement pass, and the anonymized export is named
+'                          with the faked version of the document's own title.
+'                          It writes TWO files: alongside the anonymized one it
+'                          exports the SAME Markdown with the real names still
+'                          in it, under the document's own (real) title, so the
+'                          two are a matched pair that differ only in the names.
+'                          The real-names copy is for local use -- do NOT share
+'                          it; the faked one is the shareable copy.
 '                          Nothing is ever written back to the Word document:
 '                          the real->fake scrub runs in memory only (so italic
 '                          cited authorities can be detected), the body is read
@@ -301,7 +307,8 @@ ErrH:
 End Sub
 
 '==============================================================================
-' RE-ANONYMIZE  (reverse: real -> fake, exported as a clean Markdown file)
+' RE-ANONYMIZE  (reverse: real -> fake, exported as a clean Markdown file,
+'                plus a matching real-names Markdown file)
 '==============================================================================
 Public Sub ReAnonymizeTentative()
     On Error GoTo ErrH
@@ -331,16 +338,29 @@ Public Sub ReAnonymizeTentative()
 
     Dim i As Long
 
-    ' Run-and-done: no Save-As dialog and no confirmation. The .md is written
-    ' automatically next to the document (its local synced folder) under the
-    ' FAKED version of the document's own title, so the export is recognizable
-    ' but carries pseudonyms, not real party names. DocFolderLocal maps a
+    ' Run-and-done: no Save-As dialog and no confirmation. Both .md files are
+    ' written automatically next to the document (its local synced folder).
+    ' The anonymized one is named with the FAKED version of the document's own
+    ' title, so the export is recognizable but carries pseudonyms, not real
+    ' party names; the real-names one keeps the document's own title. Each
+    ' file's name therefore says which version it holds. DocFolderLocal maps a
     ' SharePoint/OneDrive URL to the writable local sync folder; if the folder
     ' can't be resolved (never-saved doc) it falls back to Documents.
-    Dim savePath As String
+    Dim savePath As String, realPath As String
     Dim outFolder As String: outFolder = DocFolderLocal(oDoc)
     If Len(outFolder) = 0 Then outFolder = Environ$("USERPROFILE") & "\Documents"
     savePath = outFolder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
+    realPath = outFolder & "\" & RealDocTitle(oDoc) & ".md"
+
+    ' A title that holds no real value from the key fakes to itself, and then
+    ' both exports claim the same path: one would silently overwrite the other,
+    ' leaving a file whose name says nothing about which version survived. Same
+    ' hazard if the export would land on the open document itself. Either way,
+    ' push the real-names copy aside rather than clobber anything.
+    If StrComp(savePath, realPath, vbTextCompare) = 0 Or _
+       StrComp(realPath, SafeFullName(oDoc), vbTextCompare) = 0 Then
+        realPath = outFolder & "\" & RealDocTitle(oDoc) & " (real names).md"
+    End If
 
     ' From this point on, no automatic de-anonymize for the rest of the Word
     ' session (set even if the run errors out partway -- fail safe). This also
@@ -382,6 +402,14 @@ Public Sub ReAnonymizeTentative()
     ' original file (reloaded below) keeps its links.
     StripHyperlinksEverywhere oDoc
 
+    ' Export the real-names copy FIRST, before a single value is swapped. Same
+    ' Markdown reader, same hyperlink-stripped body, so the pair differs only in
+    ' the names themselves -- the anonymized file can be read against this one
+    ' line for line. It costs a second walk of the document, which is cheap next
+    ' to the replacement pass.
+    SetPhase "Writing the real-names export", "Re-Anonymize"
+    WriteUtf8NoBom realPath, DocToMarkdown(oDoc)
+
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
     ' also names a published case isn't rewritten in the shared copy. No custom
@@ -395,10 +423,13 @@ Public Sub ReAnonymizeTentative()
     ApplyCourtIdentity oDoc, False
 
     ' Read the now-anonymized body out as Markdown and write it to disk (UTF-8,
-    ' no BOM). This is the only file the macro writes.
+    ' no BOM). This and the real-names export above are the only files the macro
+    ' writes; the .docx is still never touched.
+    SetPhase "Writing the anonymized export", "Re-Anonymize"
     Dim md As String
     md = DocToMarkdown(oDoc)
     WriteUtf8NoBom savePath, md
+    SetPhase ""                          ' don't strand a progress message
 
     ' Discard the in-memory fake edits: reload the window from the untouched
     ' original so the user is back on the real-names document and a stray Ctrl+S
@@ -470,7 +501,10 @@ Public Sub ReAnonymizeTentative()
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
            vbCrLf & vbCrLf & _
-           "Saved an anonymized Markdown file to:" & vbCrLf & savePath & vbCrLf & vbCrLf & _
+           "Saved an anonymized Markdown file (safe to share) to:" & vbCrLf & _
+           savePath & vbCrLf & vbCrLf & _
+           "and the same text with the REAL names (keep this one local) to:" & _
+           vbCrLf & realPath & vbCrLf & vbCrLf & _
            tail, vbInformation, "Re-Anonymize"
     Exit Sub
 
@@ -488,10 +522,13 @@ ErrH:
     Application.StatusBar = False        ' don't strand a progress message
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
            "Error " & reN & ": " & reD & vbCrLf & vbCrLf & _
-           "If the error happened before the .md file was written, this window " & _
+           "If the error happened before the .md files were written, this window " & _
            "may hold partial re-anonymize edits that were NOT saved anywhere -- " & _
            "close it WITHOUT saving to get back to the untouched original. " & _
-           "(AutoSave was left off for the same reason.)", _
+           "(AutoSave was left off for the same reason.) The real-names export " & _
+           "is written before any name is swapped, so it may exist even though " & _
+           "the anonymized one does not -- check for both before sharing " & _
+           "anything.", _
            vbExclamation, "Re-Anonymize"
 End Sub
 
@@ -503,8 +540,26 @@ End Sub
 Private Function FakedDocTitle(ByVal oDoc As Document, _
                                 ByRef maps() As Mapping, _
                                 ByVal nMaps As Long) As String
+    Dim t As String: t = DocBaseTitle(oDoc)
+
+    Dim i As Long
+    For i = 1 To nMaps
+        t = ReplaceCIString(t, maps(i).real, maps(i).fake)
+    Next i
+
+    FakedDocTitle = SanitizeFileTitle(t, "Anonymized Draft")
+End Function
+
+' The document's own title, real names and all: the name for the export that
+' keeps them. No key values are swapped -- that is the whole point of the pair,
+' the faked title names the shareable copy and this one names the local copy.
+Private Function RealDocTitle(ByVal oDoc As Document) As String
+    RealDocTitle = SanitizeFileTitle(DocBaseTitle(oDoc), "Original Draft")
+End Function
+
+' The document's filename without its extension; "" if the name can't be read.
+Private Function DocBaseTitle(ByVal oDoc As Document) As String
     Dim t As String
-    t = "Anonymized Draft"            ' fallback for an unnamed document
     On Error Resume Next
     t = oDoc.name
     On Error GoTo 0
@@ -512,19 +567,32 @@ Private Function FakedDocTitle(ByVal oDoc As Document, _
     Dim dotPos As Long: dotPos = InStrRev(t, ".")
     If dotPos > 1 Then t = Left$(t, dotPos - 1)
 
-    Dim i As Long
-    For i = 1 To nMaps
-        t = ReplaceCIString(t, maps(i).real, maps(i).fake)
-    Next i
+    DocBaseTitle = t
+End Function
 
+' Fold the characters Windows forbids in a filename to "-", trimming the result;
+' falls back to the caller's placeholder when nothing usable is left.
+Private Function SanitizeFileTitle(ByVal t As String, _
+                                    ByVal fallback As String) As String
     Dim k As Long, ch As String
     For k = 1 To Len(t)
         ch = Mid$(t, k, 1)
         If InStr(1, "\/:*?""<>|", ch) > 0 Then Mid$(t, k, 1) = "-"
     Next k
 
-    FakedDocTitle = Trim$(t)
-    If Len(FakedDocTitle) = 0 Then FakedDocTitle = "Anonymized Draft"
+    SanitizeFileTitle = Trim$(t)
+    If Len(SanitizeFileTitle) = 0 Then SanitizeFileTitle = fallback
+End Function
+
+' The document's full path, or "" if it can't be read. A never-saved document
+' answers with a bare name ("Document1"), which is fine: the caller only uses
+' this to make sure an export doesn't land on the open file itself.
+Private Function SafeFullName(ByVal oDoc As Document) As String
+    Dim s As String
+    On Error Resume Next
+    s = oDoc.FullName
+    On Error GoTo 0
+    SafeFullName = s
 End Function
 
 ' Case-insensitive replace of every occurrence of findText in s, recasing the
@@ -1406,13 +1474,16 @@ Private Function TimingNote(ByVal sTimes As String, ByVal tRun As Single, _
 End Function
 
 ' Name the running phase in the status bar so a long run shows what it is doing.
-' Pass "" to hand the status bar back to Word.
-Private Sub SetPhase(ByVal s As String)
+' Pass "" to hand the status bar back to Word. macroName says which direction is
+' running: the re-anonymize half calls this too, and labelling its phases
+' "De-Anonymize" would name the opposite macro.
+Private Sub SetPhase(ByVal s As String, _
+                     Optional ByVal macroName As String = "De-Anonymize")
     On Error Resume Next
     If Len(s) = 0 Then
         Application.StatusBar = False
     Else
-        Application.StatusBar = "De-Anonymize: " & s & " ..."
+        Application.StatusBar = macroName & ": " & s & " ..."
     End If
 End Sub
 
