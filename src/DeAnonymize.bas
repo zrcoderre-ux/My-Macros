@@ -44,6 +44,11 @@ Attribute VB_Name = "DeAnonymize"
 '                          two are a matched pair that differ only in the names.
 '                          The real-names copy is for local use -- do NOT share
 '                          it; the faked one is the shareable copy.
+'                          Both carry the document's markup: tracked insertions
+'                          and deletions as {++text++} / {--text--}, and comments
+'                          as [c1], [c2] ... with author and text collected at
+'                          the end. Commenters are NAMED only in the real-names
+'                          file; see the note below.
 '                          Nothing is ever written back to the Word document:
 '                          the real->fake scrub runs in memory only (so italic
 '                          cited authorities can be detected), the body is read
@@ -68,6 +73,15 @@ Attribute VB_Name = "DeAnonymize"
 '     mirrors PDF-Linker's rule -- renaming a cited decision is worse than
 '     leaving a party name in -- and its caption exemption (the own caption/prose
 '     aren't italic, so the current parties are still replaced).
+'   - MARKUP. Replacement covers the comments story too, so a comment that names
+'     a party is scrubbed like the prose. A comment AUTHOR is document metadata,
+'     which no pseudonym key covers and no replacement pass can reach, so the
+'     anonymized export labels commenters "Reviewer 1", "Reviewer 2" (stable
+'     within the file) and only the real-names export prints their names.
+'     Re-anonymize forces the window to show all markup inline for the duration
+'     of the run: with deletions drawn in balloons, Word hides them from Find AND
+'     from Range.Text, so a real name inside a tracked deletion would be neither
+'     replaced nor exported. See ForceInlineMarkup.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
 '   - AUTOMATIC ON CLOSE: RunDeAnonymizeOnClose (called from the close-review in
@@ -148,6 +162,59 @@ End Type
 Private Type StoryRef
     rng As Range
     lower As String
+End Type
+
+' What a tracked change did to a run of text, as the Markdown export reports it.
+' Word's own revision types are richer (formatting, paragraph properties, moves);
+' RevKindOf folds them down to the two that changed words.
+Private Const REV_NONE   As Long = 0
+Private Const REV_INSERT As Long = 1
+Private Const REV_DELETE As Long = 2
+
+' The window's markup display, saved so the run can force it and put it back.
+' Two things depend on it, and both fail SILENTLY when deletions sit in balloons
+' instead of inline: Word's Find (so the real -> fake pass would miss a party
+' name inside a tracked deletion) and Range.Text (so the export would miss it
+' too). See ForceInlineMarkup.
+Private Type MarkupView
+    saved As Boolean
+    showRevisions As Boolean
+    showInsDel As Boolean
+    mode As Long
+    view As Long
+End Type
+
+' One tracked change, held as a LIVE Range rather than a pair of offsets. Both
+' exports mark the same spans, and the real->fake pass runs between them: Word
+' keeps a Range anchored to its text across edits, so a captured span still
+' brackets the same words after every replacement, whereas a stored offset would
+' point somewhere else the moment a fake was a different length than the real
+' name. Capturing also survives Word DROPPING the revision mark itself when the
+' text inside it is rewritten -- the shareable copy then still shows the change.
+Private Type RevSpan
+    rng As Range
+    kind As Long
+End Type
+
+' Everything one Markdown export accumulates as it walks the body: the footnote
+' and comment blocks it is building, the tracked-change index the walk consults
+' per character, and the commenters it has seen. Passed ByRef through the export
+' so the walk's helpers stay one argument wide.
+Private Type ExportState
+    fnCount As Long                 ' footnotes/endnotes consumed so far
+    fnList As String                ' the trailing "[^n]: ..." block
+    cmtCount As Long                ' comments consumed so far
+    cmtList As String               ' the trailing comment block
+    hideAuthors As Boolean          ' shareable copy: "Reviewer 1", not a name
+    authors() As String             ' commenters in first-seen order
+    nAuthors As Long
+    revStart() As Long              ' tracked-change index, sorted by start
+    revEnd() As Long
+    revKind() As Long
+    nRevs As Long
+    revCursor As Long               ' the walk only ever moves this forward
+    markedRevs As Long              ' tracked changes that actually reached the file
+    lastMarked As Long              ' index of the last one marked (counts once)
 End Type
 
 '==============================================================================
@@ -395,6 +462,16 @@ Public Sub ReAnonymizeTentative()
     On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
     Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
 
+    ' Show every tracked change inline before anything reads or replaces text.
+    ' With deletions in balloons, a real name inside one is invisible to Word's
+    ' Find AND to Range.Text -- it would neither be replaced nor exported, which
+    ' is a leak in the first case and a silent omission in the second.
+    Dim mv As MarkupView: mv = ForceInlineMarkup()
+    Dim nComments As Long
+    On Error Resume Next
+    nComments = oDoc.Comments.count
+    On Error GoTo ErrH
+
     ' Strip hyperlinks (keeping display text) before replacing and exporting:
     ' link targets can carry real names/paths the Markdown must not contain,
     ' and a real name inside a link's display text is replaced more reliably
@@ -402,13 +479,22 @@ Public Sub ReAnonymizeTentative()
     ' original file (reloaded below) keeps its links.
     StripHyperlinksEverywhere oDoc
 
+    ' Capture the tracked changes ONCE, here: after the hyperlink strip and before
+    ' the first replacement. Both exports mark this same set, so the anonymized
+    ' copy shows exactly the changes the real-names copy shows -- it does not
+    ' re-read Word's revision marks, which the replacement pass can rewrite or
+    ' drop when it edits the text inside one.
+    Dim spans() As RevSpan
+    Dim nSpans As Long: nSpans = CaptureRevisions(oDoc, spans)
+
     ' Export the real-names copy FIRST, before a single value is swapped. Same
-    ' Markdown reader, same hyperlink-stripped body, so the pair differs only in
-    ' the names themselves -- the anonymized file can be read against this one
-    ' line for line. It costs a second walk of the document, which is cheap next
-    ' to the replacement pass.
+    ' Markdown reader, same hyperlink-stripped body, same tracked changes, so the
+    ' pair differs only in the names themselves -- the anonymized file can be read
+    ' against this one line for line. It costs a second walk of the document,
+    ' which is cheap next to the replacement pass.
     SetPhase "Writing the real-names export", "Re-Anonymize"
-    WriteUtf8NoBom realPath, DocToMarkdown(oDoc)
+    Dim markedReal As Long
+    WriteUtf8NoBom realPath, DocToMarkdown(oDoc, False, spans, nSpans, markedReal)
 
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
@@ -426,10 +512,18 @@ Public Sub ReAnonymizeTentative()
     ' no BOM). This and the real-names export above are the only files the macro
     ' writes; the .docx is still never touched.
     SetPhase "Writing the anonymized export", "Re-Anonymize"
-    Dim md As String
-    md = DocToMarkdown(oDoc)
+    Dim md As String, markedFake As Long
+    ' True: commenters as "Reviewer n". Same spans as the real-names export.
+    md = DocToMarkdown(oDoc, True, spans, nSpans, markedFake)
     WriteUtf8NoBom savePath, md
     SetPhase ""                          ' don't strand a progress message
+
+    ' Read the finished file back for real values that survived inside a tracked
+    ' change -- the one span the replacement pass can quietly fail to reach.
+    Dim nResidual As Long
+    nResidual = ResidualsInMarkup(md, maps, nMaps)
+
+    RestoreMarkupView mv                 ' hand the user's markup view back
 
     ' Discard the in-memory fake edits: reload the window from the untouched
     ' original so the user is back on the real-names document and a stray Ctrl+S
@@ -500,7 +594,7 @@ Public Sub ReAnonymizeTentative()
            "Names inside italic cited case names were left as-is so a party " & _
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
-           vbCrLf & vbCrLf & _
+           MarkupNote(nComments, markedReal, markedFake, nResidual) & vbCrLf & vbCrLf & _
            "Saved an anonymized Markdown file (safe to share) to:" & vbCrLf & _
            savePath & vbCrLf & vbCrLf & _
            "and the same text with the REAL names (keep this one local) to:" & _
@@ -518,6 +612,7 @@ ErrH:
     ' original cloud file before the user can close without saving.
     If bStateSaved Then oDoc.TrackRevisions = prevTrack
     PerfRestore perf                     ' never leave proofing/pagination off
+    RestoreMarkupView mv                 ' never leave the markup view forced
     Application.ScreenUpdating = True
     Application.StatusBar = False        ' don't strand a progress message
     MsgBox "Re-Anonymize hit an error and stopped:" & vbCrLf & vbCrLf & _
@@ -672,20 +767,36 @@ End Sub
 '   - bold / italic runs                     ->  **bold**, *italic*, ***both***
 '   - footnote/endnote reference marks        ->  [^n], with the note texts
 '                                                 collected into a trailing block
+'   - tracked insertions / deletions         ->  {++inserted++} / {--deleted--}
+'   - comments                               ->  [cn] at the anchor, with author
+'                                                 and text in a trailing block
 ' Only the body is exported: headers/footers carry the court identity (already
 ' blanked) and have no place in Markdown. Formatting Markdown can't express
 ' (alignment, tab leaders in the caption, tables) is dropped but the text is
 ' kept. Text boxes/shapes are not exported.
-Private Function DocToMarkdown(ByVal oDoc As Document) As String
+'
+' hideAuthors is set for the shareable copy: a commenter's name is document
+' METADATA, which no pseudonym key covers and the real -> fake pass cannot reach,
+' so naming them there would leak a real person past everything this module does.
+' The anonymized copy gets "Reviewer 1", "Reviewer 2" -- stable within the file,
+' so a reader can still tell two commenters apart -- and the real-names copy gets
+' the actual names.
+Private Function DocToMarkdown(ByVal oDoc As Document, _
+                               ByVal hideAuthors As Boolean, _
+                               ByRef spans() As RevSpan, _
+                               ByVal nSpans As Long, _
+                               Optional ByRef markedOut As Long) As String
+    Dim st As ExportState
+    st.hideAuthors = hideAuthors
+    BuildRevisionIndex st, spans, nSpans
+
     Dim sb As String
-    Dim fnList As String            ' accumulates the "[^n]: ..." footnote block
-    Dim fnCount As Long: fnCount = 0
     Dim firstBlock As Boolean: firstBlock = True
 
     Dim p As Paragraph
     For Each p In oDoc.content.Paragraphs
         Dim line As String
-        line = ParagraphToMarkdown(oDoc, p, fnCount, fnList)
+        line = ParagraphToMarkdown(oDoc, p, st)
         If Len(line) > 0 Then
             If Not firstBlock Then sb = sb & vbCrLf & vbCrLf
             sb = sb & line
@@ -693,21 +804,44 @@ Private Function DocToMarkdown(ByVal oDoc As Document) As String
         End If
     Next p
 
-    If Len(fnList) > 0 Then sb = sb & vbCrLf & vbCrLf & fnList
+    AppendUnanchoredComments oDoc, st
 
-    DocToMarkdown = sb & vbCrLf
+    If Len(st.fnList) > 0 Then sb = sb & vbCrLf & vbCrLf & st.fnList
+    If Len(st.cmtList) > 0 Then
+        sb = sb & vbCrLf & vbCrLf & "## Comments" & vbCrLf & vbCrLf & st.cmtList
+    End If
+
+    markedOut = st.markedRevs
+    DocToMarkdown = MarkupLegend(st) & sb & vbCrLf
+End Function
+
+' A one-line note at the top of the file saying how markup is written, so the
+' braces read as notation rather than as something the judge typed. Emitted only
+' when the document actually carried markup.
+Private Function MarkupLegend(ByRef st As ExportState) As String
+    Dim parts As String
+    If st.markedRevs > 0 Then
+        parts = "tracked changes as {++insertions++} and {--deletions--}"
+    End If
+    If st.cmtCount > 0 Then
+        If Len(parts) > 0 Then parts = parts & "; "
+        parts = parts & "comments as [c1], [c2] ... with the text collected at the end"
+    End If
+    If Len(parts) = 0 Then Exit Function
+
+    MarkupLegend = "> This export marks " & parts & "." & vbCrLf & vbCrLf
 End Function
 
 ' One body paragraph -> one Markdown block (or "" for an empty paragraph, which
 ' just becomes block separation). List prefix wins over heading prefix.
 Private Function ParagraphToMarkdown(ByVal oDoc As Document, ByVal p As Paragraph, _
-                                     ByRef fnCount As Long, ByRef fnList As String) As String
+                                     ByRef st As ExportState) As String
     ' Paragraph content without the trailing paragraph mark.
     Dim wr As Range: Set wr = p.Range.Duplicate
     If wr.Characters.count >= 1 Then wr.MoveEnd wdCharacter, -1
 
     Dim inner As String
-    inner = InlineMarkdown(oDoc, wr, fnCount, fnList)
+    inner = InlineMarkdown(oDoc, wr, st)
     If Len(Trim$(inner)) = 0 Then Exit Function
 
     ' List item?
@@ -759,9 +893,14 @@ End Function
 ' Inline formatting for one paragraph's content range. Uniform paragraphs (the
 ' common case -- plain body prose) are wrapped at most once without walking; only
 ' mixed-format paragraphs (an italic cited case name in a sentence) are walked
-' character by character.
+' character by character. A paragraph carrying a tracked change is always walked:
+' the mark has to land on the changed run, which needs per-character positions.
+' That question goes to the captured index, never to wr.Revisions -- by the time
+' the anonymized export runs, Word may have dropped its own mark from a span this
+' export still means to show, and the paragraph would take the fast path and lose
+' the change.
 Private Function InlineMarkdown(ByVal oDoc As Document, ByVal wr As Range, _
-                                ByRef fnCount As Long, ByRef fnList As String) As String
+                                ByRef st As ExportState) As String
     Dim txt As String: txt = wr.text
     If Len(txt) = 0 Then Exit Function
 
@@ -769,60 +908,91 @@ Private Function InlineMarkdown(ByVal oDoc As Document, ByVal wr As Range, _
     boldUniform = (wr.Font.Bold <> wdUndefined)
     italicUniform = (wr.Font.Italic <> wdUndefined)
 
-    If boldUniform And italicUniform Then
-        InlineMarkdown = Emph(MapText(oDoc, txt, fnCount, fnList), _
+    If boldUniform And italicUniform And Not SpanTouches(st, wr.Start, wr.End) Then
+        InlineMarkdown = Emph(MapText(oDoc, txt, st), _
                               (wr.Font.Bold = True), (wr.Font.Italic = True))
     Else
-        InlineMarkdown = WalkRuns(oDoc, wr, fnCount, fnList)
+        InlineMarkdown = WalkRuns(oDoc, wr, st)
     End If
 End Function
 
 ' Walk a mixed-format range character by character, grouping consecutive
-' same-format characters into runs and wrapping each run in its emphasis markers.
+' same-format characters into runs and wrapping each run in its emphasis markers
+' and its tracked-change markers. A run breaks on a change of ANY of the three,
+' so an insertion inside an italic case name comes out nested, not flattened.
 Private Function WalkRuns(ByVal oDoc As Document, ByVal wr As Range, _
-                          ByRef fnCount As Long, ByRef fnList As String) As String
+                          ByRef st As ExportState) As String
     Dim result As String, runText As String
-    Dim curB As Long, curI As Long
-    curB = -1: curI = -1                    ' -1 = no run started yet
+    Dim curB As Long, curI As Long, curR As Long
+    curB = -1: curI = -1: curR = -1         ' -1 = no run started yet
     Dim n As Long: n = wr.Characters.count
     Dim i As Long
     For i = 1 To n
         Dim ch As Range: Set ch = wr.Characters(i)
         Dim c As String: c = ch.text
-        If c = Chr$(2) Then                 ' footnote/endnote reference mark
+        If c = Chr$(2) Or c = Chr$(5) Then  ' footnote/endnote or comment mark
             If Len(runText) > 0 Then
-                result = result & Emph(runText, curB = 1, curI = 1)
+                result = result & EmitRun(runText, curB, curI, curR)
                 runText = ""
             End If
-            result = result & EmitNote(oDoc, fnCount, fnList)
-            curB = -1: curI = -1
+            If c = Chr$(2) Then
+                result = result & EmitNote(oDoc, st)
+            Else
+                result = result & EmitComment(oDoc, st)
+            End If
+            curB = -1: curI = -1: curR = -1
         Else
-            Dim b As Long, it As Long
+            Dim b As Long, it As Long, rv As Long
             b = IIf(ch.Font.Bold = True, 1, 0)
             it = IIf(ch.Font.Italic = True, 1, 0)
-            If b <> curB Or it <> curI Then
+            rv = RevKindAt(st, ch.Start)
+            If b <> curB Or it <> curI Or rv <> curR Then
                 If Len(runText) > 0 Then
-                    result = result & Emph(runText, curB = 1, curI = 1)
+                    result = result & EmitRun(runText, curB, curI, curR)
                     runText = ""
                 End If
-                curB = b: curI = it
+                curB = b: curI = it: curR = rv
             End If
             runText = runText & MapChar(c)
         End If
     Next i
-    If Len(runText) > 0 Then result = result & Emph(runText, curB = 1, curI = 1)
+    If Len(runText) > 0 Then result = result & EmitRun(runText, curB, curI, curR)
     WalkRuns = result
 End Function
 
-' Map a plain (single-format) text run to Markdown, translating footnote
-' reference marks and per-character specials.
+' One finished run: emphasis markers first, then the tracked-change wrapper
+' around them, so the change marker always brackets the whole run.
+Private Function EmitRun(ByVal s As String, ByVal b As Long, _
+                         ByVal it As Long, ByVal rv As Long) As String
+    EmitRun = MarkRevision(Emph(s, b = 1, it = 1), rv)
+End Function
+
+' Wrap a run in CriticMarkup so both a reader and Claude can see what the tracked
+' change was, rather than reading an edit-in-progress as settled text. Text with
+' no revision on it comes back untouched.
+Private Function MarkRevision(ByVal s As String, ByVal kind As Long) As String
+    If Len(s) = 0 Then
+        MarkRevision = s
+    ElseIf kind = REV_INSERT Then
+        MarkRevision = "{++" & s & "++}"
+    ElseIf kind = REV_DELETE Then
+        MarkRevision = "{--" & s & "--}"
+    Else
+        MarkRevision = s                 ' REV_NONE, or a run that never started
+    End If
+End Function
+
+' Map a plain (single-format) text run to Markdown, translating footnote and
+' comment reference marks and per-character specials.
 Private Function MapText(ByVal oDoc As Document, ByVal s As String, _
-                         ByRef fnCount As Long, ByRef fnList As String) As String
+                         ByRef st As ExportState) As String
     Dim res As String, i As Long
     For i = 1 To Len(s)
         Dim c As String: c = Mid$(s, i, 1)
         If c = Chr$(2) Then
-            res = res & EmitNote(oDoc, fnCount, fnList)
+            res = res & EmitNote(oDoc, st)
+        ElseIf c = Chr$(5) Then
+            res = res & EmitComment(oDoc, st)
         Else
             res = res & MapChar(c)
         End If
@@ -832,13 +1002,232 @@ End Function
 
 ' Consume the next footnote/endnote reference (in document order): append its
 ' text to the trailing block and return the "[^n]" inline marker.
-Private Function EmitNote(ByVal oDoc As Document, ByRef fnCount As Long, _
-                          ByRef fnList As String) As String
-    fnCount = fnCount + 1
-    Dim body As String: body = FlattenNote(NoteText(oDoc, fnCount))
-    If Len(fnList) > 0 Then fnList = fnList & vbCrLf
-    fnList = fnList & "[^" & fnCount & "]: " & body
-    EmitNote = "[^" & fnCount & "]"
+Private Function EmitNote(ByVal oDoc As Document, ByRef st As ExportState) As String
+    st.fnCount = st.fnCount + 1
+    Dim body As String: body = FlattenNote(NoteText(oDoc, st.fnCount))
+    If Len(st.fnList) > 0 Then st.fnList = st.fnList & vbCrLf
+    st.fnList = st.fnList & "[^" & st.fnCount & "]: " & body
+    EmitNote = "[^" & st.fnCount & "]"
+End Function
+
+'------------------------------------------------------------------------------
+' COMMENTS
+'------------------------------------------------------------------------------
+' Consume the next comment (document order, the same way notes are consumed) and
+' return its "[cn]" inline marker. Word marks each comment's anchor in the body
+' text with Chr(5), replies included, so the n-th mark is the n-th comment.
+Private Function EmitComment(ByVal oDoc As Document, ByRef st As ExportState) As String
+    EmitComment = "[c" & AddCommentEntry(oDoc, st, "") & "]"
+End Function
+
+' Any comment the walk never met -- one anchored in a header, a text box, or left
+' unanchored by an edit -- still goes into the block, flagged. A comment silently
+' missing from the export is the one failure worth being noisy about: the reader
+' has no way to notice it isn't there.
+Private Sub AppendUnanchoredComments(ByVal oDoc As Document, ByRef st As ExportState)
+    Dim total As Long
+    On Error Resume Next
+    total = oDoc.Comments.count
+    On Error GoTo 0
+
+    Do While st.cmtCount < total
+        AddCommentEntry oDoc, st, " (not anchored in the body)"
+    Loop
+End Sub
+
+' Append one comment to the trailing block and return its number. The block is a
+' Markdown list, not "[cn]: text" -- that shape is a link reference definition,
+' which a renderer swallows whole.
+Private Function AddCommentEntry(ByVal oDoc As Document, ByRef st As ExportState, _
+                                 ByVal note As String) As Long
+    st.cmtCount = st.cmtCount + 1
+    AddCommentEntry = st.cmtCount
+
+    Dim body As String, who As String
+    On Error Resume Next
+    If st.cmtCount <= oDoc.Comments.count Then
+        body = FlattenNote(oDoc.Comments(st.cmtCount).Range.text)
+        who = AuthorLabel(st, oDoc.Comments(st.cmtCount).Author)
+        If IsCommentReply(oDoc.Comments(st.cmtCount)) Then note = note & " (reply)"
+    End If
+    On Error GoTo 0
+    If Len(who) = 0 Then who = "Unknown"
+
+    If Len(st.cmtList) > 0 Then st.cmtList = st.cmtList & vbCrLf
+    st.cmtList = st.cmtList & "- **[c" & st.cmtCount & "]** " & who & note & _
+                 " -- " & body
+End Function
+
+' The name to print for a commenter: the real one locally, a stable "Reviewer n"
+' in the shareable copy (see DocToMarkdown). Either way the author is registered
+' in first-seen order, so the same person keeps the same label all file long.
+Private Function AuthorLabel(ByRef st As ExportState, ByVal author As String) As String
+    author = Trim$(author)
+    If Len(author) = 0 Then author = "Unknown"
+    If st.nAuthors = 0 Then ReDim st.authors(1 To 8)
+
+    Dim i As Long
+    For i = 1 To st.nAuthors
+        If StrComp(st.authors(i), author, vbTextCompare) = 0 Then Exit For
+    Next i
+
+    If i > st.nAuthors Then
+        If i > UBound(st.authors) Then ReDim Preserve st.authors(1 To UBound(st.authors) + 8)
+        st.authors(i) = author
+        st.nAuthors = i
+    End If
+
+    If st.hideAuthors Then
+        AuthorLabel = "Reviewer " & i
+    Else
+        AuthorLabel = author
+    End If
+End Function
+
+' True when the comment is a reply in a threaded conversation. Comment.Ancestor
+' only exists in newer Word object models, so it is reached late-bound (the
+' parameter is Object): an older Word raises here instead of refusing to compile
+' the whole project.
+Private Function IsCommentReply(ByVal cmt As Object) As Boolean
+    Dim anc As Object
+    On Error Resume Next
+    Set anc = cmt.Ancestor
+    On Error GoTo 0
+    IsCommentReply = Not (anc Is Nothing)
+End Function
+
+'------------------------------------------------------------------------------
+' TRACKED CHANGES
+'------------------------------------------------------------------------------
+' Capture the body's tracked insertions and deletions as live Ranges, ONCE, before
+' anything replaces a name. Both exports then mark the same set of changes: see
+' RevSpan for why the span has to be a Range and not a pair of offsets.
+'
+' Only content changes are captured; RevKindOf drops the rest. The array is
+' always dimensioned, so a document with no tracked changes still passes a usable
+' (empty) array down to the export.
+Private Function CaptureRevisions(ByVal oDoc As Document, _
+                                  ByRef spans() As RevSpan) As Long
+    Dim n As Long: n = 0
+    ReDim spans(1 To 64)
+
+    On Error Resume Next
+    Dim rev As Revision
+    For Each rev In oDoc.content.Revisions
+        Dim kind As Long: kind = RevKindOf(rev.Type)
+        If kind <> REV_NONE Then
+            n = n + 1
+            If n > UBound(spans) Then ReDim Preserve spans(1 To UBound(spans) + 64)
+            Set spans(n).rng = rev.Range.Duplicate
+            spans(n).kind = kind
+        End If
+    Next rev
+    On Error GoTo 0
+
+    CaptureRevisions = n
+End Function
+
+' Turn the captured spans into a position index for one export, reading each
+' Range's CURRENT bounds -- which is the point: by the time the anonymized export
+' runs, every span has moved by however much the replacements before it changed
+' the text, and Word has already done that arithmetic for us.
+'
+' The walk then asks RevKindAt per character instead of reaching into the
+' Revisions collection a character at a time, which is the difference between one
+' pass over the revisions and one COM call per character of the document.
+Private Sub BuildRevisionIndex(ByRef st As ExportState, _
+                               ByRef spans() As RevSpan, ByVal nSpans As Long)
+    st.nRevs = 0
+    st.revCursor = 1
+    ReDim st.revStart(1 To 64)
+    ReDim st.revEnd(1 To 64)
+    ReDim st.revKind(1 To 64)
+
+    On Error Resume Next
+    Dim i As Long
+    For i = 1 To nSpans
+        Dim sStart As Long, sEnd As Long
+        sStart = -1: sEnd = -1
+        sStart = spans(i).rng.Start
+        sEnd = spans(i).rng.End
+
+        ' A span whose text was replaced away collapses to nothing; there is no
+        ' run left to mark, so drop it rather than index an empty range. Spans
+        ' that overlap (an insertion one reviewer later deleted) are resolved by
+        ' the walk in start order: the first covers its own extent, the second
+        ' picks up from where the first ends. Every character still gets marked.
+        If sEnd > sStart Then
+            If st.nRevs + 1 > UBound(st.revStart) Then
+                ReDim Preserve st.revStart(1 To UBound(st.revStart) + 64)
+                ReDim Preserve st.revEnd(1 To UBound(st.revEnd) + 64)
+                ReDim Preserve st.revKind(1 To UBound(st.revKind) + 64)
+            End If
+            st.nRevs = st.nRevs + 1
+
+            ' Keep the index sorted by start. Word returns revisions in story
+            ' order and edits preserve that order, so this shifts nothing in
+            ' practice -- but RevKindAt's cursor only ever moves forward, and one
+            ' out-of-order entry would be stepped past and lost from the export.
+            Dim j As Long: j = st.nRevs
+            Do While j > 1
+                If st.revStart(j - 1) <= sStart Then Exit Do
+                st.revStart(j) = st.revStart(j - 1)
+                st.revEnd(j) = st.revEnd(j - 1)
+                st.revKind(j) = st.revKind(j - 1)
+                j = j - 1
+            Loop
+            st.revStart(j) = sStart
+            st.revEnd(j) = sEnd
+            st.revKind(j) = spans(i).kind
+        End If
+    Next i
+    On Error GoTo 0
+End Sub
+
+' True when a captured tracked change overlaps this range. Advances the cursor
+' only past spans that end before the range does -- the same step RevKindAt would
+' take at the range's first character -- so asking never costs the walk anything.
+Private Function SpanTouches(ByRef st As ExportState, _
+                             ByVal rStart As Long, ByVal rEnd As Long) As Boolean
+    Do While st.revCursor <= st.nRevs
+        If st.revEnd(st.revCursor) > rStart Then Exit Do
+        st.revCursor = st.revCursor + 1
+    Loop
+    If st.revCursor > st.nRevs Then Exit Function
+
+    SpanTouches = (st.revStart(st.revCursor) < rEnd)
+End Function
+
+' The tracked change covering a character position, or REV_NONE. The export walks
+' the body front to back, so the cursor only ever moves forward. Each span is
+' counted the first time it marks anything, so the tally is changes carried into
+' the file -- which the two exports are then compared on.
+Private Function RevKindAt(ByRef st As ExportState, ByVal pos As Long) As Long
+    Do While st.revCursor <= st.nRevs
+        If st.revEnd(st.revCursor) > pos Then Exit Do
+        st.revCursor = st.revCursor + 1
+    Loop
+    If st.revCursor > st.nRevs Then Exit Function
+
+    If pos >= st.revStart(st.revCursor) Then
+        RevKindAt = st.revKind(st.revCursor)
+        If st.lastMarked <> st.revCursor Then
+            st.lastMarked = st.revCursor
+            st.markedRevs = st.markedRevs + 1
+        End If
+    End If
+End Function
+
+' Fold Word's revision types down to the two the export shows. Only content
+' changes are marked: a formatting or paragraph-property revision changed no
+' words, and marking it would wrap untouched prose in {++...++}. A move is shown
+' as the insertion and deletion it is made of.
+Private Function RevKindOf(ByVal revType As Long) As Long
+    Select Case revType
+        Case wdRevisionInsert, wdRevisionMovedTo:   RevKindOf = REV_INSERT
+        Case wdRevisionDelete, wdRevisionMovedFrom: RevKindOf = REV_DELETE
+        Case Else:                                  RevKindOf = REV_NONE
+    End Select
 End Function
 
 ' The text of the idx-th note, in document order. Footnotes are used when the
@@ -880,7 +1269,10 @@ Private Function MapChar(ByVal c As String) As String
         Case Chr$(31):  MapChar = ""                  ' optional hyphen
         Case Chr$(30):  MapChar = "-"                 ' non-breaking hyphen
         Case Chr$(1), Chr$(5), Chr$(19), Chr$(20), Chr$(21)
-            MapChar = ""    ' inline object / annotation / field control marks
+            ' Inline object / comment / field control marks. A comment mark only
+            ' reaches here from inside a note (the body's are consumed by the
+            ' walk, which turns them into "[cn]" markers).
+            MapChar = ""
         Case "\":       MapChar = "\\"
         Case "`":       MapChar = "\`"
         Case "*":       MapChar = "\*"
@@ -1435,6 +1827,47 @@ Private Sub PerfRestore(ByRef p As PerfState)
     On Error GoTo 0
 End Sub
 
+' Show all markup inline for the duration of a re-anonymize run, remembering what
+' the user had. Word hides tracked deletions from BOTH Find and Range.Text when
+' they are drawn in balloons rather than in the text, so with the wrong view a
+' real name inside a deletion is neither replaced nor exported: the shareable
+' copy would silently carry it, and both exports would silently drop the change.
+' Setting the view is not a document edit -- nothing here dirties the file.
+Private Function ForceInlineMarkup() As MarkupView
+    Dim mv As MarkupView
+    On Error Resume Next
+    Err.Clear                    ' saved is read off Err below; Err survives calls
+    With ActiveWindow.view
+        mv.showRevisions = .ShowRevisionsAndComments
+        mv.showInsDel = .ShowInsertionsAndDeletions
+        mv.mode = .RevisionsMode
+        mv.view = .RevisionsView
+        mv.saved = (Err.Number = 0)
+
+        .ShowRevisionsAndComments = True
+        .ShowInsertionsAndDeletions = True
+        .RevisionsView = wdRevisionsViewFinal
+        .RevisionsMode = wdInLineRevisions
+    End With
+    On Error GoTo 0
+    ForceInlineMarkup = mv
+End Function
+
+' Put the user's markup view back. Safe to call twice and safe when
+' ForceInlineMarkup never ran or couldn't read the window (saved = False).
+Private Sub RestoreMarkupView(ByRef mv As MarkupView)
+    If Not mv.saved Then Exit Sub
+    On Error Resume Next
+    With ActiveWindow.view
+        .RevisionsMode = mv.mode
+        .RevisionsView = mv.view
+        .ShowInsertionsAndDeletions = mv.showInsDel
+        .ShowRevisionsAndComments = mv.showRevisions
+    End With
+    mv.saved = False
+    On Error GoTo 0
+End Sub
+
 ' Count of tracked revisions across the document. A document carrying thousands
 ' of revision marks makes every Find and every text assignment dramatically more
 ' expensive, which no amount of tuning here can undo -- so the timing note
@@ -1486,6 +1919,95 @@ Private Sub SetPhase(ByVal s As String, _
         Application.StatusBar = macroName & ": " & s & " ..."
     End If
 End Sub
+
+' One line for the result dialog about the markup both exports carried over, so
+' the notation isn't a surprise when the file is opened -- and so the "Reviewer"
+' labels are explained where the user will see them. Empty when the document had
+' neither tracked changes nor comments.
+'
+' markedReal/markedFake are what each export actually wrote. They agree by
+' construction (one captured set of spans, marked twice), so a mismatch means a
+' span's text was replaced away between the two writes -- reported rather than
+' left for the user to notice by diffing the files.
+Private Function MarkupNote(ByVal nComments As Long, _
+                            ByVal markedReal As Long, ByVal markedFake As Long, _
+                            ByVal nResidual As Long) As String
+    If markedReal <= 0 And markedFake <= 0 And nComments <= 0 Then Exit Function
+
+    Dim s As String
+    s = vbCrLf & vbCrLf & "Carried " & markedReal & " tracked change(s) and " & _
+        nComments & " comment(s) into both files: insertions as {++text++}, " & _
+        "deletions as {--text--}, comments as [c1], [c2] ... with the text " & _
+        "collected at the end."
+    If nComments > 0 Then
+        s = s & " Commenters are named in the real-names file only -- the " & _
+            "anonymized one labels them ""Reviewer 1"", ""Reviewer 2"", because " & _
+            "an author name is document metadata that no pseudonym key covers."
+    End If
+    If markedFake <> markedReal Then
+        s = s & vbCrLf & vbCrLf & "NOTE: the anonymized file marks " & markedFake & _
+            " of those " & markedReal & " change(s) -- the rest were edits whose " & _
+            "text the pseudonym pass replaced entirely. Compare the two files at " & _
+            "those spots before relying on the shared copy's markup."
+    End If
+    If nResidual > 0 Then
+        s = s & vbCrLf & vbCrLf & "CHECK BEFORE SHARING: " & nResidual & _
+            " key value(s) still appear INSIDE the anonymized file's tracked-change " & _
+            "markup. Open it and read those {++...++} / {--...--} spans. (A party " & _
+            "name that also names a cited case is left alone on purpose and shows " & _
+            "up here too.)"
+    End If
+    MarkupNote = s
+End Function
+
+' How many of the key's real values still appear inside the anonymized export's
+' tracked-change markup. This is the one place a replacement can fail quietly:
+' text inside a tracked deletion is a run Word does not always let Find rewrite,
+' and unlike ordinary prose nobody re-reads a deleted sentence before sharing the
+' file. Checked on the finished string, so it reports what the file actually says
+' rather than what the replacement pass believed it did.
+Private Function ResidualsInMarkup(ByVal md As String, ByRef maps() As Mapping, _
+                                   ByVal nMaps As Long) As Long
+    Dim hay As String: hay = LCase$(MarkedText(md))
+    If Len(hay) = 0 Then Exit Function
+
+    Dim i As Long, n As Long
+    For i = 1 To nMaps
+        If Len(maps(i).real) > 0 Then
+            If InStr(1, hay, LCase$(maps(i).real), vbBinaryCompare) > 0 Then
+                n = n + 1
+            End If
+        End If
+    Next i
+    ResidualsInMarkup = n
+End Function
+
+' Just the text inside the export's tracked-change markers, one span per line.
+' An unterminated marker ends the scan rather than running to the end of the
+' file: half a span is not evidence of anything.
+Private Function MarkedText(ByVal md As String) As String
+    Dim res As String
+    Dim pos As Long: pos = 1
+    Do
+        Dim aIns As Long, aDel As Long, a As Long, closer As String
+        aIns = InStr(pos, md, "{++", vbBinaryCompare)
+        aDel = InStr(pos, md, "{--", vbBinaryCompare)
+        If aIns = 0 And aDel = 0 Then Exit Do
+
+        If aIns = 0 Or (aDel > 0 And aDel < aIns) Then
+            a = aDel: closer = "--}"
+        Else
+            a = aIns: closer = "++}"
+        End If
+
+        Dim e As Long: e = InStr(a + 3, md, closer, vbBinaryCompare)
+        If e = 0 Then Exit Do
+
+        res = res & Mid$(md, a + 3, e - a - 3) & vbLf
+        pos = e + 3
+    Loop
+    MarkedText = res
+End Function
 
 ' One line for the result dialog when key rows were skipped as extraction debris
 ' -- a term that matched many times but never once stood on its own. Reported so
@@ -1815,6 +2337,13 @@ Private Function CollectStories(ByVal oDoc As Document, ByRef arr() As StoryRef)
     ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
     If oDoc.Footnotes.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdFootnotesStory)
     If oDoc.Endnotes.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdEndnotesStory)
+
+    ' Comments. A reviewer's comment names the parties as freely as the prose
+    ' does, and the Markdown export now carries comments into the shareable copy
+    ' -- so this story has to be scrubbed with the rest. (The author NAME is
+    ' metadata, not story text; nothing here can reach it, which is why the
+    ' anonymized export labels commenters "Reviewer n" instead.)
+    If oDoc.Comments.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdCommentsStory)
 
     ' Text boxes / shapes, each one's own text frame directly.
     Dim shp As Shape
