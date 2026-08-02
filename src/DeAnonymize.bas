@@ -23,11 +23,11 @@ Attribute VB_Name = "DeAnonymize"
 ' Neither can be a de-anonymize MISS, so both are counted out of the result
 ' dialog's tally rather than left to read as failures.
 ' "Replacement" is USUALLY the fake that appears in the anonymized draft.
-' It can instead hold an operator KEEP instruction -- "no" (leave this Real Value
-' verbatim) or a "[bracketed]" keep-spec -- which is NOT a pseudonym and never
-' appeared in the document. IsKeepDecisionCell recognizes those and
-' ReadPseudonymKey drops them; see that function for why reading them literally
-' corrupts the text in both directions.
+' It can instead hold an operator KEEP instruction -- "no" or "never" (leave
+' this Real Value verbatim), or a "[bracketed]" / "{braced}" keep-spec -- which
+' is NOT a pseudonym and never appeared in the document. IsKeepDecisionCell
+' recognizes those and ReadPseudonymKey drops them; see that function for why
+' reading them literally corrupts the text in both directions.
 '
 ' MACROS YOU RUN:
 '   DeAnonymizeTentative - locate the key, then replace every fake with its
@@ -2056,7 +2056,8 @@ End Function
 Private Function KeepRowsNote(ByVal nKeepRows As Long) As String
     If nKeepRows <= 0 Then Exit Function
     KeepRowsNote = vbCrLf & vbCrLf & "Skipped " & nKeepRows & " KEEP row(s) in " & _
-                   "the key (a ""no"" or a [bracketed] keep-spec). Those are " & _
+                   "the key (a ""no"", a ""never"", or a [bracketed] or " & _
+                   "{braced} keep-spec). Those are " & _
                    "operator instructions to leave a value alone, not " & _
                    "pseudonyms, so there is nothing to swap for them."
 End Function
@@ -2070,49 +2071,70 @@ End Function
 ' was deliberately left VERBATIM in the anonymized text:
 '
 '   "no" / "n"      KEEP: leave this Real Value alone, never fake it.
+'   "never"         the same, everywhere: the NUCLEAR keep of the whole value,
+'                   honored in this and every other case folder. It is the same
+'                   instruction as bracing the entire value, without retyping
+'                   the value inside braces.
 '   "[bracketed]"   keep-spec: keep the bracketed part(s) verbatim and auto-fake
 '                   the rest. The cell records the operator's INSTRUCTION, not
 '                   any fake that was used.
+'   "{braced}"      the same cut with a stronger promise (the braced words are
+'                   never faked in any folder, not even inside a party name).
 '
 ' Read literally these look like pseudonyms, which is exactly how a real key went
 ' wrong here. Six rows reading "no" made de-anonymize try to restore the word
 ' "no" -- it would rewrite a caption's standalone "No." and crawl every "not" and
 ' "notice" on the way -- and rows like "[HONORABLE]" or "[DEMURRER TO]" would
 ' have been written INTO the shared copy by re-anonymize as literal bracketed
-' text. Neither value was ever a fake.
+' text. Neither value was ever a fake. "never" is the same hazard and a worse
+' word for it: unguarded, one such row rewrites every "never" in the document
+' into somebody's name.
 '
-' Mirrors _pn_bracket_keep's fall-through exactly: when a bracketed part is NOT a
-' substring of the Real Value, PDF-Linker abandons the keep reading and treats
-' the cell as an ordinary explicit replacement, so we do too.
+' Mirrors _pn_bracket_keep's fall-through exactly: brackets and braces are cut
+' the same way and read together, and when ANY delimited part is not a substring
+' of the Real Value, PDF-Linker abandons the keep reading and treats the cell as
+' an ordinary explicit replacement, so we do too.
 Private Function IsKeepDecisionCell(ByVal realValue As String, ByVal cell As String) As Boolean
     Dim c As String: c = Trim$(cell)
     If Len(c) = 0 Then Exit Function
 
     Dim lc As String: lc = LCase$(c)
-    If lc = "no" Or lc = "n" Then
+    If lc = "no" Or lc = "n" Or lc = "never" Then
         IsKeepDecisionCell = True
         Exit Function
     End If
 
-    If InStr(1, c, "[") = 0 Then Exit Function
+    If InStr(1, c, "[") = 0 And InStr(1, c, "{") = 0 Then Exit Function
 
-    ' Every non-empty bracketed part must occur in the Real Value; otherwise this
-    ' is not a keep-spec and the cell is a literal replacement after all.
     Dim found As Boolean: found = False
-    Dim p As Long, q As Long, part As String
-    p = InStr(1, c, "[")
-    Do While p > 0
-        q = InStr(p + 1, c, "]")
-        If q = 0 Then Exit Do
-        part = Trim$(Mid$(c, p + 1, q - p - 1))
-        If Len(part) > 0 Then
-            If InStr(1, realValue, part, vbTextCompare) = 0 Then Exit Function
-            found = True
-        End If
-        p = InStr(q + 1, c, "[")
-    Loop
+    If Not KeepPartsArePresent(realValue, c, "[", "]", found) Then Exit Function
+    If Not KeepPartsArePresent(realValue, c, "{", "}", found) Then Exit Function
 
     IsKeepDecisionCell = found
+End Function
+
+' Every part of `cell` delimited by opener/closer must occur in the Real Value.
+' Returns False the moment one does not -- the cell is a literal replacement
+' after all -- and sets `found` when at least one real part was seen.
+Private Function KeepPartsArePresent(ByVal realValue As String, ByVal cell As String, _
+                                     ByVal opener As String, ByVal closer As String, _
+                                     ByRef found As Boolean) As Boolean
+    KeepPartsArePresent = True
+    Dim p As Long, q As Long, part As String
+    p = InStr(1, cell, opener)
+    Do While p > 0
+        q = InStr(p + 1, cell, closer)
+        If q = 0 Then Exit Do
+        part = Trim$(Mid$(cell, p + 1, q - p - 1))
+        If Len(part) > 0 Then
+            If InStr(1, realValue, part, vbTextCompare) = 0 Then
+                KeepPartsArePresent = False
+                Exit Function
+            End If
+            found = True
+        End If
+        p = InStr(q + 1, cell, opener)
+    Loop
 End Function
 
 ' Run every mapping against the document, skipping the ones whose search term
@@ -3026,10 +3048,13 @@ End Function
 ' matched literally and case-insensitively.
 '
 ' Read this story's text ONCE and use a fast in-memory InStr to decide which
-' terms are worth a real Find. Without that filter the pass is ~330 pool words in
-' two case forms plus the domains -- around 660 native scans of every story, per
-' document -- which is a large part of what made a long key feel like a hang.
+' terms are worth a real Find. Without that filter the pass is ~870 pool words in
+' two case forms plus the domains -- around 1,800 native scans of every story,
+' per document -- which is a large part of what made a long key feel like a hang.
 ' Now a term that isn't in the story costs a string search instead of a scan.
+' That filter is also what makes the pool's SIZE cheap: it more than doubled when
+' PDF-Linker's pools were enlarged for a case that needed 305 distinct name
+' words, and the cost of the words nobody used is one InStr each.
 '
 ' The filter is deliberately case-INSENSITIVE while the highlighters below are
 ' case-sensitive: it only has to be a superset. A word absent case-insensitively
@@ -3051,7 +3076,7 @@ Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant
     ' but a paragraph mark) contains no term, so skip it outright. Without this
     ' it fell into TermMaybePresent's "couldn't read the text, assume present"
     ' fallback -- which is right for a READ FAILURE but wrong for a genuinely
-    ' empty story, and it made every blank header pay all ~660 native sweeps.
+    ' empty story, and it made every blank header pay all ~1,800 native sweeps.
     If readOK And Len(Trim$(Replace(Replace(hayLower, vbCr, ""), Chr$(7), ""))) = 0 Then
         Exit Function
     End If
@@ -3145,20 +3170,40 @@ End Function
 ' entity/company words, street names, and city/locality names. Built in chunks
 ' (each under VBA's line-length limit) and split on spaces. Words that appear in
 ' more than one category upstream (Juniper, Larkspur) are listed once here.
+'
+' This is a COPY of PDF-Linker's pools -- _PN_NAME_WORDS, _PN_ENTITY_WORDS,
+' _PN_STREET_NAMES, _PN_CITY_NAMES, in that order -- and the copy is what makes
+' the leak net work: a fake drawn from a word this list does not have is a
+' pseudonym that ships through the review unflagged. So it has to be re-synced
+' whenever those pools grow, which they do when a case runs the pool out and the
+' tool starts numbering its stand-ins ("Deverell5"). Last synced at 695 name
+' words (the largest folder seen needed 305 distinct ones), 108 entity, 55
+' street, 15 city.
 Private Function PseudonymPool() As Variant
     Dim s As String
     ' Person surnames
-    s = "Ashford Bennett Calder Danforth Ellery Fenwick Garrick Halloran Ingram Jarrett Keswick Langley Marlowe Nash Orwell Prescott Quill Radley Sable Thorne Underwood Vance Whitlock Yardley"
-    s = s & " Ashby Brandt Corwin Delacroix Everts Fairfax Grantham Holloway Isley Jennings Kingsley Lathrop Merrick Norwood Ackerly Bramble Colfax Denning Emmett Forsythe Gable Hendry Ivers Joplin Kessler Lorne Mabry Nolan Ondine Pruett Renwick Sterling Tolliver Ursin Verity Waverly Alden Beaumont Carrow Delane"
-    s = s & " Abernathy Alcott Amberly Ashcombe Atwater Balfour Bancroft Barlowe Bexley Blackwood Braddock Brimley Cadwell Calloway Carden Cartwright Chadwick Chamberlin Chetwood Clarendon Cleary Cranston Cresswell Darrow Davenport Deverell Doran Dunhill Eastwick Edgerton Ellsworth Fairbank Fallon Farraday Fenmore Finnegan Gaskell Gearhart Goddard Hadley Halstead Hargrove Hartwell Hawkridge Hemsley Hollis Huxley Ingersoll Jarrow Kimball"
-    s = s & " Kinsley Larkin Ledbetter Linford Lockwood Ludlow Mallory Mansfield Marsden Mayhew Milburn Montrose Mowbray Oakley Ormsby Paget Parrish Pemberton Penrose Prentiss Quenby Ramsey Rathbone Redmond Ridley Rockwell Rutherford Sackett Selwyn Sheridan Sinclair Stanhope Stockton Swinton Thorpe Trafford Tremaine Underhill Vickers Wadsworth Waldron Warwick Wescott Wexford Whitby Winslow Wolcott Wycliffe Yates Yorke"
-    s = s & " Ainsworth Braxton Denholm Harrell Kimbrell Lassiter Mercer Northcott Ravenscar Stroud Thackeray Weatherby Aldous Birkett Crandall Eldridge Fanshawe Grimwood Harkness Loxley Merton Pennington Rushton Sedgwick Tennant Waverley Wharton Yeardley"
+    s = "Ashford Bennett Calder Danforth Ellery Fenwick Garrick Halloran Ingram Jarrett Keswick Langley Marlowe Nash Orwell Prescott Quill Radley Sable Thorne Underwood Vance Whitlock Yardley Ashby Brandt Corwin Delacroix Everts Fairfax Grantham Holloway Isley Jennings Kingsley Lathrop Merrick Norwood Ackerly Bramble Colfax Denning Emmett Forsythe Gable Hendry Ivers Joplin Kessler Lorne Mabry Nolan Ondine Pruett Renwick Sterling"
+    s = s & " Tolliver Ursin Verity Waverly Alden Beaumont Carrow Delane Abernathy Alcott Amberly Ashcombe Atwater Balfour Bancroft Barlowe Bexley Blackwood Braddock Brimley Cadwell Calloway Carden Cartwright Chadwick Chamberlin Chetwood Clarendon Cleary Cranston Cresswell Darrow Davenport Deverell Doran Dunhill Eastwick Edgerton Ellsworth Fairbank Fallon Farraday Fenmore Finnegan Gaskell Gearhart Goddard Hadley Halstead Hargrove Hartwell"
+    s = s & " Hawkridge Hemsley Hollis Huxley Ingersoll Jarrow Kimball Kinsley Larkin Ledbetter Linford Lockwood Ludlow Mallory Mansfield Marsden Mayhew Milburn Montrose Mowbray Oakley Ormsby Paget Parrish Pemberton Penrose Prentiss Quenby Ramsey Rathbone Redmond Ridley Rockwell Rutherford Sackett Selwyn Sheridan Sinclair Stanhope Stockton Swinton Thorpe Trafford Tremaine Underhill Vickers Wadsworth Waldron Warwick Wescott Wexford Whitby"
+    s = s & " Winslow Wolcott Wycliffe Yates Yorke Ainsworth Braxton Denholm Harrell Kimbrell Lassiter Mercer Northcott Ravenscar Stroud Thackeray Weatherby Aldous Birkett Crandall Eldridge Fanshawe Grimwood Harkness Loxley Merton Pennington Rushton Sedgwick Tennant Waverley Wharton Yeardley Abbotsford Ackworth Adderley Alverstone Anstruther Applewhite Arbuthnot Ardleigh Armitage Ashdown Astley Atherton Attwell Aylesworth Babbington"
+    s = s & " Baddeley Bagshaw Bainbridge Balcombe Bardsley Barkworth Bartholomew Battersby Beckford Bedingfield Bellingham Benfield Beresford Berrington Bickerton Biddulph Billingsley Birchall Blakeney Blandford Bolingbroke Bosworth Bracewell Braithwaite Brancaster Brandreth Brereton Bridgewater Brindley Bristow Broadbent Brockhurst Broughton Buckminster Bulstrode Burghley Burnaby Burstall Cadogan Callender Camberwell Canfield Cantrell"
+    s = s & " Carbury Carmichael Carnforth Carstairs Cathcart Cavendish Caxton Chalmers Chandos Charnley Chatterton Chelmsford Cheriton Chilcott Chillingworth Chorley Claverhouse Cliveden Coldwell Colgrave Collingwood Conistone Cotterill Coverdale Crawshaw Creighton Crossfield Culpepper Cunliffe Curzon Dalgleish Dalrymple Danbury Darlington Dashwood Daventry Delamere Denbigh Derwent Devereaux Dinsdale Ditchfield Dorrington Doughty Drakeford"
+    s = s & " Drummond Dunstable Durward Dysart Easterbrook Eccleston Edgecombe Elderfield Elphinstone Elverton Endicott Erskine Etherington Everard Ewbank Fairweather Farnham Farrington Fearnley Felsham Fennimore Ferrers Fetherston Fitzalan Fitzhugh Fleetwood Flintham Fordyce Forrester Fothergill Framley Frobisher Fulmer Gadsby Gainsford Galbraith Gallimore Gatliff Gawthorpe Gedney Gilliatt Glanville Glossop Godalming Goodenough Grafton"
+    s = s & " Greenhalgh Gresham Greville Grimshaw Grosvenor Gulliver Guthrie Hackforth Haddington Halliwell Hambleton Hammersley Hardcastle Harmsworth Harrowgate Haslemere Hatherleigh Haverford Hawksmoor Haythorne Headington Heathcote Henshaw Hepworth Herriot Hexham Hillingdon Hindmarsh Hobhouse Holbrooke Hollingsworth Holmwood Hopcroft Hornby Horrocks Houghton Hovingham Howarth Hulbert Hunsdon Huntingdon Hurstwood Hutchings Ilchester"
+    s = s & " Ingleby Inskip Isherwood Jacoby Jardine Jeavons Jellicoe Jephson Jesmond Jevington Jocelyn Jolliffe Kearsley Keighley Kelsall Kendrick Kenilworth Kenmare Kentridge Kerrigan Kettering Kilbride Kilmartin Kingscote Kinnaird Kirkbride Knatchbull Knowlton Kyneston Lambourne Lanchester Landseer Langdale Lanyon Latimer Laverock Lavington Leconfield Leighton Lennox Lethbridge Leveson Lilburne Lindisfarne Linthorpe Livesey Llewellyn"
+    s = s & " Lonsdale Lovelace Lowther Lumsden Luscombe Lyndhurst Lyttelton Macaulay Maidstone Mainwaring Malvern Manningham Marchmont Markham Marchbanks Marlborough Marston Masterman Maudsley Maulden Maynard Melbury Meriwether Micklethwaite Middleton Mildmay Millington Milverton Minchin Mirfield Molyneux Monkton Moorcroft Mordaunt Morecambe Mortimer Mountjoy Muirhead Mulcaster Murchison Musgrave Nasmyth Neville Newcombe Newington"
+    s = s & " Nightingale Norbury Northam Nuneaton Nuttall Oakenshaw Oldbury Oldcastle Ollerton Orchardson Ormerod Osbaldeston Osgood Otterbourne Oughtred Overbury Oxenham Padgett Paignton Palliser Pargeter Parminter Patchett Pattinson Peachey Pelham Pendlebury Penhaligon Pentreath Percival Perriman Petherbridge Pevensey Pickersgill Pilkington Plackett Plumstead Polkinghorne Pomeroy Ponsonby Poulton Prendergast Prestbury Prideaux Pringle"
+    s = s & " Purcell Pyecroft Quarrington Quennell Quimby Quintrell Radcliffe Ranelagh Rathmore Ravensworth Rawlinson Rayburn Redfern Redgrave Rendlesham Restarick Ribblesdale Rickerby Riddington Rimmington Rivenhall Robsart Rockingham Rolleston Romilly Rookwood Roscommon Rossiter Rothbury Rowntree Ruddock Rushbrooke Rutledge Saddlington Salkeld Saltonstall Sandbrook Sandringham Satterthwaite Saunderson Savernake Scarborough Seabright"
+    s = s & " Seagrave Seaton Selborne Sempill Severn Shackleton Sharnbrook Shawcross Shelmerdine Shenstone Sherbourne Shipley Shrewsbury Skelton Smallwood Snelgrove Somerville Southwell Spofforth Stapleton Staveley Stebbing Stenhouse Stopford Stourton Stowell Stradbroke Strangeways Stretton Studholme Sudeley Sunderland Sutcliffe Swaffield Swanwick Sydenham Symington Talbot Tarleton Tattersall Teasdale Templeton Thelwall Thirlwall"
+    s = s & " Thistlewood Thornbury Thrapston Throckmorton Thurlow Tilbury Tindall Tiverton Todhunter Tollemache Towneley Trelawney Trenholme Trevelyan Trewin Trumbull Tunstall Turnbull Twyford Tyndale Tyrwhitt Ullswater Upcott Uppingham Urquhart Uxbridge Vandeleur Vansittart Varley Vaughan Ventris Verinder Vesey Villiers Vinall Voysey Wakefield Walsingham Wanstead Warburton Wardlaw Warnford Wavertree Weddell Welbeck Wellesley Wemyss"
+    s = s & " Wendover Wentworth Westenra Westerham Wetherall Whalley Wheatcroft Whichcote Whitcombe Whittaker Wickham Widdecombe Wilberforce Wilbraham Willoughby Wimborne Winchcombe Windlesham Wingrave Winstanley Winterbourne Wisbech Withington Wivenhoe Woburn Wollaston Woodbridge Woolnough Wootton Worsley Wrenbury Wrightson Wykeham Wyndham Yaxley Yeovil Youlgrave Younghusband Zouche"
     ' Entity / company words
-    s = s & " Aldrin Brightwater Cascadia Dunmore Everline Foxglen Granite Havenwood Ironbridge Juniper Kestrel Lumen Meridian Northgate Oakmont Pinnacle Quarry Redwood Silverpeak Torchlight Umbra Vantage Westmark Zephyr Ambrose Beacon Cobalt Drayton Emberly Falcon Gladstone Harborview Ivory Jetstream Kaldor Larkspur Monarch Nimbus Orion Pembroke"
-    s = s & " Arclight Brookstone Cairnwood Clearspring Crestline Dovewood Eastmark Eldergrove Ferncliff Fieldstone Foxbridge Glenrock Goldcrest Graystone Highpoint Hollowmere Ironwood Kirkwall Lakemont Lanternwood Ledgewood Marbury Millbrook Moorland Oakspire Overland Parkhurst Pinehurst Ravenwood Riverton Rockhaven Sablewood Sandpiper Shorewood Silvergate Solstice Springvale Starling Stonehaven Thornfield Timberline Wexmoor Whitfield Wildmere Windermere"
-    s = s & " Ashcroft Brightmoor Coppervale Dawnfield Emberton Frostgate Greenhollow Hartland Ironclad Keystone Lightwell Meadowgate Northwind Opalridge Pinecrest Quillmark Rosemont Stormont Truenorth Umberwood Vanguard Wellspring Yarrowvale"
+    s = s & " Aldrin Brightwater Cascadia Dunmore Everline Foxglen Granite Havenwood Ironbridge Juniper Kestrel Lumen Meridian Northgate Oakmont Pinnacle Quarry Redwood Silverpeak Torchlight Umbra Vantage Westmark Zephyr Ambrose Beacon Cobalt Drayton Emberly Falcon Gladstone Harborview Ivory Jetstream Kaldor Larkspur Monarch Nimbus Orion Pembroke Arclight Brookstone Cairnwood Clearspring Crestline Dovewood Eastmark Eldergrove Ferncliff"
+    s = s & " Fieldstone Foxbridge Glenrock Goldcrest Graystone Highpoint Hollowmere Ironwood Kirkwall Lakemont Lanternwood Ledgewood Marbury Millbrook Moorland Oakspire Overland Parkhurst Pinehurst Ravenwood Riverton Rockhaven Sablewood Sandpiper Shorewood Silvergate Solstice Springvale Starling Stonehaven Thornfield Timberline Wexmoor Whitfield Wildmere Windermere Ashcroft Brightmoor Coppervale Dawnfield Emberton Frostgate Greenhollow"
+    s = s & " Hartland Ironclad Keystone Lightwell Meadowgate Northwind Opalridge Pinecrest Quillmark Rosemont Stormont Truenorth Umberwood Vanguard Wellspring Yarrowvale"
     ' Street names
-    s = s & " Cedar Birch Willow Aspen Laurel Poplar Hawthorn Linden Chestnut Sequoia Cypress Alder Dogwood Hickory Rosewood Foxglove Tamarack Sorrel"
+    s = s & " Cedar Birch Willow Aspen Laurel Poplar Hawthorn Linden Chestnut Sequoia Cypress Alder Dogwood Hickory Rosewood Foxglove Tamarack Sorrel Bayberry Bilberry Blackthorn Bracken Buckthorn Catalpa Chicory Cinquefoil Clematis Comfrey Elderberry Fernbrake Gentian Hazelnut Hornbeam Ironbark Ivywood Marjoram Mulberry Myrtlewood Persimmon Quince Sagebrush Silverbell Snowberry Sumac Tanglewood Teasel Thornapple Trefoil Vervain Wintergreen"
+    s = s & " Witchhazel Yarrowleaf Yewberry"
     ' City / locality names
     s = s & " Fairview Brookfield Rosedale Elmwood Kingsbury Northvale Westbrook Clearwater Havenport Stonebridge Marlow Redhill Glenmore Oakhurst Bridgeton"
     PseudonymPool = Split(s)
@@ -3168,7 +3213,10 @@ End Function
 ' case-insensitively (they are lowercase and contain dots), unlike the
 ' capitalized name/place fakes in PseudonymPool.
 Private Function EmailDomainPool() As Variant
-    EmailDomainPool = Array("example.com", "mailhaven.net", "postbox.org", "letterbox.co")
+    Dim s As String
+    s = "example.com mailhaven.net postbox.org letterbox.co postbay.org mailglen.net inboxvale.com mailcrest.net penbox.org quillbox.net mailridge.com postgate.net letterfield.org inboxharbor.com mailbrook.net postvale.org letterglen.co mailstead.com postholm.net inboxmere.org mailwick.co postloft.com letterdale.net mailbourne.org postcairn.co inboxfern.com mailthorne.net postbriar.org letterhollow.co mailquarry.com postbeacon.net"
+    s = s & " inboxlantern.org"
+    EmailDomainPool = Split(s)
 End Function
 
 '==============================================================================
