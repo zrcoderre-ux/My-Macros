@@ -266,9 +266,11 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' running header carries the court identity and the party names, so a fake
     ' left there is the most damaging one to miss. (This used to pass
     ' bodyOnly:=True because the clearers only swept the body; they now sweep
-    ' every reviewed story, so a header flag can no longer be stranded.) The scan
-    ' is a few hundred native Find sweeps; screen redraw is already suspended for
-    ' the whole run by SuppressForReview, so they run fast and flicker-free.
+    ' every reviewed story, so a header flag can no longer be stranded.) The pool
+    ' is ~870 words, but a term absent from the story costs one in-memory InStr
+    ' and no Find at all (DeAnonymize.TermMaybePresent), so the sweeps that
+    ' actually run are the handful of words the document contains; screen redraw
+    ' is already suspended for the whole run by SuppressForReview.
     If DeAnonymize.HighlightResidualPseudonyms(Doc) > 0 Then issues = True
 
     ' Apostrophe conversion (always runs, no prompt)
