@@ -84,6 +84,11 @@ Attribute VB_Name = "DeAnonymize"
 '     replaced nor exported. See ForceInlineMarkup.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
+'   - SHARED WITH ExportMarkdown.bas. The Markdown reader below is the only one
+'     in this template, and the plain (no-anonymization) export macro wants the
+'     same output, so a short block of public entry points -- see "SHARED EXPORT
+'     ENTRY POINTS" -- hands it the reader, the writer, and the two path helpers.
+'     Everything anonymization-specific stays private to this module.
 '   - AUTOMATIC ON CLOSE: RunDeAnonymizeOnClose (called from the close-review in
 '     clsAppEvents) restores real names when a dated OneDrive tentative is
 '     closed -- once per document, and never for re-anonymize output. It keys
@@ -414,8 +419,7 @@ Public Sub ReAnonymizeTentative()
     ' SharePoint/OneDrive URL to the writable local sync folder; if the folder
     ' can't be resolved (never-saved doc) it falls back to Documents.
     Dim savePath As String, realPath As String
-    Dim outFolder As String: outFolder = DocFolderLocal(oDoc)
-    If Len(outFolder) = 0 Then outFolder = Environ$("USERPROFILE") & "\Documents"
+    Dim outFolder As String: outFolder = ExportFolderFor(oDoc)
     savePath = outFolder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
     realPath = outFolder & "\" & RealDocTitle(oDoc) & ".md"
 
@@ -649,7 +653,7 @@ End Function
 ' keeps them. No key values are swapped -- that is the whole point of the pair,
 ' the faked title names the shareable copy and this one names the local copy.
 Private Function RealDocTitle(ByVal oDoc As Document) As String
-    RealDocTitle = SanitizeFileTitle(DocBaseTitle(oDoc), "Original Draft")
+    RealDocTitle = DocumentExportTitle(oDoc, "Original Draft")
 End Function
 
 ' The document's filename without its extension; "" if the name can't be read.
@@ -681,8 +685,9 @@ End Function
 
 ' The document's full path, or "" if it can't be read. A never-saved document
 ' answers with a bare name ("Document1"), which is fine: the caller only uses
-' this to make sure an export doesn't land on the open file itself.
-Private Function SafeFullName(ByVal oDoc As Document) As String
+' this to make sure an export doesn't land on the open file itself. Public for
+' ExportMarkdown.bas, which makes the same check.
+Public Function SafeFullName(ByVal oDoc As Document) As String
     Dim s As String
     On Error Resume Next
     s = oDoc.FullName
@@ -757,6 +762,71 @@ Private Sub StripHyperlinksInRange(ByVal rng As Range)
         rng.Hyperlinks(i).Delete
     Next i
 End Sub
+
+'==============================================================================
+' SHARED EXPORT ENTRY POINTS  (used by ExportMarkdown.bas)
+'==============================================================================
+' The Markdown reader below is this template's only one, and the plain export
+' macro in ExportMarkdown.bas wants exactly what it produces -- same headings,
+' same {++inserted++} / {--deleted--} notation, same comment block. These four
+' wrappers (plus SafeFullName above) are the whole of what that module may call;
+' the reader's internals, the key reading, and the replacement passes all stay
+' private here.
+'
+' They are functions with arguments, so none of them shows up on Word's Alt+F8
+' macro list: the only macros a user runs from this module are still
+' DeAnonymizeTentative and ReAnonymizeTentative.
+
+' Read a document out as Markdown, with the tracked changes and comments it
+' carries. Wraps the three steps every export needs: force all markup inline
+' (Word hides deletions in balloons from Range.Text, so a change would silently
+' vanish from the file), capture the tracked changes, walk the body -- and hand
+' the user's markup view back afterwards, error or not. Makes no edit to the
+' document. markedOut reports how many tracked changes reached the file.
+'
+' hideAuthors labels commenters "Reviewer 1", "Reviewer 2" instead of naming
+' them; see DocToMarkdown for why the shareable copy needs that.
+Public Function BuildMarkdownFromDocument(ByVal oDoc As Document, _
+                                          ByVal hideAuthors As Boolean, _
+                                          Optional ByRef markedOut As Long) As String
+    Dim mv As MarkupView: mv = ForceInlineMarkup()
+
+    On Error GoTo Fail
+    Dim spans() As RevSpan
+    Dim nSpans As Long: nSpans = CaptureRevisions(oDoc, spans)
+    BuildMarkdownFromDocument = DocToMarkdown(oDoc, hideAuthors, spans, nSpans, _
+                                              markedOut)
+    RestoreMarkupView mv
+    Exit Function
+
+Fail:
+    Dim n As Long, d As String: n = Err.Number: d = Err.Description
+    RestoreMarkupView mv                 ' never leave the markup view forced
+    Err.Raise n, "BuildMarkdownFromDocument", d
+End Function
+
+' Write one export to disk as UTF-8 without a BOM.
+Public Sub WriteMarkdownFile(ByVal path As String, ByVal text As String)
+    WriteUtf8NoBom path, text
+End Sub
+
+' The folder an export belongs in: the document's own folder, mapped to the local
+' synced copy when Word reports a SharePoint/OneDrive URL (ADODB.Stream cannot
+' write to a URL). A never-saved document has no folder, so it falls back to
+' Documents.
+Public Function ExportFolderFor(ByVal oDoc As Document) As String
+    Dim f As String: f = DocFolderLocal(oDoc)
+    If Len(f) = 0 Then f = Environ$("USERPROFILE") & "\Documents"
+    ExportFolderFor = f
+End Function
+
+' The document's own title as a filename: its name without the extension, with
+' the characters Windows forbids folded to "-", or the caller's fallback when
+' nothing usable is left.
+Public Function DocumentExportTitle(ByVal oDoc As Document, _
+                                    ByVal fallback As String) As String
+    DocumentExportTitle = SanitizeFileTitle(DocBaseTitle(oDoc), fallback)
+End Function
 
 '==============================================================================
 ' MARKDOWN EXPORT  (read the in-memory, already-anonymized body out as Markdown)
