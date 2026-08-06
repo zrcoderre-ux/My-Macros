@@ -407,9 +407,23 @@ Private Function RemoveCitationLinks_Quiet(ByVal doc As Document) As Long
     Application.ScreenUpdating = False
     For i = doc.Hyperlinks.Count To 1 Step -1
         If Left$(doc.Hyperlinks(i).ScreenTip, Len(SCREENTIP_PREFIX)) = SCREENTIP_PREFIX Then
+            ' A link of ours whose display text IS its own address is not a
+            ' citation link -- it is the damage AddLink now refuses to do (Word
+            ' writing the search URL into the prose when handed an empty anchor).
+            ' A real citation link displays the citation, never a URL, so removing
+            ' the text along with the field is safe here and repairs a document
+            ' that was linked before that guard existed. Toggling the links off
+            ' would otherwise unlink the URL and leave it sitting in the sentence.
+            Dim stray As Boolean
+            stray = (StrComp(doc.Hyperlinks(i).Range.text, _
+                             doc.Hyperlinks(i).Address, vbTextCompare) = 0)
             Set rng = doc.Hyperlinks(i).Range
             doc.Hyperlinks(i).Delete
-            ResetLinkFormatting rng
+            If stray Then
+                rng.Delete
+            Else
+                ResetLinkFormatting rng
+            End If
             removed = removed + 1
         End If
     Next i
@@ -438,9 +452,49 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     Loop
     On Error GoTo Fail
 
+    ' An anchor with no text is the one input Word answers by writing the URL
+    ' into the document as literal text. Hyperlinks.Add reads a collapsed range
+    ' as "put a link HERE", and with no anchor text to display it uses the
+    ' address as the display text -- which is how a paragraph came back reading
+    ' "https://plus.lexis.com/search/?...%20450Saxon reserved whether ...", the
+    ' whole search URL pasted in front of the word it was supposed to link.
+    ' A caller holding an empty range has already failed to find its citation, so
+    ' there is nothing here to link: report the miss instead of writing to the
+    ' document. This is the only place in the module that adds a link, so the
+    ' check covers the offset path and both literal-text fallbacks at once.
+    If rng Is Nothing Then Exit Function
+    If rng.start >= rng.End Then Exit Function
+    Dim anchorText As String
+    anchorText = rng.text
+    If Len(anchorText) = 0 Then Exit Function
+
+    ' Anchoring inside an existing hyperlink is the other way the address ends up
+    ' as text: nesting a field in a field is not something Word does, and what it
+    ' does instead is unhelpful. It is also simply wrong -- the span is already
+    ' linked. LinkTextIfUnlinked makes this test before calling; the literal-text
+    ' fallback (FindAndLink) did not, and could land on a span an overlapping row
+    ' had just linked.
+    If rng.Hyperlinks.count > 0 Then Exit Function
+
     Dim h As Hyperlink
     Set h = ActiveDocument.Hyperlinks.Add(Anchor:=rng, Address:=url, _
         ScreenTip:=Left$(SCREENTIP_PREFIX & typ & " | " & url, 255))
+
+    ' Post-condition, because the two guards above are a diagnosis and the damage
+    ' this prevents is a URL sitting in the middle of a judge's prose: a citation
+    ' link must display the words it was anchored to, never the address. If Word
+    ' wrote the address anyway, take it straight back out -- drop the field first
+    ' so the delete removes text and not a half-dismantled field -- and report the
+    ' miss. An unlinked citation is a nuisance; a pasted search URL is a defect
+    ' the user has to find and clean up by hand.
+    If StrComp(h.Range.text, url, vbTextCompare) = 0 And _
+       StrComp(anchorText, url, vbTextCompare) <> 0 Then
+        Dim stray As Range
+        Set stray = h.Range.Duplicate
+        h.Delete                     ' unlink, leaving the text Word inserted
+        stray.Delete                 ' and remove that text
+        Exit Function                ' AddLink stays False
+    End If
 
     ' Word's Hyperlink style drops the case-name italic. Rather than try to
     ' preserve the prior formatting through the field boundary (fragile --
