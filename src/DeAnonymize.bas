@@ -46,8 +46,8 @@ Attribute VB_Name = "DeAnonymize"
 '                          it; the faked one is the shareable copy.
 '                          Both carry the document's markup: tracked insertions
 '                          and deletions as {++text++} / {--text--}, and comments
-'                          as [c1], [c2] ... with author and text collected at
-'                          the end. Commenters are NAMED only in the real-names
+'                          as [c1], [c2] ... with the passage each one marks, its
+'                          author, and its text collected at the end. Commenters are NAMED only in the real-names
 '                          file; see the note below.
 '                          Nothing is ever written back to the Word document:
 '                          the real->fake scrub runs in memory only (so italic
@@ -891,8 +891,10 @@ End Function
 '   - footnote/endnote reference marks        ->  [^n], with the note texts
 '                                                 collected into a trailing block
 '   - tracked insertions / deletions         ->  {++inserted++} / {--deleted--}
-'   - comments                               ->  [cn] at the anchor, with author
-'                                                 and text in a trailing block
+'   - comments                               ->  [cn] at the end of the passage
+'                                                 commented on, with that passage,
+'                                                 the author, and the comment text
+'                                                 in a trailing block
 ' Only the body is exported: headers/footers carry the court identity (already
 ' blanked) and have no place in Markdown. Formatting Markdown can't express
 ' (alignment, tab leaders in the caption, tables) is dropped but the text is
@@ -948,7 +950,9 @@ Private Function MarkupLegend(ByRef st As ExportState) As String
     End If
     If st.cmtCount > 0 Then
         If Len(parts) > 0 Then parts = parts & "; "
-        parts = parts & "comments as [c1], [c2] ... with the text collected at the end"
+        parts = parts & "comments as [c1], [c2] at the end of the passage each " & _
+                "one marks, with that passage, its author, and its text collected " & _
+                "at the end of the file"
     End If
     If Len(parts) = 0 Then Exit Function
 
@@ -1166,19 +1170,55 @@ Private Function AddCommentEntry(ByVal oDoc As Document, ByRef st As ExportState
     st.cmtCount = st.cmtCount + 1
     AddCommentEntry = st.cmtCount
 
-    Dim body As String, who As String
+    Dim body As String, who As String, scopeTxt As String
     On Error Resume Next
     If st.cmtCount <= oDoc.Comments.count Then
         body = FlattenNote(oDoc.Comments(st.cmtCount).Range.text)
         who = AuthorLabel(st, oDoc.Comments(st.cmtCount).Author)
+        scopeTxt = CommentScopeText(oDoc.Comments(st.cmtCount))
         If IsCommentReply(oDoc.Comments(st.cmtCount)) Then note = note & " (reply)"
     End If
     On Error GoTo 0
     If Len(who) = 0 Then who = "Unknown"
 
+    ' Quote what the comment is ON. The inline "[cn]" marker lands where Word
+    ' keeps the reference mark -- the END of the commented passage -- so it says
+    ' where a comment sits but nothing about how far back it reaches, and the
+    ' block on its own said nothing about location at all. The quoted passage is
+    ' what makes an entry findable: read the block, match the passage in the body.
+    Dim onWhat As String
+    If Len(scopeTxt) > 0 Then onWhat = ", on """ & scopeTxt & """"
+
     If Len(st.cmtList) > 0 Then st.cmtList = st.cmtList & vbCrLf
-    st.cmtList = st.cmtList & "- **[c" & st.cmtCount & "]** " & who & note & _
-                 " -- " & body
+    st.cmtList = st.cmtList & "- **[c" & st.cmtCount & "]** " & who & onWhat & _
+                 note & " -- " & body
+End Function
+
+' The passage a comment is attached to, flattened to one line for the block.
+'
+' Nothing new enters the file: a comment's scope is body text this same export
+' has already written out, read from the same in-memory document -- so in the
+' anonymized copy it is quoted with the pseudonyms already swapped in, exactly as
+' the prose above it reads.
+Private Function CommentScopeText(ByVal cmt As Comment) As String
+    Dim s As String
+    On Error Resume Next
+    s = cmt.scope.text
+    On Error GoTo 0
+
+    s = FlattenNote(s)
+    If Len(s) = 0 Then Exit Function
+
+    ' A commenter who selected a whole paragraph gets it elided from the middle:
+    ' both ENDS are what a reader matches against the body, and the middle of a
+    ' quoted paragraph is just the paragraph again.
+    Const SCOPE_HEAD As Long = 48
+    Const SCOPE_TAIL As Long = 40
+    If Len(s) > SCOPE_HEAD + SCOPE_TAIL + 5 Then
+        s = Left$(s, SCOPE_HEAD) & " ... " & Right$(s, SCOPE_TAIL)
+    End If
+
+    CommentScopeText = s
 End Function
 
 ' The name to print for a commenter: the real one locally, a stable "Reviewer n"
@@ -2060,8 +2100,9 @@ Private Function MarkupNote(ByVal nComments As Long, _
     Dim s As String
     s = vbCrLf & vbCrLf & "Carried " & markedReal & " tracked change(s) and " & _
         nComments & " comment(s) into both files: insertions as {++text++}, " & _
-        "deletions as {--text--}, comments as [c1], [c2] ... with the text " & _
-        "collected at the end."
+        "deletions as {--text--}, comments as [c1], [c2] at the end of the " & _
+        "passage each one marks, with that passage, the author, and the comment " & _
+        "text collected at the end."
     If nComments > 0 Then
         s = s & " Commenters are named in the real-names file only -- the " & _
             "anonymized one labels them ""Reviewer 1"", ""Reviewer 2"", because " & _

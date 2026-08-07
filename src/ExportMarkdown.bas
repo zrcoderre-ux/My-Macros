@@ -16,8 +16,10 @@ Attribute VB_Name = "ExportMarkdown"
 '   - bold / italic runs                ->  **bold**, *italic*, ***both***
 '   - footnotes / endnotes              ->  [^n], texts collected at the end
 '   - tracked insertions / deletions    ->  {++inserted++} / {--deleted--}
-'   - comments                          ->  [c1], [c2] ... with author and text
-'                                           collected at the end
+'   - comments                          ->  [c1], [c2] at the end of the passage
+'                                           each marks, with that passage, the
+'                                           author, and the comment text collected
+'                                           at the end
 '
 ' MACRO YOU RUN:
 '   ExportDocumentToMarkdown - write <document name>.md next to the document.
@@ -141,6 +143,7 @@ Private Function MarkupSummary(ByVal marked As Long, _
 
     MarkupSummary = "Carried " & marked & " tracked change(s) and " & nComments & _
                     " comment(s) into the file: insertions as {++text++}, " & _
-                    "deletions as {--text--}, comments as [c1], [c2] ... with " & _
-                    "the author and text collected at the end."
+                    "deletions as {--text--}, comments as [c1], [c2] at the end " & _
+                    "of the passage each one marks, with that passage, the " & _
+                    "author, and the comment text collected at the end."
 End Function
