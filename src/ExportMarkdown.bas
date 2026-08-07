@@ -42,6 +42,12 @@ Attribute VB_Name = "ExportMarkdown"
 '   - Re-running REPLACES the previous export of the same document. That is the
 '     point of naming the file after the document -- the .md tracks the .docx --
 '     and the result dialog says when a file was replaced rather than created.
+'   - QUARANTINE FOLDER. If the document's folder holds a subfolder named
+'     "Original Text (real names - do not share)", the export goes in there
+'     instead -- this file is real-names text, and that folder is where the
+'     re-anonymize macro puts its real-names copy too. Without such a subfolder
+'     the export lands next to the document. The macro never creates the folder;
+'     its presence is the switch.
 '   - For a document in a synced OneDrive / SharePoint folder the export lands in
 '     the local synced copy of that folder (Word reports the folder as an https
 '     URL, which can't be written to). A never-saved document falls back to
@@ -68,14 +74,20 @@ Public Sub ExportDocumentToMarkdown()
     wasSaved = oDoc.Saved
     On Error GoTo ErrH
 
+    ' This export is real-names text by definition, so it follows the same rule as
+    ' re-anonymize's real-names copy: the quarantine subfolder when the document's
+    ' folder has one, alongside the document when it doesn't.
+    Dim outFolder As String
+    outFolder = DeAnonymize.RealNamesFolderFor(oDoc)
+
     Dim outPath As String
-    outPath = DeAnonymize.ExportFolderFor(oDoc) & "\" & _
+    outPath = outFolder & "\" & _
               DeAnonymize.DocumentExportTitle(oDoc, "Document") & ".md"
 
     ' A .md opened in Word would export onto itself: same folder, same base name,
     ' same extension. Step aside rather than overwrite the file being read.
     If StrComp(outPath, DeAnonymize.SafeFullName(oDoc), vbTextCompare) = 0 Then
-        outPath = DeAnonymize.ExportFolderFor(oDoc) & "\" & _
+        outPath = outFolder & "\" & _
                   DeAnonymize.DocumentExportTitle(oDoc, "Document") & " (export).md"
     End If
 
