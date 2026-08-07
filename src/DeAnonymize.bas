@@ -82,6 +82,17 @@ Attribute VB_Name = "DeAnonymize"
 '     of the run: with deletions drawn in balloons, Word hides them from Find AND
 '     from Range.Text, so a real name inside a tracked deletion would be neither
 '     replaced nor exported. See ForceInlineMarkup.
+'   - AUTOSAVE. Re-anonymize turns AutoSave off before its first edit and back on
+'     at the end. This is not about what the macro writes -- it only ever writes
+'     .md files -- but about where it does its work: the real -> fake scrub runs
+'     ON the open document, so for the length of the run that window holds
+'     pseudonyms, and AutoSave would push them into the real cloud file within
+'     seconds. The .docx itself is never saved after the scrub (the window is
+'     closed unsaved and reopened from disk), so the file keeps its real names.
+'     AutoSave is restored on the REOPENED document, and only if it was on to
+'     begin with. The one path that deliberately leaves it off is the one where
+'     the window still holds fake content -- a failed close, or an error mid-run.
+'     Each ending says which happened.
 '   - Reads .xlsx via Excel automation. The rare JSON fallback that PDF-Linker
 '     writes only when openpyxl is missing is not supported.
 '   - SHARED WITH ExportMarkdown.bas. The Markdown reader below is the only one
@@ -462,6 +473,11 @@ Public Sub ReAnonymizeTentative()
     Dim prevTrack As Boolean: prevTrack = oDoc.TrackRevisions
     oDoc.TrackRevisions = False
     On Error Resume Next
+    ' Remember whether AutoSave was on, so the reloaded window can be handed back
+    ' in the state the user keeps it in rather than in the state this macro needed
+    ' it in. Reading it can raise (older Word, or a document somewhere AutoSave
+    ' doesn't cover); False then means "turn nothing on later", the safe answer.
+    Dim prevAutoSave As Boolean: prevAutoSave = oDoc.AutoSaveOn
     oDoc.AutoSaveOn = False              ' must precede edits: AutoSave would
     On Error GoTo ErrH                   ' push real->fake edits to the ORIGINAL
     Dim bStateSaved As Boolean: bStateSaved = True   ' ErrH may now restore
@@ -564,8 +580,24 @@ Public Sub ReAnonymizeTentative()
         Err.Clear
         modMain.gSkipCloseChecks = False
         If closedOK Then
-            Documents.Open FileName:=origPath, AddToRecentFiles:=False
-            reloaded = (Err.Number = 0)
+            Dim reDoc As Document
+            Set reDoc = Documents.Open(FileName:=origPath, AddToRecentFiles:=False)
+            reloaded = (Err.Number = 0) And Not (reDoc Is Nothing)
+            Err.Clear
+
+            ' Hand AutoSave back. The document it was turned off on is gone --
+            ' closed without saving -- and this is a fresh open of the untouched
+            ' original, so there is no fake content left anywhere for AutoSave to
+            ' push. It has to be set explicitly rather than left to Word: the
+            ' toggle is remembered per file, so without this the user's own
+            ' tentative quietly stops auto-saving from here on, and the macro
+            ' would have changed a setting it was only ever meant to borrow.
+            ' Only turned back ON, never off: someone who keeps AutoSave off
+            ' (prevAutoSave False) keeps it off.
+            If reloaded And prevAutoSave Then
+                reDoc.AutoSaveOn = True
+                Err.Clear
+            End If
         End If
         On Error GoTo 0
     End If
@@ -578,18 +610,38 @@ Public Sub ReAnonymizeTentative()
         oDoc.TrackRevisions = prevTrack     ' keep AutoSave OFF: window holds fakes
     End If
 
+    ' AutoSave is off for the whole run because the scrub happens IN the open
+    ' document (see above), and AutoSave would push those fake names straight into
+    ' the real cloud file. Say what became of it, in each of the three endings:
+    ' silently borrowing a user's setting and not saying whether it came back is
+    ' how someone ends up working for a week with AutoSave off.
     Dim tail As String
     If reloaded Then
         tail = "Your Word window has been reloaded from the original file " & _
                "(real names), which was never modified."
+        If prevAutoSave Then
+            tail = tail & " AutoSave was off while the scrub ran and has been " & _
+                   "turned back on for the reloaded document."
+        End If
     ElseIf closedOK Then
         tail = "The scratch window (fake names) was discarded, but the original " & _
                "could not be reopened automatically -- open it yourself from:" & _
                vbCrLf & origPath & vbCrLf & "It was never modified."
+        If prevAutoSave Then
+            tail = tail & " Check that AutoSave is on once you reopen it: it was " & _
+                   "turned off while the scrub ran, and this run never got the " & _
+                   "chance to turn it back on."
+        End If
     Else
         tail = "This window still holds the re-anonymized (fake) content and was " & _
                "NOT saved -- close it WITHOUT saving to discard those edits and " & _
                "get back to the untouched original."
+        If prevAutoSave Then
+            tail = tail & " AutoSave has been LEFT off on purpose: with fake " & _
+                   "names in this window, turning it back on now is what would " & _
+                   "push them into the real file. Turn it on again once you have " & _
+                   "closed this window without saving and reopened the original."
+        End If
     End If
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
@@ -624,7 +676,8 @@ ErrH:
            "If the error happened before the .md files were written, this window " & _
            "may hold partial re-anonymize edits that were NOT saved anywhere -- " & _
            "close it WITHOUT saving to get back to the untouched original. " & _
-           "(AutoSave was left off for the same reason.) The real-names export " & _
+           "(AutoSave was left off for the same reason -- turn it back on once " & _
+           "you have reopened the original.) The real-names export " & _
            "is written before any name is swapped, so it may exist even though " & _
            "the anonymized one does not -- check for both before sharing " & _
            "anything.", _
