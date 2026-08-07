@@ -8,11 +8,13 @@ Attribute VB_Name = "MacroKeyBindings"
 ' module.
 '
 ' KeyCode modifiers: Control = 512, Shift = 256.
-' Letter/keys used here: V = 86, T = 84, C = 67, H = 72, D = 68, Spacebar = 32.
+' Letter/keys used here: V = 86, T = 84, C = 67, H = 72, D = 68, K = 75,
+' Spacebar = 32.
 '
-' Note: Ctrl+Shift+V, Ctrl+Shift+C, Ctrl+Shift+D, and Ctrl+Shift+Space are
-' built-in Word shortcuts; these assignments deliberately override them in this
-' template.
+' Note: Ctrl+Shift+V, Ctrl+Shift+C, Ctrl+Shift+D, Ctrl+Shift+K, and
+' Ctrl+Shift+Space are built-in Word shortcuts; these assignments deliberately
+' override them in this template. (Ctrl+Shift+K is Word's small caps, which
+' nothing here uses; the letter is worth more as "Keep with next".)
 ' ============================================================
 Option Explicit
 
@@ -54,6 +56,10 @@ Private Sub ApplyMacroKeyBindings()
     ' Ctrl+Shift+D -> DeAnonymizeTentative   (restore real names from the key)
     KeyBindings.Add KeyCode:=BuildKeyCode(68, 512, 256), _
                     KeyCategory:=1, Command:="DeAnonymizeTentative"
+
+    ' Ctrl+Shift+K -> FormatHeadings   (Keep with next + underline roman titles)
+    KeyBindings.Add KeyCode:=BuildKeyCode(75, 512, 256), _
+                    KeyCategory:=1, Command:="FormatHeadings"
 
     ' Don't mark the template dirty; bindings reapply on the next launch anyway.
     ThisDocument.Saved = True

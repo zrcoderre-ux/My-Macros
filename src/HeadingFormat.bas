@@ -13,7 +13,11 @@ Attribute VB_Name = "HeadingFormat"
 ' take keep-with-next but no underline, which is the house rule.
 '
 ' MACRO YOU RUN:
-'   FormatHeadings - do both, everywhere in the body, and report what changed.
+'   FormatHeadings - Ctrl+Shift+K: do both, everywhere in the body, and report
+'                    what changed. (K for "Keep with next"; the binding is
+'                    registered in MacroKeyBindings and overrides Word's small
+'                    caps.) Must stay a no-argument Public Sub to remain
+'                    key-bindable.
 '
 ' WHAT COUNTS AS A HEADING. One per paragraph, and it must NOT end in closing
 ' punctuation -- a heading names a subject, it doesn't close a sentence, so a
