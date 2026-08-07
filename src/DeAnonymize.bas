@@ -2100,17 +2100,34 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     ' read the open copy and leave it open rather than closing it under them.
     Dim wb As Object
     Dim wasOpen As Boolean: wasOpen = False
+    Dim nameTaken As Boolean: nameTaken = False
     On Error Resume Next
     Set wb = xl.Workbooks(Mid$(path, InStrRev(path, "\") + 1))
     If Not wb Is Nothing Then
         If StrComp(wb.FullName, path, vbTextCompare) = 0 Then
             wasOpen = True
         Else
+            ' Same name, different file: ANOTHER case's key is open.
+            nameTaken = True
             Set wb = Nothing
         End If
     End If
     On Error GoTo Fail
+
     If wb Is Nothing Then
+        ' Excel will not open two workbooks with the same FILE NAME at once, no
+        ' matter which folders they came from -- and every case's key is named
+        ' pseudonym_key.xlsx. So with another case's key open in the user's Excel,
+        ' opening this one there fails outright and the macro reports that it
+        ' could not read any mappings, which reads as a bad key rather than as a
+        ' workbook open in another window. Excel INSTANCES are separate, so give
+        ' ours a private one, where the name is free.
+        If nameTaken And Not startedXl Then
+            Set xl = CreateObject("Excel.Application")
+            startedXl = True
+            xl.Visible = False
+            xl.DisplayAlerts = False
+        End If
         Set wb = xl.Workbooks.Open(FileName:=path, ReadOnly:=True, AddToMRU:=False)
     End If
 
