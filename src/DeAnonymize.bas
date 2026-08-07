@@ -82,6 +82,13 @@ Attribute VB_Name = "DeAnonymize"
 '     of the run: with deletions drawn in balloons, Word hides them from Find AND
 '     from Range.Text, so a real name inside a tracked deletion would be neither
 '     replaced nor exported. See ForceInlineMarkup.
+'   - WHERE THE EXPORTS GO. The anonymized (shareable) .md is written next to the
+'     document. The real-names .md goes to a subfolder named "Original Text (real
+'     names - do not share)" when the document's folder has one, and next to the
+'     document when it doesn't -- so a folder that gets shared wholesale can keep
+'     the real-names text one level down, out of it. The subfolder is never
+'     created by the macro; its presence is the switch. Re-running overwrites both
+'     files rather than adding copies.
 '   - AUTOSAVE. Re-anonymize turns AutoSave off before its first edit and back on
 '     at the end. This is not about what the macro writes -- it only ever writes
 '     .md files -- but about where it does its work: the real -> fake scrub runs
@@ -112,6 +119,12 @@ Option Explicit
 ' PDF-Linker writes "pseudonym_key.xlsx"; match that plus any de-duplicated
 ' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
 Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
+
+' Where a real-names export goes when the document's folder has a subfolder by
+' this name: a quarantine the user opts into by creating the folder. See
+' RealNamesFolderFor -- the macro reads it, never creates it.
+Private Const REAL_TEXT_SUBFOLDER As String = _
+    "Original Text (real names - do not share)"
 
 ' Leftover pseudonym-pool words are flagged in pink (wdPink) after de-anonymize.
 ' Pink is distinct from the close-review's green/turquoise (which get auto-
@@ -421,27 +434,37 @@ Public Sub ReAnonymizeTentative()
 
     Dim i As Long
 
-    ' Run-and-done: no Save-As dialog and no confirmation. Both .md files are
-    ' written automatically next to the document (its local synced folder).
-    ' The anonymized one is named with the FAKED version of the document's own
-    ' title, so the export is recognizable but carries pseudonyms, not real
-    ' party names; the real-names one keeps the document's own title. Each
-    ' file's name therefore says which version it holds. DocFolderLocal maps a
+    ' Run-and-done: no Save-As dialog and no confirmation. The anonymized .md is
+    ' written next to the document (its local synced folder), named with the FAKED
+    ' version of the document's own title, so the export is recognizable but
+    ' carries pseudonyms rather than real party names. The real-names .md keeps
+    ' the document's own title and goes to the quarantine subfolder when the
+    ' document's folder has one, otherwise alongside the document as before (see
+    ' RealNamesFolderFor). Each file's name says which version it holds, and now
+    ' the real-names copy's FOLDER says it too. DocFolderLocal maps a
     ' SharePoint/OneDrive URL to the writable local sync folder; if the folder
     ' can't be resolved (never-saved doc) it falls back to Documents.
+    '
+    ' Re-running overwrites both files in place -- same document, same key, same
+    ' names -- which is what keeps an export current with the document instead of
+    ' littering the folder with dated copies. (WriteUtf8NoBom saves with
+    ' adSaveCreateOverWrite.)
     Dim savePath As String, realPath As String
     Dim outFolder As String: outFolder = ExportFolderFor(oDoc)
+    Dim realFolder As String: realFolder = RealNamesFolderFor(oDoc)
     savePath = outFolder & "\" & FakedDocTitle(oDoc, maps, nMaps) & ".md"
-    realPath = outFolder & "\" & RealDocTitle(oDoc) & ".md"
+    realPath = realFolder & "\" & RealDocTitle(oDoc) & ".md"
 
     ' A title that holds no real value from the key fakes to itself, and then
     ' both exports claim the same path: one would silently overwrite the other,
     ' leaving a file whose name says nothing about which version survived. Same
     ' hazard if the export would land on the open document itself. Either way,
-    ' push the real-names copy aside rather than clobber anything.
+    ' push the real-names copy aside rather than clobber anything. (With the
+    ' quarantine subfolder in use the two are in different folders, so the first
+    ' test can no longer fire -- but it still can without one.)
     If StrComp(savePath, realPath, vbTextCompare) = 0 Or _
        StrComp(realPath, SafeFullName(oDoc), vbTextCompare) = 0 Then
-        realPath = outFolder & "\" & RealDocTitle(oDoc) & " (real names).md"
+        realPath = realFolder & "\" & RealDocTitle(oDoc) & " (real names).md"
     End If
 
     ' From this point on, no automatic de-anonymize for the rest of the Word
@@ -871,6 +894,28 @@ Public Function ExportFolderFor(ByVal oDoc As Document) As String
     Dim f As String: f = DocFolderLocal(oDoc)
     If Len(f) = 0 Then f = Environ$("USERPROFILE") & "\Documents"
     ExportFolderFor = f
+End Function
+
+' The folder a REAL-NAMES export belongs in. When the document's own folder holds
+' a subfolder named REAL_TEXT_SUBFOLDER, the real-names copy goes in there --
+' quarantined, one folder deep, out of the folder things get shared from -- and
+' the shareable anonymized copy stays where it always was, next to the document.
+' With no such subfolder the real-names copy also stays next to the document,
+' exactly as before.
+'
+' The subfolder is never CREATED: its presence is the switch. A folder the user
+' has to make deliberately is a folder they know the meaning of, and a macro that
+' silently invented one named "do not share" would be making a filing decision on
+' their behalf in a folder they may share wholesale.
+Public Function RealNamesFolderFor(ByVal oDoc As Document) As String
+    Dim base As String: base = ExportFolderFor(oDoc)
+    RealNamesFolderFor = base
+
+    On Error Resume Next
+    Dim quarantine As String: quarantine = base & "\" & REAL_TEXT_SUBFOLDER
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso.FolderExists(quarantine) Then RealNamesFolderFor = quarantine
+    On Error GoTo 0
 End Function
 
 ' The document's own title as a filename: its name without the extension, with
