@@ -65,8 +65,16 @@ Attribute VB_Name = "DeAnonymize"
 '     longer full name.
 '   - Court identity (Department 515, Judge Honorable Alison Mackenzie, Judicial
 '     Assistant Steve Temblador, Courtroom Assistant Nancy Quintanilla) lives in
-'     the header. De-anonymize fills it in; re-anonymize blanks it (keeping the
-'     labels). See ApplyCourtIdentity.
+'     the page header. De-anonymize fills it in there, which is the point of it.
+'     Re-anonymize does NOT: it blanks the identity in the BODY (keeping the
+'     labels) and leaves the header alone. See ApplyCourtIdentity.
+'   - RE-ANONYMIZE NEVER TOUCHES A HEADER OR FOOTER -- not the court identity, not
+'     the hyperlink strip, not the real -> fake pass. The export reads the body
+'     and nothing else (DocToMarkdown does not walk a header), so nothing up there
+'     can reach either file and rewriting it changes no output; all it would do is
+'     put one more edit into the judge's open document, which the reload at the
+'     end of the run then has to undo. De-anonymize still covers headers, because
+'     that direction is editing the real document on purpose.
 '   - Re-anonymize leaves names inside italic text alone: cited case names in a
 '     brief are italicized, so a party surname that also names a published case
 '     (e.g. "Nash v. Superior Court") is preserved rather than rewritten. This
@@ -540,8 +548,9 @@ Public Sub ReAnonymizeTentative()
     ' link targets can carry real names/paths the Markdown must not contain,
     ' and a real name inside a link's display text is replaced more reliably
     ' once the link is gone. Runs on the in-memory scratch copy only -- the
-    ' original file (reloaded below) keeps its links.
-    StripHyperlinksEverywhere oDoc
+    ' original file (reloaded below) keeps its links. HEADERS EXCEPTED: see the
+    ' court-identity call below for why this run leaves them entirely alone.
+    StripHyperlinksEverywhere oDoc, True
 
     ' Capture the tracked changes ONCE, here: after the hyperlink strip and before
     ' the first replacement. Both exports mark this same set, so the anonymized
@@ -572,12 +581,20 @@ Public Sub ReAnonymizeTentative()
     ' also names a published case isn't rewritten in the shared copy. No custom
     ' undo record (it overflows and crashes Word on large documents).
     Dim distinctHits As Long
-    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, False, True, "Re-anonymizing")
+    distinctHits = ReplaceAllMappings(oDoc, maps, nMaps, False, True, _
+                                      "Re-anonymizing", , , True)
 
-    ' Blank the court-identity header (Department 515, judge, courtroom staff) so
-    ' the shared copy doesn't reveal them. ApplyCourtIdentity also scrubs the
-    ' body, which is what the Markdown export reads.
-    ApplyCourtIdentity oDoc, False
+    ' Blank the court identity (Department 515, judge, courtroom staff) in the
+    ' BODY only.
+    '
+    ' THE PAGE HEADER IS LEFT ALONE, here and in the two passes above. The
+    ' Markdown export reads the body and nothing else -- DocToMarkdown never walks
+    ' a header or footer -- so nothing in a header can reach either file, and
+    ' rewriting one changes no output. What it does do is edit the judge's own
+    ' open document: every header edit is one more thing riding on the reload at
+    ' the end of this run putting the window back. The body sweep stays, because
+    ' the body IS the export: an identity typed into the prose still goes.
+    ApplyCourtIdentity oDoc, False, True
 
     ' Read the now-anonymized body out as Markdown and write it to disk (UTF-8,
     ' no BOM). This and the real-names export above are the only files the macro
@@ -696,8 +713,10 @@ Public Sub ReAnonymizeTentative()
     End If
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
-           " value(s) and blanked the court-identity header." & _
+           " value(s) and blanked the court identity in the exported text." & _
            KeepRowsNote(nKeepRows) & vbCrLf & vbCrLf & _
+           "Your document's page header was not touched: the export reads the " & _
+           "body only, so nothing in a header reaches either file." & vbCrLf & vbCrLf & _
            "Names inside italic cited case names were left as-is so a party " & _
            "surname that also names a published case wasn't rewritten -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
@@ -832,21 +851,27 @@ End Function
 ' name inside a link's display text has survived a replacement pass in practice
 ' (a linked "(Surname Decl.)" record cite), and for the Markdown export the
 ' link targets themselves can leak real names or file paths.
-Private Sub StripHyperlinksEverywhere(ByVal oDoc As Document)
+Private Sub StripHyperlinksEverywhere(ByVal oDoc As Document, _
+                                      Optional ByVal skipHeaders As Boolean = False)
     On Error Resume Next
 
     CitationLinker.RemoveAllHyperlinks_Quiet oDoc
     Application.ScreenUpdating = False   ' the helper re-enables it on exit
 
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then StripHyperlinksInRange hf.Range
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then StripHyperlinksInRange hf.Range
-        Next hf
-    Next sec
+    ' skipHeaders is re-anonymize: nothing in a header is exported, so a link
+    ' target there can't leak into the shared file and stripping it would only
+    ' edit the open document to no purpose. See that call site.
+    If Not skipHeaders Then
+        Dim sec As Section, hf As HeaderFooter
+        For Each sec In oDoc.Sections
+            For Each hf In sec.Headers
+                If hf.Exists Then StripHyperlinksInRange hf.Range
+            Next hf
+            For Each hf In sec.Footers
+                If hf.Exists Then StripHyperlinksInRange hf.Range
+            Next hf
+        Next sec
+    End If
 
     If oDoc.Footnotes.count > 0 Then StripHyperlinksInRange oDoc.StoryRanges(wdFootnotesStory)
     If oDoc.Endnotes.count > 0 Then StripHyperlinksInRange oDoc.StoryRanges(wdEndnotesStory)
@@ -2603,7 +2628,8 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
                                      ByVal protect As Boolean, _
                                      ByVal progressLabel As String, _
                                      Optional ByRef nFragmentSkips As Long = 0, _
-                                     Optional ByRef nAmbiguous As Long = 0) As Long
+                                     Optional ByRef nAmbiguous As Long = 0, _
+                                     Optional ByVal skipHeaders As Boolean = False) As Long
     ' "handled", not "done": Done: is used as a label elsewhere in this module.
     ' "pass", not "round": Round is a built-in VBA function.
     Dim handled() As Boolean
@@ -2697,7 +2723,7 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
         ' Collect the stories (and their text) ONCE per pass, not once per
         ' mapping. Rebuilding on pass 2 also refreshes the cached text so a term
         ' revealed by an earlier insertion is seen.
-        nStories = CollectStories(oDoc, stories)
+        nStories = CollectStories(oDoc, stories, skipHeaders)
         If nStories = 0 Then Exit For
         passHits = 0
 
@@ -2781,7 +2807,8 @@ End Function
 ' chain while replacing inside the loop can destabilize and crash Word. The
 ' collections used here (Sections, Footnotes, Shapes with per-shape TextRange)
 ' stay valid across text replacement, so iterating them is safe.
-Private Function CollectStories(ByVal oDoc As Document, ByRef arr() As StoryRef) As Long
+Private Function CollectStories(ByVal oDoc As Document, ByRef arr() As StoryRef, _
+                                Optional ByVal skipHeaders As Boolean = False) As Long
     Dim n As Long: n = 0
     ReDim arr(1 To 64)
 
@@ -2791,15 +2818,20 @@ Private Function CollectStories(ByVal oDoc As Document, ByRef arr() As StoryRef)
     AddStory arr, n, oDoc.content
 
     ' Headers and footers, section by section. Empty ones are dropped by AddStory.
-    Dim sec As Section, hf As HeaderFooter
-    For Each sec In oDoc.Sections
-        For Each hf In sec.Headers
-            If hf.Exists Then AddStory arr, n, hf.Range
-        Next hf
-        For Each hf In sec.Footers
-            If hf.Exists Then AddStory arr, n, hf.Range
-        Next hf
-    Next sec
+    ' skipHeaders is re-anonymize: the Markdown export reads the body and nothing
+    ' else, so a name in the header can't reach the shared file and rewriting it
+    ' only edits a document this run is about to throw away. See the call site.
+    If Not skipHeaders Then
+        Dim sec As Section, hf As HeaderFooter
+        For Each sec In oDoc.Sections
+            For Each hf In sec.Headers
+                If hf.Exists Then AddStory arr, n, hf.Range
+            Next hf
+            For Each hf In sec.Footers
+                If hf.Exists Then AddStory arr, n, hf.Range
+            Next hf
+        Next sec
+    End If
 
     ' Footnotes / endnotes, only when present (accessing the story otherwise errors).
     If oDoc.Footnotes.count > 0 Then AddStory arr, n, oDoc.StoryRanges(wdFootnotesStory)
@@ -3354,11 +3386,16 @@ End Function
 '   re-anonymize (restore = False) blanks them out     (real  -> blank)
 ' Each field is a (real, blank) pair; the blank keeps the label/anchor so the
 ' header layout is preserved and the toggle round-trips exactly.
-Private Sub ApplyCourtIdentity(ByVal oDoc As Document, ByVal restore As Boolean)
-    SwapCourtField oDoc, restore, "Courthouse, Department 515", "Courthouse, Department"
-    SwapCourtField oDoc, restore, "Judge: Honorable Alison Mackenzie", "Judge:"
-    SwapCourtField oDoc, restore, "Judicial Assistant: Steve Temblador", "Judicial Assistant:"
-    SwapCourtField oDoc, restore, "Courtroom Assistant: Nancy Quintanilla", "Courtroom Assistant:"
+Private Sub ApplyCourtIdentity(ByVal oDoc As Document, ByVal restore As Boolean, _
+                               Optional ByVal bodyOnly As Boolean = False)
+    SwapCourtField oDoc, restore, bodyOnly, _
+                   "Courthouse, Department 515", "Courthouse, Department"
+    SwapCourtField oDoc, restore, bodyOnly, _
+                   "Judge: Honorable Alison Mackenzie", "Judge:"
+    SwapCourtField oDoc, restore, bodyOnly, _
+                   "Judicial Assistant: Steve Temblador", "Judicial Assistant:"
+    SwapCourtField oDoc, restore, bodyOnly, _
+                   "Courtroom Assistant: Nancy Quintanilla", "Courtroom Assistant:"
 End Sub
 
 ' Toggle one court-identity field across the body and headers/footers.
@@ -3366,6 +3403,7 @@ End Sub
 '                   isn't already present, so re-running never doubles it.
 '   restore = False (re-anonymize): real -> blank; idempotent on its own.
 Private Sub SwapCourtField(ByVal oDoc As Document, ByVal restore As Boolean, _
+                            ByVal bodyOnly As Boolean, _
                             ByVal realText As String, ByVal blankText As String)
     Dim findText As String, replText As String
     If restore Then
@@ -3375,6 +3413,12 @@ Private Sub SwapCourtField(ByVal oDoc As Document, ByVal restore As Boolean, _
     End If
 
     CourtSwapInRange oDoc.content, findText, replText, restore, realText
+
+    ' bodyOnly is re-anonymize: the court identity lives in the page header, the
+    ' export never reads a header, and blanking one edits the judge's own file to
+    ' change nothing in the output. The body sweep above stays, because the body
+    ' IS the export -- if the identity was typed into the prose, it still goes.
+    If bodyOnly Then Exit Sub
 
     Dim sec As Section, hf As HeaderFooter
     For Each sec In oDoc.Sections
