@@ -19,6 +19,12 @@ Attribute VB_Name = "HeadingFormat"
 '                    caps.) Must stay a no-argument Public Sub to remain
 '                    key-bindable.
 '
+' ALSO RUN FOR YOU: ToggleCitationLinks (Ctrl+Shift+H) calls the same pass on
+' every press, silently, so the shortcut in constant use carries the headings
+' too. That call is one way -- toggling the links back off does not undo the
+' heading formatting. ApplyHeadingFormat is the entry point it uses: same work,
+' no dialog, counts returned instead.
+'
 ' WHAT COUNTS AS A HEADING. One per paragraph, and it must NOT end in closing
 ' punctuation -- a heading names a subject, it doesn't close a sentence, so a
 ' final ".", ",", ":", ";", ")" or quote mark is the tell that a paragraph is
@@ -76,21 +82,76 @@ Public Sub FormatHeadings()
     Set oDoc = ActiveDocument
     If oDoc Is Nothing Then Exit Sub
 
-    ' One named record so the whole pass reverses on a single Ctrl+Z. Closed in
-    ' CleanUp whatever happens -- an undo record left open crashes the next run.
+    Dim nHeads As Long, nKept As Long, nLined As Long, errText As String
+    nHeads = ApplyHeadingFormat(oDoc, nKept, nLined, errText)
+
+    If Len(errText) > 0 Then
+        MsgBox "Format Headings stopped early:" & vbCrLf & vbCrLf & errText & _
+               vbCrLf & vbCrLf & "Whatever it had already changed is in one " & _
+               "undo record, so Ctrl+Z puts the document back.", _
+               vbExclamation, "Format Headings"
+        Exit Sub
+    End If
+
+    If nHeads = 0 Then
+        MsgBox "No headings found." & vbCrLf & vbCrLf & _
+               "A heading is a line that does NOT end in closing punctuation " & _
+               "and is either ALL CAPS or labelled ""I."" / ""A."" / ""1."". " & _
+               "A heading that ends in a period reads as prose.", _
+               vbInformation, "Format Headings"
+        Exit Sub
+    End If
+
+    MsgBox "Found " & nHeads & " heading(s)." & vbCrLf & vbCrLf & _
+           "Applied ""keep with next"" to " & nKept & " that did not have it." & _
+           vbCrLf & _
+           "Underlined the title of " & nLined & " roman-numeral heading(s), " & _
+           "leaving the numeral itself alone." & vbCrLf & vbCrLf & _
+           "Ctrl+Z reverses the whole run.", _
+           vbInformation, "Format Headings"
+End Sub
+
+'==============================================================================
+' THE PASS  (no dialog, so another macro can fold it into its own run)
+'==============================================================================
+' Walk the body, format every heading, and report what was found and changed.
+' Public and dialog-free because ToggleCitationLinks runs it on every press --
+' the user works through that shortcut, so the headings ride along with it.
+'
+' Returns how many headings were found. nKept and nLined report what actually
+' CHANGED, so a second pass over a formatted document reports nothing rather than
+' claiming the same work twice. errText comes back non-empty only if the pass
+' stopped early; the counts still hold for what it managed first.
+'
+' Each paragraph is isolated: one Word won't format must not end the pass, and a
+' caller that is really running a different macro must not inherit an error from
+' this one.
+Public Function ApplyHeadingFormat(ByVal oDoc As Document, _
+                                   ByRef nKept As Long, ByRef nLined As Long, _
+                                   Optional ByRef errText As String) As Long
+    nKept = 0
+    nLined = 0
+    errText = ""
+    If oDoc Is Nothing Then Exit Function
+
+    ' One named record so the whole pass reverses on a single Ctrl+Z -- closed in
+    ' Done whatever happens, because an undo record left open crashes the next
+    ' run. It is started here rather than in the macro above so the pass carries
+    ' its own undo whichever macro runs it, and never nests inside another.
     Dim oUndo As UndoRecord
     Set oUndo = Application.UndoRecord
     oUndo.StartCustomRecord "Format Headings"
-    On Error GoTo CleanUp
+    On Error GoTo Done
 
     Application.ScreenUpdating = False
 
-    Dim nHeads As Long, nKept As Long, nLined As Long
+    Dim nHeads As Long
     Dim prevLetter As String
     prevLetter = ""
 
     Dim p As Paragraph
     For Each p In oDoc.content.Paragraphs
+        On Error Resume Next
         If Not InTable(p) Then
             Dim raw As String
             raw = ParaText(p)
@@ -113,42 +174,19 @@ Public Sub FormatHeadings()
                 End If
             End If
         End If
+        Err.Clear
+        On Error GoTo Done
     Next p
 
-CleanUp:
-    Dim eN As Long: eN = Err.Number
-    Dim eD As String: eD = Err.Description
+Done:
+    If Err.Number <> 0 Then errText = "Error " & Err.Number & ": " & Err.Description
     On Error Resume Next
     Application.ScreenUpdating = True
     oUndo.EndCustomRecord
     On Error GoTo 0
 
-    If eN <> 0 Then
-        MsgBox "Format Headings stopped after an error:" & vbCrLf & vbCrLf & _
-               "Error " & eN & ": " & eD & vbCrLf & vbCrLf & _
-               "Whatever it had already changed is in one undo record, so " & _
-               "Ctrl+Z puts the document back.", _
-               vbExclamation, "Format Headings"
-        Exit Sub
-    End If
-
-    If nHeads = 0 Then
-        MsgBox "No headings found." & vbCrLf & vbCrLf & _
-               "A heading is a line that does NOT end in closing punctuation " & _
-               "and is either ALL CAPS or labelled ""I."" / ""A."" / ""1."". " & _
-               "A heading that ends in a period reads as prose.", _
-               vbInformation, "Format Headings"
-        Exit Sub
-    End If
-
-    MsgBox "Found " & nHeads & " heading(s)." & vbCrLf & vbCrLf & _
-           "Applied ""keep with next"" to " & nKept & " that did not have it." & _
-           vbCrLf & _
-           "Underlined the title of " & nLined & " roman-numeral heading(s), " & _
-           "leaving the numeral itself alone." & vbCrLf & vbCrLf & _
-           "Ctrl+Z reverses the whole run.", _
-           vbInformation, "Format Headings"
-End Sub
+    ApplyHeadingFormat = nHeads
+End Function
 
 '==============================================================================
 ' DETECTION

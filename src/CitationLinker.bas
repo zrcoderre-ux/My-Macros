@@ -12,7 +12,9 @@ Attribute VB_Name = "CitationLinker"
 '   RemoveCitationLinks    - remove only the links this tool added (recommended)
 '   RemoveAllHyperlinks    - remove EVERY hyperlink in the body (asks first)
 '   ToggleCitationLinks    - Ctrl+Shift+H: remove this tool's links if any are
-'                            present, otherwise apply them
+'                            present, otherwise apply them. Also runs the heading
+'                            pass (HeadingFormat.ApplyHeadingFormat) on every
+'                            press, one way -- see the note at that call.
 '
 ' SETUP: edit the four Const lines below, then put word_cite_bridge.py and
 ' citation_extractor.py together in SCRIPT_DIR. See SETUP.md.
@@ -308,6 +310,23 @@ Public Sub ToggleCitationLinks()
     Else
         AddCitationLinks
     End If
+
+    ' Heading housekeeping rides along on every press: "keep with next" on every
+    ' section heading and the underline on roman-numeral titles. This shortcut is
+    ' the one in constant use, so the headings come with it rather than costing a
+    ' second keystroke. FormatHeadings (Ctrl+Shift+K) still runs the same pass on
+    ' its own, and reports what it did; here it is silent, because the dialog
+    ' above has already reported the press.
+    '
+    ' ONE WAY. Removing the citation links does NOT take the heading formatting
+    ' back out: that formatting is how the document is meant to read, not
+    ' something this macro owns and lends.
+    '
+    ' AFTER the link work, deliberately. Removing a link re-derives the underline
+    ' around it (ResetLinkFormatting), which would clear an underline applied
+    ' before it -- so the heading pass has to be the last word, not the first.
+    Dim nKept As Long, nLined As Long
+    HeadingFormat.ApplyHeadingFormat doc, nKept, nLined
 End Sub
 
 
