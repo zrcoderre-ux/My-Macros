@@ -270,10 +270,22 @@ Private Sub RemoveCitationLinks()
     Dim doc As Document
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
-    Dim removed As Long
-    removed = RemoveCitationLinks_Quiet(doc)
-    MsgBox "Removed " & removed & " citation link" & IIf(removed = 1, "", "s") & ".", _
-           vbInformation, "Citation Linker"
+    Dim removed As Long, strayLeft As Long
+    removed = RemoveCitationLinks_Quiet(doc, strayLeft)
+
+    ' Say so when a URL was left in the text. Silence would read as a clean
+    ' removal while a search URL sits in the middle of a sentence.
+    Dim leftover As String
+    If strayLeft > 0 Then
+        leftover = vbCrLf & vbCrLf & strayLeft & " of them displayed a search URL " & _
+                   "instead of a citation -- damage from an older build of this " & _
+                   "macro -- and Word would not delete that text (it refuses some " & _
+                   "deletions in a document carrying tracked changes). The links " & _
+                   "are gone; delete the leftover URL text by hand."
+    End If
+
+    MsgBox "Removed " & removed & " citation link" & IIf(removed = 1, "", "s") & "." & _
+           leftover, vbInformation, "Citation Linker"
 End Sub
 
 
@@ -391,6 +403,7 @@ End Function
 ' True if the document contains at least one hyperlink added by this tool
 ' (identified by the SCREENTIP_PREFIX tag). Used by ToggleCitationLinks.
 Private Function HasCitationLinks(ByVal doc As Document) As Boolean
+    On Error Resume Next          ' the toggle asks this first: never fail here
     Dim i As Long
     For i = 1 To doc.Hyperlinks.Count
         If Left$(doc.Hyperlinks(i).ScreenTip, Len(SCREENTIP_PREFIX)) = SCREENTIP_PREFIX Then
@@ -401,32 +414,76 @@ Private Function HasCitationLinks(ByVal doc As Document) As Boolean
 End Function
 
 
-Private Function RemoveCitationLinks_Quiet(ByVal doc As Document) As Long
+' strayLeft reports links whose display text was a URL that Word would not let us
+' delete -- see the repair below. The field is gone either way; the text is not.
+Private Function RemoveCitationLinks_Quiet(ByVal doc As Document, _
+                                           Optional ByRef strayLeft As Long) As Long
     Dim removed As Long
     Dim i As Long, rng As Range
     Application.ScreenUpdating = False
+
+    ' Per-link isolation, and never a raw error out of here. This runs from the
+    ' toggle and from the top of AddCitationLinks, in BOTH cases before the caller
+    ' has armed a handler -- so anything raised here reached the user as a bare
+    ' runtime-error dialog and left ScreenUpdating off with it. One link Word
+    ' won't let us touch must not cost the user the other forty.
+    On Error Resume Next
     For i = doc.Hyperlinks.Count To 1 Step -1
-        If Left$(doc.Hyperlinks(i).ScreenTip, Len(SCREENTIP_PREFIX)) = SCREENTIP_PREFIX Then
+        Dim tip As String
+        tip = ""
+        tip = doc.Hyperlinks(i).ScreenTip
+        If Left$(tip, Len(SCREENTIP_PREFIX)) = SCREENTIP_PREFIX Then
             ' A link of ours whose display text IS its own address is not a
             ' citation link -- it is the damage AddLink now refuses to do (Word
             ' writing the search URL into the prose when handed an empty anchor).
-            ' A real citation link displays the citation, never a URL, so removing
-            ' the text along with the field is safe here and repairs a document
-            ' that was linked before that guard existed. Toggling the links off
-            ' would otherwise unlink the URL and leave it sitting in the sentence.
+            ' A real citation link displays the citation, never a URL, so that
+            ' text goes with the field, which repairs a document linked before
+            ' that guard existed. Otherwise the toggle would unlink the URL and
+            ' leave it sitting in the sentence.
+            Dim addr As String
+            addr = ""
+            addr = doc.Hyperlinks(i).Address
             Dim stray As Boolean
-            stray = (StrComp(doc.Hyperlinks(i).Range.text, _
-                             doc.Hyperlinks(i).Address, vbTextCompare) = 0)
-            Set rng = doc.Hyperlinks(i).Range
-            doc.Hyperlinks(i).Delete
+            stray = (Len(addr) > 0)
             If stray Then
-                rng.Delete
-            Else
-                ResetLinkFormatting rng
+                stray = (StrComp(doc.Hyperlinks(i).Range.text, addr, vbTextCompare) = 0)
             End If
-            removed = removed + 1
+
+            Set rng = Nothing
+            Set rng = doc.Hyperlinks(i).Range
+            Err.Clear
+            doc.Hyperlinks(i).Delete
+
+            If Err.Number = 0 Then
+                removed = removed + 1
+
+                Dim wiped As Boolean
+                wiped = False
+                If stray Then
+                    ' Re-read the text before deleting any of it. Unlinking moves
+                    ' text around, and a range that no longer holds the URL is a
+                    ' range that now holds the user's prose -- deleting on faith
+                    ' would eat a sentence. Word also refuses some deletions
+                    ' outright (4198 "Command failed" -- a document carrying
+                    ' tracked changes is the case seen in practice), so this is a
+                    ' try, not an assumption: on refusal the text stays and the
+                    ' link formatting is cleared like any other removal.
+                    If StrComp(rng.text, addr, vbTextCompare) = 0 Then
+                        Err.Clear
+                        rng.Delete
+                        wiped = (Err.Number = 0)
+                        Err.Clear
+                    End If
+                    If Not wiped Then strayLeft = strayLeft + 1
+                End If
+                If Not wiped Then ResetLinkFormatting rng
+            End If
+            Err.Clear
         End If
     Next i
+    Err.Clear
+    On Error GoTo 0
+
     Application.ScreenUpdating = True
     RemoveCitationLinks_Quiet = removed
 End Function
