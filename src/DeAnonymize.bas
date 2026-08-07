@@ -225,6 +225,22 @@ Private Type RevSpan
     kind As Long
 End Type
 
+' Where one comment attaches, held as a LIVE Range for the same reason RevSpan is
+' (the replacement pass runs between the two exports and moves every position).
+'
+' The export used to find comments by their reference mark -- Chr(5) in the body
+' text -- the way it finds footnotes by Chr(2). Word's MODERN comments do not put
+' that mark in the text stream at all: Range.Text comes back without it, every
+' comment misses the walk, and a document's whole set lands in the trailing block
+' labelled "(not anchored in the body)" with nothing saying where any of them
+' belongs. Comment.Scope is the anchor Word actually keeps -- the range the
+' comment was written on -- so the export indexes those positions and places each
+' marker itself instead of waiting for a mark that never comes.
+Private Type CmtAnchor
+    rng As Range
+    idx As Long                     ' which comment, by Comments collection index
+End Type
+
 ' Everything one Markdown export accumulates as it walks the body: the footnote
 ' and comment blocks it is building, the tracked-change index the walk consults
 ' per character, and the commenters it has seen. Passed ByRef through the export
@@ -232,8 +248,13 @@ End Type
 Private Type ExportState
     fnCount As Long                 ' footnotes/endnotes consumed so far
     fnList As String                ' the trailing "[^n]: ..." block
-    cmtCount As Long                ' comments consumed so far
+    cmtCount As Long                ' comments written into the block so far
     cmtList As String               ' the trailing comment block
+    cmtDone() As Boolean            ' by comment index: already in the block
+    anchorPos() As Long             ' comment anchors, sorted by position
+    anchorNum() As Long             ' the comment each anchor belongs to
+    nAnchors As Long
+    anchorCursor As Long            ' the walk only ever moves this forward
     hideAuthors As Boolean          ' shareable copy: "Reviewer 1", not a name
     authors() As String             ' commenters in first-seen order
     nAuthors As Long
@@ -530,6 +551,12 @@ Public Sub ReAnonymizeTentative()
     Dim spans() As RevSpan
     Dim nSpans As Long: nSpans = CaptureRevisions(oDoc, spans)
 
+    ' Comment anchors, captured here for the same reasons and used the same way:
+    ' both exports place the same markers, and the live Ranges follow the text as
+    ' the replacement pass moves it.
+    Dim anchors() As CmtAnchor
+    Dim nAnchors As Long: nAnchors = CaptureComments(oDoc, anchors)
+
     ' Export the real-names copy FIRST, before a single value is swapped. Same
     ' Markdown reader, same hyperlink-stripped body, same tracked changes, so the
     ' pair differs only in the names themselves -- the anonymized file can be read
@@ -537,7 +564,8 @@ Public Sub ReAnonymizeTentative()
     ' which is cheap next to the replacement pass.
     SetPhase "Writing the real-names export", "Re-Anonymize"
     Dim markedReal As Long
-    WriteUtf8NoBom realPath, DocToMarkdown(oDoc, False, spans, nSpans, markedReal)
+    WriteUtf8NoBom realPath, DocToMarkdown(oDoc, False, spans, nSpans, _
+                                           anchors, nAnchors, markedReal)
 
     ' Reverse direction: replace each real value with its fake. protectCitations
     ' leaves names inside italic cited authorities alone, so a party surname that
@@ -557,7 +585,7 @@ Public Sub ReAnonymizeTentative()
     SetPhase "Writing the anonymized export", "Re-Anonymize"
     Dim md As String, markedFake As Long
     ' True: commenters as "Reviewer n". Same spans as the real-names export.
-    md = DocToMarkdown(oDoc, True, spans, nSpans, markedFake)
+    md = DocToMarkdown(oDoc, True, spans, nSpans, anchors, nAnchors, markedFake)
     WriteUtf8NoBom savePath, md
     SetPhase ""                          ' don't strand a progress message
 
@@ -870,8 +898,10 @@ Public Function BuildMarkdownFromDocument(ByVal oDoc As Document, _
     On Error GoTo Fail
     Dim spans() As RevSpan
     Dim nSpans As Long: nSpans = CaptureRevisions(oDoc, spans)
+    Dim anchors() As CmtAnchor
+    Dim nAnchors As Long: nAnchors = CaptureComments(oDoc, anchors)
     BuildMarkdownFromDocument = DocToMarkdown(oDoc, hideAuthors, spans, nSpans, _
-                                              markedOut)
+                                              anchors, nAnchors, markedOut)
     RestoreMarkupView mv
     Exit Function
 
@@ -955,10 +985,13 @@ Private Function DocToMarkdown(ByVal oDoc As Document, _
                                ByVal hideAuthors As Boolean, _
                                ByRef spans() As RevSpan, _
                                ByVal nSpans As Long, _
+                               ByRef anchors() As CmtAnchor, _
+                               ByVal nAnchors As Long, _
                                Optional ByRef markedOut As Long) As String
     Dim st As ExportState
     st.hideAuthors = hideAuthors
     BuildRevisionIndex st, spans, nSpans
+    BuildCommentIndex oDoc, st, anchors, nAnchors
 
     Dim sb As String
     Dim firstBlock As Boolean: firstBlock = True
@@ -1080,7 +1113,11 @@ Private Function InlineMarkdown(ByVal oDoc As Document, ByVal wr As Range, _
     boldUniform = (wr.Font.Bold <> wdUndefined)
     italicUniform = (wr.Font.Italic <> wdUndefined)
 
-    If boldUniform And italicUniform And Not SpanTouches(st, wr.Start, wr.End) Then
+    ' A paragraph carrying a comment anchor is walked for the same reason one
+    ' carrying a tracked change is: the marker has to land at a position, and the
+    ' fast path emits the whole paragraph as one string with no positions in it.
+    If boldUniform And italicUniform And Not SpanTouches(st, wr.Start, wr.End) _
+       And Not AnchorTouches(st, wr.Start, wr.End) Then
         InlineMarkdown = Emph(MapText(oDoc, txt, st), _
                               (wr.Font.Bold = True), (wr.Font.Italic = True))
     Else
@@ -1102,6 +1139,20 @@ Private Function WalkRuns(ByVal oDoc As Document, ByVal wr As Range, _
     For i = 1 To n
         Dim ch As Range: Set ch = wr.Characters(i)
         Dim c As String: c = ch.text
+
+        ' Comment markers for anchors that end before this character -- flushed
+        ' first, so "[cn]" sits outside the emphasis of the run it follows and
+        ' can't be swallowed by a **bold** or *italic* wrapper.
+        Dim marks As String: marks = AnchorMarkersAt(oDoc, st, ch.Start)
+        If Len(marks) > 0 Then
+            If Len(runText) > 0 Then
+                result = result & EmitRun(runText, curB, curI, curR)
+                runText = ""
+                curB = -1: curI = -1: curR = -1
+            End If
+            result = result & marks
+        End If
+
         If c = Chr$(2) Or c = Chr$(5) Then  ' footnote/endnote or comment mark
             If Len(runText) > 0 Then
                 result = result & EmitRun(runText, curB, curI, curR)
@@ -1129,7 +1180,14 @@ Private Function WalkRuns(ByVal oDoc As Document, ByVal wr As Range, _
         End If
     Next i
     If Len(runText) > 0 Then result = result & EmitRun(runText, curB, curI, curR)
-    WalkRuns = result
+
+    ' A comment on the end of the paragraph anchors PAST its last character, so
+    ' the loop never reaches that position. Flush those markers here or they fall
+    ' through to the unanchored sweep -- and a comment on a sentence's last words
+    ' is the commonest comment there is. The bound reaches one past the range's
+    ' end to take in a scope that swallowed the paragraph mark (what selecting a
+    ' whole paragraph gives you); otherwise that marker would open the NEXT block.
+    WalkRuns = result & AnchorMarkersAt(oDoc, st, wr.End + 1)
 End Function
 
 ' One finished run: emphasis markers first, then the tracked-change wrapper
@@ -1185,43 +1243,87 @@ End Function
 '------------------------------------------------------------------------------
 ' COMMENTS
 '------------------------------------------------------------------------------
-' Consume the next comment (document order, the same way notes are consumed) and
-' return its "[cn]" inline marker. Word marks each comment's anchor in the body
-' text with Chr(5), replies included, so the n-th mark is the n-th comment.
+' The Chr(5) comment reference mark, for the documents that still carry one.
+' Classic Word put a mark in the body text for every comment, replies included,
+' so the n-th mark was the n-th comment; MODERN comments are anchored without it,
+' which is why the scope index above exists and takes precedence here.
 Private Function EmitComment(ByVal oDoc As Document, ByRef st As ExportState) As String
-    EmitComment = "[c" & AddCommentEntry(oDoc, st, "") & "]"
+    ' With a scope index built, placement comes from the anchor positions and this
+    ' mark is redundant -- emitting here too would give the comment two markers
+    ' and, worse, number them by two different schemes. Modern Word doesn't write
+    ' this mark at all; a document that still carries one falls through to the
+    ' original document-order consumption below.
+    If st.nAnchors > 0 Then Exit Function
+
+    Dim idx As Long: idx = NextUndoneComment(st)
+    If idx = 0 Then Exit Function
+    EmitComment = "[c" & AddCommentEntry(oDoc, st, idx, "") & "]"
 End Function
 
-' Any comment the walk never met -- one anchored in a header, a text box, or left
-' unanchored by an edit -- still goes into the block, flagged. A comment silently
-' missing from the export is the one failure worth being noisy about: the reader
-' has no way to notice it isn't there.
+' The lowest-numbered comment with no entry yet, or 0 when they all have one.
+Private Function NextUndoneComment(ByRef st As ExportState) As Long
+    On Error Resume Next
+    Dim i As Long
+    For i = LBound(st.cmtDone) To UBound(st.cmtDone)
+        If Not st.cmtDone(i) Then
+            NextUndoneComment = i
+            Exit Function
+        End If
+    Next i
+End Function
+
+' Any comment the walk never placed -- one anchored in a header or a text box,
+' one whose scope Word wouldn't give up, one on a paragraph the export drops --
+' still goes into the block, flagged, with its quoted passage where there is one.
+' A comment silently missing from the export is the one failure worth being noisy
+' about: the reader has no way to notice it isn't there.
 Private Sub AppendUnanchoredComments(ByVal oDoc As Document, ByRef st As ExportState)
     Dim total As Long
     On Error Resume Next
     total = oDoc.Comments.count
     On Error GoTo 0
 
-    Do While st.cmtCount < total
-        AddCommentEntry oDoc, st, " (not anchored in the body)"
-    Loop
+    Dim i As Long
+    For i = 1 To total
+        If Not CommentIsDone(st, i) Then
+            AddCommentEntry oDoc, st, i, " (no anchor found in the body)"
+        End If
+    Next i
 End Sub
+
+' Whether comment idx already has an entry. Out-of-range answers True so a bad
+' index can never start a second entry.
+Private Function CommentIsDone(ByRef st As ExportState, ByVal idx As Long) As Boolean
+    CommentIsDone = True
+    On Error Resume Next
+    If idx < LBound(st.cmtDone) Or idx > UBound(st.cmtDone) Then Exit Function
+    CommentIsDone = st.cmtDone(idx)
+End Function
 
 ' Append one comment to the trailing block and return its number. The block is a
 ' Markdown list, not "[cn]: text" -- that shape is a link reference definition,
 ' which a renderer swallows whole.
 Private Function AddCommentEntry(ByVal oDoc As Document, ByRef st As ExportState, _
-                                 ByVal note As String) As Long
+                                 ByVal idx As Long, ByVal note As String) As Long
+    AddCommentEntry = idx
+    If CommentIsDone(st, idx) Then Exit Function
+
+    ' The marker number is the comment's OWN index, not a running count, so an
+    ' inline "[c7]" and the block's "[c7]" name the same comment however the two
+    ' were reached -- the walk places anchored comments in document order, the
+    ' unanchored sweep picks up the rest afterwards.
+    On Error Resume Next
+    st.cmtDone(idx) = True
+    On Error GoTo 0
     st.cmtCount = st.cmtCount + 1
-    AddCommentEntry = st.cmtCount
 
     Dim body As String, who As String, scopeTxt As String
     On Error Resume Next
-    If st.cmtCount <= oDoc.Comments.count Then
-        body = FlattenNote(oDoc.Comments(st.cmtCount).Range.text)
-        who = AuthorLabel(st, oDoc.Comments(st.cmtCount).Author)
-        scopeTxt = CommentScopeText(oDoc.Comments(st.cmtCount))
-        If IsCommentReply(oDoc.Comments(st.cmtCount)) Then note = note & " (reply)"
+    If idx >= 1 And idx <= oDoc.Comments.count Then
+        body = FlattenNote(oDoc.Comments(idx).Range.text)
+        who = AuthorLabel(st, oDoc.Comments(idx).Author)
+        scopeTxt = CommentScopeText(oDoc.Comments(idx))
+        If IsCommentReply(oDoc.Comments(idx)) Then note = note & " (reply)"
     End If
     On Error GoTo 0
     If Len(who) = 0 Then who = "Unknown"
@@ -1333,6 +1435,123 @@ Private Function CaptureRevisions(ByVal oDoc As Document, _
     On Error GoTo 0
 
     CaptureRevisions = n
+End Function
+
+' Capture where each comment attaches, ONCE, alongside the tracked changes and for
+' the same reasons: both exports mark the same anchors, and a live Range survives
+' the replacement pass moving the text under it.
+'
+' Only comments anchored in the MAIN BODY are indexed -- that is all the export
+' walks. One anchored in a header or a text box keeps its entry in the trailing
+' block, flagged, which is the honest answer for a comment on text this file
+' doesn't contain.
+Private Function CaptureComments(ByVal oDoc As Document, _
+                                 ByRef anchors() As CmtAnchor) As Long
+    Dim n As Long: n = 0
+    ReDim anchors(1 To 32)
+
+    On Error Resume Next
+    Dim total As Long: total = oDoc.Comments.count
+    Dim i As Long
+    For i = 1 To total
+        Dim sc As Range
+        Set sc = Nothing
+        Set sc = oDoc.Comments(i).scope
+        If Not sc Is Nothing Then
+            If sc.StoryType = wdMainTextStory Then
+                n = n + 1
+                If n > UBound(anchors) Then _
+                    ReDim Preserve anchors(1 To UBound(anchors) + 32)
+                Set anchors(n).rng = sc.Duplicate
+                anchors(n).idx = i
+            End If
+        End If
+    Next i
+    On Error GoTo 0
+
+    CaptureComments = n
+End Function
+
+' Turn the captured anchors into a position index for one export, reading each
+' Range's CURRENT end -- the same trick BuildRevisionIndex plays, and for the same
+' reason: by the anonymized export, every position has moved by however much the
+' replacements shifted the text, and Word has already done that arithmetic.
+'
+' The marker goes at the END of the commented passage, which is where Word itself
+' draws a comment's reference: the passage reads normally and the marker follows
+' it, the way a footnote reference does.
+Private Sub BuildCommentIndex(ByVal oDoc As Document, ByRef st As ExportState, _
+                              ByRef anchors() As CmtAnchor, ByVal nAnchors As Long)
+    st.nAnchors = 0
+    st.anchorCursor = 1
+    ReDim st.anchorPos(1 To 32)
+    ReDim st.anchorNum(1 To 32)
+
+    ' One flag per comment, anchored or not, so an entry is never written twice.
+    Dim total As Long
+    On Error Resume Next
+    total = oDoc.Comments.count
+    On Error GoTo 0
+    If total < 1 Then total = 1
+    ReDim st.cmtDone(1 To total)
+
+    On Error Resume Next
+    Dim i As Long
+    For i = 1 To nAnchors
+        Dim p As Long: p = -1
+        p = anchors(i).rng.End
+        If p >= 0 Then
+            If st.nAnchors + 1 > UBound(st.anchorPos) Then
+                ReDim Preserve st.anchorPos(1 To UBound(st.anchorPos) + 32)
+                ReDim Preserve st.anchorNum(1 To UBound(st.anchorNum) + 32)
+            End If
+            st.nAnchors = st.nAnchors + 1
+
+            ' Keep the index sorted by position: the walk's cursor only ever moves
+            ' forward, so one out-of-order entry would be stepped past and its
+            ' marker lost. Word returns comments in document order, so this shifts
+            ' nothing in practice -- but a reply can share its parent's anchor.
+            Dim j As Long: j = st.nAnchors
+            Do While j > 1
+                If st.anchorPos(j - 1) <= p Then Exit Do
+                st.anchorPos(j) = st.anchorPos(j - 1)
+                st.anchorNum(j) = st.anchorNum(j - 1)
+                j = j - 1
+            Loop
+            st.anchorPos(j) = p
+            st.anchorNum(j) = anchors(i).idx
+        End If
+    Next i
+    On Error GoTo 0
+End Sub
+
+' True when a comment anchor lands in this range, so the paragraph has to be
+' walked character by character instead of taking InlineMarkdown's fast path --
+' the marker needs a position, and the fast path has none.
+Private Function AnchorTouches(ByRef st As ExportState, _
+                               ByVal rStart As Long, ByVal rEnd As Long) As Boolean
+    Do While st.anchorCursor <= st.nAnchors
+        If st.anchorPos(st.anchorCursor) >= rStart Then Exit Do
+        st.anchorCursor = st.anchorCursor + 1
+    Loop
+    If st.anchorCursor > st.nAnchors Then Exit Function
+
+    AnchorTouches = (st.anchorPos(st.anchorCursor) <= rEnd)
+End Function
+
+' The "[cn]" markers for every anchor at or before pos, in order, each one adding
+' its comment to the trailing block as it goes. Returns "" when none are due,
+' which is every character of an uncommented paragraph.
+Private Function AnchorMarkersAt(ByVal oDoc As Document, ByRef st As ExportState, _
+                                 ByVal pos As Long) As String
+    Dim res As String
+    Do While st.anchorCursor <= st.nAnchors
+        If st.anchorPos(st.anchorCursor) > pos Then Exit Do
+        res = res & "[c" & _
+              AddCommentEntry(oDoc, st, st.anchorNum(st.anchorCursor), "") & "]"
+        st.anchorCursor = st.anchorCursor + 1
+    Loop
+    AnchorMarkersAt = res
 End Function
 
 ' Turn the captured spans into a position index for one export, reading each
