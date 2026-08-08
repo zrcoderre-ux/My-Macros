@@ -186,11 +186,18 @@ End Function
 ' prompt. Runs every check and returns aggregate flags so
 ' clsAppEvents can show the full summary prompt.
 ' ============================================================
+' issues means SOMETHING IS HIGHLIGHTED. Nothing sets it without having marked
+' the text it is reporting -- "Document contains possible issues" over a document
+' with no mark in it sends the user hunting for something that was never there.
+' A finding that cannot be highlighted goes into notes instead, which the caller
+' shows as its own message saying what was found and why it isn't marked.
 Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
                                 ByRef issues As Boolean, _
-                                ByRef userHighlights As Boolean)
+                                ByRef userHighlights As Boolean, _
+                                Optional ByRef notes As String)
     issues = False
     userHighlights = False
+    notes = ""
 
     ' Everything below runs from inside DocumentBeforeClose. Background
     ' repagination, check-as-you-type and AutoSave each re-process the document
@@ -242,8 +249,18 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
         Next qStory
         If Not last Is Nothing Then
             last.HighlightColorIndex = wdBrightGreen
+            issues = True
+        Else
+            ' Counted an odd number but could not locate one to flag. This is the
+            ' one check whose count and whose highlight come from separate
+            ' passes, so it is the one that could report an issue with nothing
+            ' marked -- which is exactly how it was read: a warning, and then a
+            ' document with no highlight anywhere in it. Say what was counted
+            ' instead of borrowing the highlight dialog's wording.
+            notes = notes & "- An odd number of straight quotation marks (""), " & _
+                    "so one is unclosed -- but it could not be located to " & _
+                    "highlight. Search for "" yourself." & vbCrLf
         End If
-        issues = True
     End If
 
     ' Square brackets, curly braces, parentheses
