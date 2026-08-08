@@ -307,8 +307,7 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     summary = Tally(nQuote, "unmatched smart quote") & _
               Tally(nBracket, "unmatched bracket or parenthesis") & _
               Tally(nBlank, "placeholder word " & Chr(34) & "blank" & Chr(34)) & _
-              Tally(nSpace, "double space -- often at the end of a line, where " & _
-                            "the green mark is easy to miss") & _
+              Tally(nSpace, "double space") & _
               Tally(nFake, "possible leftover pseudonym")
 
     ' Apostrophe conversion (always runs, no prompt)
@@ -335,6 +334,69 @@ Cleanup:
                vbExclamation, "Document Check"
     End If
 End Sub
+
+' Pull a range's start back until it takes in the last character that will
+' actually SHOW the highlight -- the period ending the sentence, in the case this
+' was written for: "... 205, 209.)  ".
+'
+' Two things get walked past on the way. More whitespace, because four trailing
+' spaces would otherwise just move the mark onto another space and leave it
+' invisible again. And closing punctuation, because a mark that stops on the ")"
+' of ".)" sits on the thinnest glyph on the line -- carrying on to the period
+' puts it on the punctuation a reader is looking for anyway, and takes the
+' bracket along with it.
+'
+' Stops at the paragraph start, and gives up after a run long enough that the
+' paragraph is nothing but whitespace, where there is no character to reach.
+Private Sub ExtendToPrecedingCharacter(ByVal rng As Range)
+    On Error Resume Next
+
+    Dim pStart As Long: pStart = rng.Paragraphs(1).Range.start
+    Dim guard As Long
+
+    Do While rng.start > pStart
+        rng.MoveStart wdCharacter, -1
+        guard = guard + 1
+        If guard > 40 Then Exit Do
+        If Not SkipPastForMark(rng.Characters(1).text) Then Exit Do
+    Loop
+End Sub
+
+' Characters worth stepping over to reach one the highlight will read on:
+' whitespace (nothing to paint) and the closers that trail a sentence.
+Private Function SkipPastForMark(ByVal c As String) As Boolean
+    If Len(c) = 0 Then Exit Function
+    Select Case c
+        Case " ", Chr(160), vbTab
+            SkipPastForMark = True
+        Case ")", "]", "}", Chr(34), "'", ChrW(8221), ChrW(8217)
+            SkipPastForMark = True
+    End Select
+End Function
+
+' True when nothing but whitespace separates this range from the end of its
+' paragraph -- i.e. highlighting it would colour characters Word does not draw.
+Private Function IsTrailingWhitespace(ByVal rng As Range) As Boolean
+    On Error Resume Next
+
+    Dim p As Range
+    Set p = rng.Paragraphs(1).Range
+    If p Is Nothing Then Exit Function
+
+    Dim tailEnd As Long: tailEnd = p.End - 1        ' before the paragraph mark
+    If tailEnd <= rng.End Then
+        IsTrailingWhitespace = True                 ' the match ends the paragraph
+        Exit Function
+    End If
+
+    Dim tail As Range
+    Set tail = p.Duplicate
+    tail.SetRange rng.End, tailEnd
+
+    Dim t As String
+    t = Replace(tail.text, Chr(160), " ")
+    IsTrailingWhitespace = (Len(Trim$(t)) = 0)
+End Function
 
 ' One line of the found-items tally, or "" when this check found nothing, so a
 ' clean category never appears at all.
@@ -763,6 +825,16 @@ Private Function CheckDoubleSpaces(Doc As Document) As Long
         .MatchWildcards = False
         .Wrap = wdFindStop
         Do While .Execute
+            ' A highlight on TRAILING spaces is one Word never paints. At the end
+            ' of a paragraph there is no glyph past the last character to colour,
+            ' so the mark goes into the file -- the runs really do carry
+            ' <w:highlight w:val="green"/> -- and the screen shows nothing. That
+            ' is how a flagged double space reads as "it says there is an issue
+            ' and highlighted nothing": not hard to spot, actually invisible.
+            ' Pull the mark one character left so it lands on the last visible
+            ' character and Word has something to draw. MoveStart leaves the
+            ' range's END alone, so the Find resumes exactly where it would have.
+            If IsTrailingWhitespace(rng) Then ExtendToPrecedingCharacter rng
             rng.HighlightColorIndex = wdBrightGreen
             CheckDoubleSpaces = CheckDoubleSpaces + 1
         Loop
