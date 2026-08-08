@@ -194,10 +194,19 @@ End Function
 Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
                                 ByRef issues As Boolean, _
                                 ByRef userHighlights As Boolean, _
-                                Optional ByRef notes As String)
+                                Optional ByRef notes As String, _
+                                Optional ByRef summary As String)
     issues = False
     userHighlights = False
     notes = ""
+    summary = ""
+
+    ' What was flagged, by kind and count. A green mark on two spaces at the end
+    ' of a paragraph is a real highlight nobody can see -- which reads as "it
+    ' says there is an issue and highlights nothing" -- so the dialog names what
+    ' was found rather than leaving the user to hunt for a colour.
+    Dim nQuote As Long, nBracket As Long, nBlank As Long
+    Dim nSpace As Long, nFake As Long
 
     ' Everything below runs from inside DocumentBeforeClose. Background
     ' repagination, check-as-you-type and AutoSave each re-process the document
@@ -215,7 +224,8 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ClearCheckHighlights Doc
 
     ' Smart double quotes
-    If CheckUnmatchedPairs(Doc, ChrW(8220), ChrW(8221), HL_GREEN) Then issues = True
+    nQuote = CheckUnmatchedPairs(Doc, ChrW(8220), ChrW(8221), HL_GREEN)
+    If nQuote > 0 Then issues = True
 
     ' Straight double quotes (odd count � highlight the last one). CountChar spans
     ' every reviewed story, so the search for the last one has to as well -- a
@@ -264,17 +274,20 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     End If
 
     ' Square brackets, curly braces, parentheses
-    If CheckUnmatchedPairs(Doc, "[", "]", HL_GREEN) Then issues = True
-    If CheckUnmatchedPairs(Doc, "{", "}", HL_GREEN) Then issues = True
-    If CheckUnmatchedPairs(Doc, "(", ")", HL_GREEN) Then issues = True
+    nBracket = CheckUnmatchedPairs(Doc, "[", "]", HL_GREEN) _
+             + CheckUnmatchedPairs(Doc, "{", "}", HL_GREEN) _
+             + CheckUnmatchedPairs(Doc, "(", ")", HL_GREEN)
+    If nBracket > 0 Then issues = True
 
     ' Placeholder word "blank" (cyan; *blank* marks intentional use and is
     ' skipped, then stripped back to plain "blank" by the restore pass)
-    If HighlightWord(Doc, "blank", HL_CYAN) Then issues = True
+    nBlank = HighlightWord(Doc, "blank", HL_CYAN)
+    If nBlank > 0 Then issues = True
     RestoreIntentionalBlanks Doc
 
     ' Double spaces
-    If CheckDoubleSpaces(Doc) Then issues = True
+    nSpace = CheckDoubleSpaces(Doc)
+    If nSpace > 0 Then issues = True
 
     ' Leftover anonymizer fakes: every pseudonym-pool word and placeholder email
     ' domain still in the document, flagged pink -- even when mashed inside a
@@ -288,7 +301,15 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' and no Find at all (DeAnonymize.TermMaybePresent), so the sweeps that
     ' actually run are the handful of words the document contains; screen redraw
     ' is already suspended for the whole run by SuppressForReview.
-    If DeAnonymize.HighlightResidualPseudonyms(Doc) > 0 Then issues = True
+    nFake = DeAnonymize.HighlightResidualPseudonyms(Doc)
+    If nFake > 0 Then issues = True
+
+    summary = Tally(nQuote, "unmatched smart quote") & _
+              Tally(nBracket, "unmatched bracket or parenthesis") & _
+              Tally(nBlank, "placeholder word " & Chr(34) & "blank" & Chr(34)) & _
+              Tally(nSpace, "double space -- often at the end of a line, where " & _
+                            "the green mark is easy to miss") & _
+              Tally(nFake, "possible leftover pseudonym")
 
     ' Apostrophe conversion (always runs, no prompt)
     ConvertStraightApostrophes Doc
@@ -314,6 +335,43 @@ Cleanup:
                vbExclamation, "Document Check"
     End If
 End Sub
+
+' One line of the found-items tally, or "" when this check found nothing, so a
+' clean category never appears at all.
+Private Function Tally(ByVal n As Long, ByVal label As String) As String
+    If n <= 0 Then Exit Function
+    Tally = "  " & n & " " & label & IIf(n = 1, "", "s") & vbCrLf
+End Function
+
+' The first thing the review marked, so the caller can put the cursor on it. A
+' highlight the user cannot find is the whole complaint this answers: two green
+' spaces at the end of a paragraph are a real mark and an invisible one.
+'
+' Only the check colours count -- the user's own yellow is not a finding. Body
+' first, then the other reviewed stories, so the common case lands where the
+' user is already looking.
+Public Function FirstCheckHighlight(ByVal Doc As Document) As Range
+    On Error Resume Next
+
+    Dim story As Range, ch As Range
+    For Each story In ReviewStories(Doc)
+        Dim r As Range: Set r = story.Duplicate
+        With r.Find
+            .ClearFormatting
+            .text = ""
+            .Highlight = True
+            .Forward = True
+            .Wrap = wdFindStop
+            If .Execute Then
+                Select Case r.HighlightColorIndex
+                    Case wdBrightGreen, wdTurquoise, wdPink
+                        Set FirstCheckHighlight = r.Duplicate
+                        Exit Function
+                End Select
+            End If
+        End With
+    Next story
+End Function
 
 ' ============================================================
 ' REVIEW STATE
@@ -374,8 +432,11 @@ End Sub
 
 ' Full variant: highlights ALL unmatched characters in the document.
 ' Returns True if any are found. Used by RunAllDocumentChecks.
+' Returns HOW MANY marks it applied, not merely whether it found something: the
+' close review reports the tally so "possible issues" names what is out there.
+' A Long still tests as True/False at every existing call site.
 Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
-                                     closer As String, color As Long) As Boolean
+                                     closer As String, color As Long) As Long
     Dim story       As Range
     Dim PARA        As Paragraph
     Dim paraRng     As Range
@@ -466,7 +527,7 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
                     Set closeRng = story.Duplicate
                     closeRng.SetRange positions(i), positions(i) + 1
                     closeRng.HighlightColorIndex = RGBToHighlightIndex(color)
-                    CheckUnmatchedPairs = True
+                    CheckUnmatchedPairs = CheckUnmatchedPairs + 1
                 End If
             End If
         Next i
@@ -477,7 +538,7 @@ Private Function CheckUnmatchedPairs(Doc As Document, opener As String, _
             Set openRng = story.Duplicate
             openRng.SetRange stack(i), stack(i) + 1
             openRng.HighlightColorIndex = RGBToHighlightIndex(color)
-            CheckUnmatchedPairs = True
+            CheckUnmatchedPairs = CheckUnmatchedPairs + 1
         Next i
 
 NextParaFull:
@@ -691,7 +752,7 @@ End Function
 ' means something: a leftover pseudonym, an unmatched bracket, a stray
 ' "blank".
 ' ============================================================
-Private Function CheckDoubleSpaces(Doc As Document) As Boolean
+Private Function CheckDoubleSpaces(Doc As Document) As Long
     Dim rng As Range
     Set rng = Doc.content
     With rng.Find
@@ -703,7 +764,7 @@ Private Function CheckDoubleSpaces(Doc As Document) As Boolean
         .Wrap = wdFindStop
         Do While .Execute
             rng.HighlightColorIndex = wdBrightGreen
-            CheckDoubleSpaces = True
+            CheckDoubleSpaces = CheckDoubleSpaces + 1
         Loop
     End With
 End Function
@@ -713,7 +774,7 @@ End Function
 ' Used by RunAllDocumentChecks for the "blank" check.
 ' ============================================================
 Private Function HighlightWord(Doc As Document, word As String, _
-                                color As Long) As Boolean
+                                color As Long) As Long
     Dim story      As Range
     Dim rng        As Range
     Dim exempt     As Boolean
@@ -734,7 +795,7 @@ Private Function HighlightWord(Doc As Document, word As String, _
                 exempt = (CharBeforeRange(rng) = "*" And CharAfterRange(rng) = "*")
                 If Not exempt Then
                     rng.HighlightColorIndex = RGBToHighlightIndex(color)
-                    HighlightWord = True
+                    HighlightWord = HighlightWord + 1
                 End If
             Loop
         End With

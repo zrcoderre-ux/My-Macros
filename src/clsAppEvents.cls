@@ -58,6 +58,18 @@ Fail:
            vbExclamation, "Document Review"
 End Sub
 
+' Put the cursor on the first thing the review marked. Best-effort: staying open
+' is the answer that matters, and a failure to scroll must not undo it. Only
+' reached after Cancel is set, so the document is staying open to be looked at.
+Private Sub GoToFirstMark(ByVal Doc As Document)
+    On Error Resume Next
+    Dim r As Range
+    Set r = modMain.FirstCheckHighlight(Doc)
+    If r Is Nothing Then Exit Sub
+    r.Select
+    ActiveWindow.ScrollIntoView Selection.Range, True
+End Sub
+
 ' The unhighlightable findings, as a block for the issues dialog, or "" when
 ' there are none -- so the common case reads exactly as it always did.
 Private Function NoteBlock(ByVal notes As String) As String
@@ -98,11 +110,13 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
     Dim issues         As Boolean
     Dim userHighlights As Boolean
     Dim notes          As String
-    RunAllDocumentChecks Doc, issues, userHighlights, notes
+    Dim summary        As String
+    RunAllDocumentChecks Doc, issues, userHighlights, notes, summary
 
     If issues Then
         Dim resp As Integer
         resp = MsgBox("Document contains possible issues." & vbCrLf & vbCrLf & _
+                      "Found:" & vbCrLf & summary & vbCrLf & _
                       "Highlighted items:" & vbCrLf & vbCrLf & _
                       "  Green = unmatched punctuation or double space" & vbCrLf & _
                       "  Cyan  = placeholder word ""blank""" & vbCrLf & _
@@ -110,11 +124,12 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
                       "The review covers headers, footers, and footnotes as well " & _
                       "as the body, so a highlight may not be in view." & _
                       NoteBlock(notes) & vbCrLf & vbCrLf & _
-                      "Yes = stay open to review" & vbCrLf & _
+                      "Yes = stay open, cursor on the first one" & vbCrLf & _
                       "No  = close and remove highlights (keep yellow)", _
                       vbExclamation + vbYesNo, "Document Check")
         If resp = vbYes Then
             Cancel = True
+            GoToFirstMark Doc
         Else
             ClearAllHighlightsExceptYellow Doc
         End If
