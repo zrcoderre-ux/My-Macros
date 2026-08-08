@@ -58,6 +58,13 @@ Fail:
            vbExclamation, "Document Review"
 End Sub
 
+' The unhighlightable findings, as a block for the issues dialog, or "" when
+' there are none -- so the common case reads exactly as it always did.
+Private Function NoteBlock(ByVal notes As String) As String
+    If Len(notes) = 0 Then Exit Function
+    NoteBlock = vbCrLf & vbCrLf & "Also found, NOT highlighted:" & vbCrLf & notes
+End Function
+
 Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
     ' Silent gates: the close review runs ONLY on dated work documents saved
     ' in OneDrive. If either condition fails, do nothing at all -- no popup,
@@ -90,7 +97,8 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
     ' --- Phase 1: Run all checks, highlight everything found ---
     Dim issues         As Boolean
     Dim userHighlights As Boolean
-    RunAllDocumentChecks Doc, issues, userHighlights
+    Dim notes          As String
+    RunAllDocumentChecks Doc, issues, userHighlights, notes
 
     If issues Then
         Dim resp As Integer
@@ -99,6 +107,9 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
                       "  Green = unmatched punctuation or double space" & vbCrLf & _
                       "  Cyan  = placeholder word ""blank""" & vbCrLf & _
                       "  Pink  = possible leftover pseudonym (anonymizer fake)" & vbCrLf & vbCrLf & _
+                      "The review covers headers, footers, and footnotes as well " & _
+                      "as the body, so a highlight may not be in view." & _
+                      NoteBlock(notes) & vbCrLf & vbCrLf & _
                       "Yes = stay open to review" & vbCrLf & _
                       "No  = close and remove highlights (keep yellow)", _
                       vbExclamation + vbYesNo, "Document Check")
@@ -108,6 +119,23 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
             ClearAllHighlightsExceptYellow Doc
         End If
         Exit Sub
+    End If
+
+    ' Findings that could not be highlighted, with nothing else to report. Their
+    ' own message: the highlight dialog above would send the user looking for a
+    ' mark that does not exist.
+    If Len(notes) > 0 Then
+        Dim respN As Integer
+        respN = MsgBox("The review found something it could not highlight:" & _
+                       vbCrLf & vbCrLf & notes & vbCrLf & _
+                       "Nothing is marked in the document." & vbCrLf & vbCrLf & _
+                       "Yes = stay open to look" & vbCrLf & _
+                       "No  = close anyway", _
+                       vbExclamation + vbYesNo, "Document Check")
+        If respN = vbYes Then
+            Cancel = True
+            Exit Sub
+        End If
     End If
 
     ' --- Phase 2: User highlight check (only reached if no issues found) ---
