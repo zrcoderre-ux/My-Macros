@@ -327,7 +327,53 @@ Public Sub ToggleCitationLinks()
     ' before it -- so the heading pass has to be the last word, not the first.
     Dim nKept As Long, nLined As Long
     HeadingFormat.ApplyHeadingFormat doc, nKept, nLined
+
+    ' "supra" is always italicized, linked or not. The in-link italic logic only
+    ' reaches a "supra" that sits INSIDE a link's display text, which leaves the
+    ' common shape untouched: when the link covers the case short name alone, the
+    ' ", supra, 179 Cal.App.4th at p. 538" that follows is outside it. Sweeping
+    ' the body catches those, and the supra cites that never resolved to a link
+    ' at all. One way, like the heading pass: removing the links does not take
+    ' the italic back out -- it is the citation's own style, not link decoration.
+    ' Runs last, after the link work, because adding a link re-derives the italic
+    ' across its display and would otherwise overwrite this.
+    ItalicizeSupraEverywhere doc
 End Sub
+
+' Italicize every whole-word "supra" in the body. Returns how many were changed.
+' Case-insensitive on the search but nothing is recased -- "Supra" opening a
+' sentence stays capitalized, it just becomes italic.
+Private Function ItalicizeSupraEverywhere(ByVal doc As Document) As Long
+    On Error Resume Next
+
+    Dim n As Long, guard As Long
+    Dim r As Range
+    Set r = doc.content.Duplicate
+
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .text = "supra"
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = False
+        .MatchWholeWord = True
+        .MatchWildcards = False
+        .Format = False
+    End With
+
+    Do While r.Find.Execute
+        guard = guard + 1
+        If guard > 2000 Then Exit Do      ' no document has this many; backstop
+        If r.Font.Italic <> True Then
+            r.Font.Italic = True
+            n = n + 1
+        End If
+        r.Collapse wdCollapseEnd
+    Loop
+
+    ItalicizeSupraEverywhere = n
+End Function
 
 
 ' Flip the citation-link provider between Westlaw and Lexis+ and remember the
