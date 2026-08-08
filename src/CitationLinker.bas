@@ -511,16 +511,26 @@ End Function
 Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String) As Boolean
     On Error GoTo Fail
 
+    ' First, cut off any tail of the PREVIOUS SENTENCE the span opened with; then
+    ' trim the punctuation left in front of the case name.
+    On Error Resume Next
+    TrimLeadingProse rng
+
     ' Never start a citation link at the citation sentence's outer "(" (or a
     ' leading "[", quote, or space). The literal-text fallback in particular can
     ' hand us a range that begins with "(" -- e.g. "(Commodore Home Systems,
     ' Inc. v. Superior Court ...". Trim any such leading characters off the
     ' anchor so the hyperlink begins at the case name.
-    On Error Resume Next
+    '
+    ' CLOSING quotes belong in this set as much as opening ones. A citation that
+    ' follows a quotation is preceded by "..." and a span that starts one
+    ' character early opens on that closing quote, which used to stop the trim
+    ' dead and leave the quote mark inside the link.
     Do While rng.Characters.count > 1
         Dim fch As String: fch = rng.Characters(1).text
         If fch = "(" Or fch = "[" Or fch = " " Or fch = Chr$(160) _
-           Or fch = ChrW$(8220) Or fch = ChrW$(8216) Or fch = Chr$(34) Then
+           Or fch = ChrW$(8220) Or fch = ChrW$(8216) Or fch = Chr$(34) _
+           Or fch = ChrW$(8221) Or fch = ChrW$(8217) Or fch = "'" Then
             rng.MoveStart wdCharacter, 1
         Else
             Exit Do
@@ -583,6 +593,68 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     Exit Function
 Fail:
     AddLink = False
+End Function
+
+' Cut a leading run of the PREVIOUS SENTENCE off a citation anchor.
+'
+' Observed: a link that covered "English." (" as well as the case name --
+'
+'     ... nor explained to respondents who did not understand written
+'     English." (Penilla v. Westmont Corp. (2016) 3 Cal.App.5th 205, 209.)
+'
+' -- so the judge's own quoted sentence ended up inside a Lexis link. The span
+' arrives that way; the character trim below only strips punctuation, so a span
+' opening on a WORD defeated it entirely.
+'
+' The boundary used here is sentence-ending punctuation, a CLOSING QUOTE, and
+' then the "(" or "[" that opens the citation sentence: `English." (Penilla`.
+' All three are required. The quote alone would misfire on a citation carrying a
+' quoted parenthetical -- `Smith v. Jones (2020) 1 Cal.5th 1 ["no."]` ends in the
+' same two characters -- and it is the opening bracket after it that says a new
+' citation sentence starts here rather than a parenthetical closing.
+'
+' Only the first LOOK characters are examined, and the LAST boundary in that
+' window wins, so a span that swallowed two sentences still lands on the citation.
+Private Sub TrimLeadingProse(ByVal rng As Range)
+    Const LOOK As Long = 60
+
+    Dim s As String
+    s = rng.text
+    If Len(s) < 2 Then Exit Sub
+
+    Dim window As Long: window = Len(s) - 1
+    If window > LOOK Then window = LOOK
+
+    Dim cut As Long: cut = 0
+    Dim i As Long
+    For i = 1 To window
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = "." Or c = "!" Or c = "?" Then
+            Dim nx As String: nx = Mid$(s, i + 1, 1)
+            If nx = ChrW$(8221) Or nx = ChrW$(8217) Or nx = Chr$(34) Or nx = "'" Then
+                If OpensCitation(s, i + 2) Then cut = i + 1   ' through the quote
+            End If
+        End If
+    Next i
+
+    If cut = 0 Or cut >= Len(s) Then Exit Sub
+    rng.MoveStart wdCharacter, cut
+End Sub
+
+' True when, from position k, the text opens a citation sentence: any run of
+' spaces and then "(" or "[". Anything else -- more prose, a closing bracket, the
+' end of the span -- means the quote just ended a parenthetical, not a sentence.
+Private Function OpensCitation(ByVal s As String, ByVal k As Long) As Boolean
+    Dim i As Long: i = k
+    Do While i <= Len(s)
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = " " Or c = Chr$(160) Then
+            i = i + 1
+        Else
+            OpensCitation = (c = "(" Or c = "[")
+            Exit Function
+        End If
+    Loop
 End Function
 
 ' Italicize the case-name portion of a linked citation's display text: the run
