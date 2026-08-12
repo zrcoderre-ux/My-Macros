@@ -3512,14 +3512,25 @@ End Function
 ' could never be removed. Those clearers now sweep every reviewed story, so the
 ' close review leaves this False and gets the full coverage the manual
 ' de-anonymize caller has always had.
+'
+' skipCaseNames: leave pool words that sit inside a CITED CASE NAME alone. The
+' pool is built of ordinary surnames, so a published authority routinely carries
+' one ("Nash v. Superior Court", "Talbot, supra") and the net flagged it pink on
+' every close -- a standing false positive on text that was never a fake to begin
+' with. Passed True by the close review ONLY (modMain.RunAllDocumentChecks); the
+' de-anonymize pass leaves it False and still flags everything, because that run
+' is the one that has just rewritten names and is the last check before a shared
+' copy goes out. Email domains are never affected either way: a placeholder
+' domain is not part of a case name, so it stays flagged for both callers.
 Public Function HighlightResidualPseudonyms(ByVal oDoc As Document, _
-                                            Optional ByVal bodyOnly As Boolean = False) As Long
+                                            Optional ByVal bodyOnly As Boolean = False, _
+                                            Optional ByVal skipCaseNames As Boolean = False) As Long
     Dim pool As Variant: pool = PseudonymPool()
     Dim doms As Variant: doms = EmailDomainPool()
     Dim total As Long: total = 0
 
     ' Main body.
-    total = total + HighlightFakesInRange(oDoc.content, pool, doms)
+    total = total + HighlightFakesInRange(oDoc.content, pool, doms, skipCaseNames)
     If bodyOnly Then
         HighlightResidualPseudonyms = total
         Exit Function
@@ -3529,19 +3540,19 @@ Public Function HighlightResidualPseudonyms(ByVal oDoc As Document, _
     Dim sec As Section, hf As HeaderFooter
     For Each sec In oDoc.Sections
         For Each hf In sec.Headers
-            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms)
+            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms, skipCaseNames)
         Next hf
         For Each hf In sec.Footers
-            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms)
+            If hf.Exists Then total = total + HighlightFakesInRange(hf.Range, pool, doms, skipCaseNames)
         Next hf
     Next sec
 
     ' Footnotes / endnotes, only when present.
     On Error Resume Next
     If oDoc.Footnotes.count > 0 Then _
-        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdFootnotesStory), pool, doms)
+        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdFootnotesStory), pool, doms, skipCaseNames)
     If oDoc.Endnotes.count > 0 Then _
-        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdEndnotesStory), pool, doms)
+        total = total + HighlightFakesInRange(oDoc.StoryRanges(wdEndnotesStory), pool, doms, skipCaseNames)
     On Error GoTo 0
 
     HighlightResidualPseudonyms = total
@@ -3565,7 +3576,8 @@ End Function
 ' is absent in every case form, and an empty haystack (text unreadable) falls
 ' through to scanning everything, so nothing is ever missed.
 Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant, _
-                                        ByVal doms As Variant) As Long
+                                        ByVal doms As Variant, _
+                                        Optional ByVal skipCaseNames As Boolean = False) As Long
     Dim total As Long, k As Long
 
     Dim raw As String, hayLower As String
@@ -3589,7 +3601,7 @@ Private Function HighlightFakesInRange(ByVal rng As Range, ByVal pool As Variant
     For k = LBound(pool) To UBound(pool)
         term = CStr(pool(k))
         If TermMaybePresent(hayLower, term) Then
-            total = total + HighlightWordInRange(rng, term)
+            total = total + HighlightWordInRange(rng, term, skipCaseNames)
         End If
         If k Mod 50 = 0 Then PumpQueue
     Next k
@@ -3636,21 +3648,31 @@ End Function
 ' its stored first-capital form ("Nash") or an all-caps form ("NASH"); a
 ' lowercase occurrence is not flagged. Still matches inside larger words.
 ' Returns the number of occurrences highlighted.
-Private Function HighlightWordInRange(ByVal rng As Range, ByVal word As String) As Long
+Private Function HighlightWordInRange(ByVal rng As Range, ByVal word As String, _
+                                       Optional ByVal skipCaseNames As Boolean = False) As Long
     Dim n As Long
-    n = HighlightExact(rng, word)                   ' first-capital form, e.g. "Nash"
+    n = HighlightExact(rng, word, skipCaseNames)     ' first-capital form, e.g. "Nash"
     If UCase$(word) <> word Then
-        n = n + HighlightExact(rng, UCase$(word))    ' all-caps form, e.g. "NASH"
+        ' all-caps form, e.g. "NASH"
+        n = n + HighlightExact(rng, UCase$(word), skipCaseNames)
     End If
     HighlightWordInRange = n
 End Function
 
 ' One case-sensitive highlight pass for an exact term, matching even inside a
 ' larger word. Returns the number of occurrences highlighted.
-Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Long
+'
+' skipCaseNames leaves a hit inside a cited case name unmarked (see InCaseName).
+' A skipped hit still counts against MAX_HITS_PER_TERM: the cap is there to stop
+' a runaway term, and a document full of citations must not turn it into an
+' unbounded scan. That also keeps the cap behaving exactly as before for the
+' de-anonymize caller, where nothing is ever skipped and seen = n.
+Private Function HighlightExact(ByVal rng As Range, ByVal term As String, _
+                                 Optional ByVal skipCaseNames As Boolean = False) As Long
     On Error Resume Next
     Dim r As Range: Set r = rng.Duplicate
     Dim n As Long: n = 0
+    Dim seen As Long: seen = 0
     With r.Find
         .ClearFormatting
         .Replacement.ClearFormatting
@@ -3661,13 +3683,35 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String) As Lon
         .MatchWholeWord = False        ' flag the word even inside a larger word
         .MatchWildcards = False
         Do While .Execute
-            r.HighlightColorIndex = wdPink
-            n = n + 1
-            If n >= MAX_HITS_PER_TERM Then Exit Do
-            If n Mod 50 = 0 Then PumpQueue  ' keep Word's queue serviced mid-term
+            seen = seen + 1
+            ' Nested, not "skipCaseNames And InCaseName(r)": VBA's And does not
+            ' short-circuit, so the flat form would read the font of every hit
+            ' for the de-anonymize caller, which never skips anything.
+            Dim mark As Boolean: mark = True
+            If skipCaseNames Then
+                If InCaseName(r) Then mark = False
+            End If
+            If mark Then
+                r.HighlightColorIndex = wdPink
+                n = n + 1
+            End If
+            If seen >= MAX_HITS_PER_TERM Then Exit Do
+            If seen Mod 50 = 0 Then PumpQueue  ' keep Word's queue serviced mid-term
         Loop
     End With
     HighlightExact = n
+End Function
+
+' True when a match sits inside a cited case name. Case names are italicized in
+' these documents, and that is already the signal the replacement sweep trusts
+' for the same purpose: ReplaceInRange's protectCitations leaves an italic match
+' alone so a published case name sharing a party surname isn't rewritten. Word
+' returns wdUndefined for a partly-italic span, so "= True" means the WHOLE match
+' is italic -- the same whole-match rule that sweep applies, and it keeps a fake
+' that merely abuts a citation flagged.
+Private Function InCaseName(ByVal rng As Range) As Boolean
+    On Error Resume Next
+    InCaseName = (rng.Font.Italic = True)
 End Function
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,

@@ -25,6 +25,11 @@ Attribute VB_Name = "HeadingFormat"
 ' heading formatting. ApplyHeadingFormat is the entry point it uses: same work,
 ' no dialog, counts returned instead.
 '
+' THAT SHORTCUT ALSO RUNS SpaceCapsHeadings, which puts a blank line in front of
+' each ALL-CAPS label. Ctrl+Shift+K does not: it formats, and that one edits
+' text. See the pass itself for what it skips (NATURE OF PROCEEDINGS, a heading
+' at the top of a page, one already spaced).
+'
 ' WHAT COUNTS AS A HEADING. One per paragraph, and it must NOT end in closing
 ' punctuation -- a heading names a subject, it doesn't close a sentence, so a
 ' final ".", ",", ":", ";", ")" or quote mark is the tell that a paragraph is
@@ -73,6 +78,11 @@ Private Const HEAD_ARABIC As Long = 4
 ' real: it is here so that a body paragraph which lost its final period is still
 ' too long to be mistaken for a heading.
 Private Const MAX_HEADING_LEN As Long = 100
+
+' Space-before, in points, that already reads as a blank line ahead of a heading
+' -- so SpaceCapsHeadings leaves that heading alone rather than adding a second
+' gap. Just under a 12-point line, which is what these rulings are set in.
+Private Const SPACE_IS_A_LINE As Single = 11
 
 '==============================================================================
 ' ENTRY POINT
@@ -186,6 +196,176 @@ Done:
     On Error GoTo 0
 
     ApplyHeadingFormat = nHeads
+End Function
+
+'==============================================================================
+' BLANK LINE BEFORE THE ALL-CAPS HEADINGS
+'==============================================================================
+' Set every ALL-CAPS section label (BACKGROUND, LEGAL STANDARD, ANALYSIS,
+' CONCLUSION, REQUEST FOR JUDICIAL NOTICE ...) off from the section above it with
+' one empty paragraph. Labelled headings -- "I.", "A.", "1." -- are not touched:
+' this is the top-level break in the ruling, not every heading.
+'
+' RUN BY ToggleCitationLinks (Ctrl+Shift+H) only. FormatHeadings (Ctrl+Shift+K)
+' deliberately does NOT run it: that pass sets formatting and can be re-run on
+' anything, while this one edits the text of the document.
+'
+' Three headings it leaves alone:
+'   - NATURE OF PROCEEDINGS. It opens page one directly under the caption, where
+'     there is nothing above it to separate.
+'   - One that is already the FIRST LINE OF ITS PAGE. The page break has done the
+'     separating, and a blank line at the top of a page is a visible flaw.
+'   - One that already has the space: a blank paragraph above it, or space-before
+'     worth a line on the heading itself. That is what makes the shortcut safe to
+'     press repeatedly -- the second press adds nothing.
+'
+' Returns how many blank lines were inserted. errText comes back non-empty only
+' if the pass stopped early; the count still holds for what it managed first.
+Public Function SpaceCapsHeadings(ByVal oDoc As Document, _
+                                  Optional ByRef errText As String) As Long
+    errText = ""
+    If oDoc Is Nothing Then Exit Function
+
+    ' Find first, edit second. An insertion renumbers every paragraph after it,
+    ' so the walk that finds the headings has to be over before the first one is
+    ' made. What is collected is a RANGE per heading, not a Paragraph: a range
+    ' tracks the edits that follow, a held Paragraph object does not.
+    Dim targets As New Collection
+    Dim prevLetter As String
+    Dim p As Paragraph
+    For Each p In oDoc.content.Paragraphs
+        On Error Resume Next
+        If Not InTable(p) Then
+            Dim raw As String
+            raw = ParaText(p)
+            Dim titleStart As Long
+            If HeadingKind(raw, titleStart, prevLetter) = HEAD_CAPS Then
+                If Not IsNatureOfProceedings(raw) Then targets.Add p.Range.Duplicate
+            End If
+        End If
+        Err.Clear
+        On Error GoTo 0
+    Next p
+
+    If targets.count = 0 Then Exit Function
+
+    ' One named record, like the formatting pass: the whole run reverses on a
+    ' single Ctrl+Z, and it is closed in Done whatever happens.
+    Dim oUndo As UndoRecord
+    Set oUndo = Application.UndoRecord
+    oUndo.StartCustomRecord "Space Headings"
+    On Error GoTo Done
+
+    Application.ScreenUpdating = False
+
+    Dim n As Long, i As Long
+    For i = 1 To targets.count
+        On Error Resume Next
+        If InsertBlankBefore(targets(i)) Then n = n + 1
+        Err.Clear
+        On Error GoTo Done
+    Next i
+
+Done:
+    If Err.Number <> 0 Then errText = "Error " & Err.Number & ": " & Err.Description
+    On Error Resume Next
+    Application.ScreenUpdating = True
+    oUndo.EndCustomRecord
+    On Error GoTo 0
+
+    SpaceCapsHeadings = n
+End Function
+
+' One heading. True when a blank line was actually inserted.
+Private Function InsertBlankBefore(ByVal headRange As Range) As Boolean
+    Dim p As Paragraph
+    Set p = headRange.Paragraphs(1)
+
+    Dim prev As Paragraph
+    Set prev = p.Previous
+    If prev Is Nothing Then Exit Function            ' nothing above it to separate
+
+    ' Already spaced, either way it can be: a blank paragraph above it, or
+    ' space-before on the heading worth about a line.
+    If Len(Trim$(ParaText(prev))) = 0 Then Exit Function
+    If p.SpaceBefore >= SPACE_IS_A_LINE Then Exit Function
+
+    ' Already at the top of a page.
+    If StartsPage(p, prev) Then Exit Function
+
+    ' Insert through a COLLAPSED range at the heading's start: it comes back
+    ' spanning the new empty paragraph, which is what has to be adjusted below.
+    Dim ins As Range
+    Set ins = p.Range.Duplicate
+    ins.Collapse wdCollapseStart
+    ins.InsertParagraphBefore
+
+    Dim blank As Paragraph
+    Set blank = ins.Paragraphs(1)
+
+    ' The new paragraph inherits the heading's formatting. KeepWithNext is the
+    ' one that matters: a blank tied to the heading travels with it to the next
+    ' page, landing at the top -- the exact placement this pass exists to avoid.
+    ' Cleared so the blank can stay behind at the foot of the page, where it
+    ' shows as nothing at all. The underline goes with it so a keystroke typed
+    ' on the blank line doesn't come out dressed as a heading.
+    blank.KeepWithNext = False
+    blank.Range.Font.Underline = wdUnderlineNone
+
+    ' Re-check after the fact: the insertion may itself have pushed the heading
+    ' over a page boundary and taken the blank with it. If the blank is now the
+    ' first line of a page, take it back out -- the break separates the heading
+    ' on its own.
+    If StartsPage(blank, blank.Previous) Then
+        blank.Range.Delete
+        Exit Function
+    End If
+
+    InsertBlankBefore = True
+End Function
+
+' True when p is the first thing on its page -- the paragraph above it ends on an
+' earlier page.
+'
+' Unknown counts as TRUE. When Word won't answer (a window that has never been
+' laid out, a story it declines to paginate), skipping costs a blank line that
+' isn't there, which nobody sees; guessing the other way costs a blank line at
+' the top of a page, which is the thing being asked for by name.
+Private Function StartsPage(ByVal p As Paragraph, ByVal prevPara As Paragraph) As Boolean
+    On Error GoTo Unknown
+    If p Is Nothing Then GoTo Unknown
+    If prevPara Is Nothing Then GoTo Unknown
+
+    Dim rHead As Range
+    Set rHead = p.Range.Duplicate
+    rHead.Collapse wdCollapseStart
+    Dim pgHead As Long
+    pgHead = rHead.Information(wdActiveEndPageNumber)
+
+    ' The previous paragraph's last REAL character, not its paragraph mark: the
+    ' mark sits on the boundary and can report the page the heading starts on.
+    Dim rPrev As Range
+    Set rPrev = prevPara.Range.Duplicate
+    If rPrev.Characters.count > 1 Then rPrev.MoveEnd wdCharacter, -1
+    rPrev.Collapse wdCollapseEnd
+    Dim pgPrev As Long
+    pgPrev = rPrev.Information(wdActiveEndPageNumber)
+
+    If pgHead < 1 Or pgPrev < 1 Then GoTo Unknown
+    StartsPage = (pgHead <> pgPrev)
+    Exit Function
+
+Unknown:
+    StartsPage = True
+End Function
+
+' NATURE OF PROCEEDINGS, however the line continues after it ("NATURE OF
+' PROCEEDINGS: Hearing on ..."). Matched at the start of the line so a heading
+' that merely mentions the phrase later is not caught.
+Private Function IsNatureOfProceedings(ByVal raw As String) As Boolean
+    Dim s As String
+    s = UCase$(Trim$(Replace(raw, ChrW$(160), " ")))
+    IsNatureOfProceedings = (InStr(1, s, "NATURE OF PROCEEDINGS", vbBinaryCompare) = 1)
 End Function
 
 '==============================================================================

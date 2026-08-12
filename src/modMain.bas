@@ -301,7 +301,14 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' and no Find at all (DeAnonymize.TermMaybePresent), so the sweeps that
     ' actually run are the handful of words the document contains; screen redraw
     ' is already suspended for the whole run by SuppressForReview.
-    nFake = DeAnonymize.HighlightResidualPseudonyms(Doc)
+    '
+    ' skipCaseNames: a pool word inside a CITED CASE NAME (italic, e.g. "Nash v.
+    ' Superior Court") is not flagged here. The pool is ordinary surnames, so
+    ' every ruling that cites authority collected pink marks on citations that
+    ' were never fakes, and the review is run on every close. The de-anonymize
+    ' pass still flags them -- it calls this without the flag, so the check that
+    ' matters right after names have been rewritten is unchanged.
+    nFake = DeAnonymize.HighlightResidualPseudonyms(Doc, skipCaseNames:=True)
     If nFake > 0 Then issues = True
 
     summary = Tally(nQuote, "unmatched smart quote") & _
@@ -1115,16 +1122,23 @@ Private Sub RestoreIntentionalBlanks(Doc As Document)
 End Sub
 
 ' ============================================================
-' APOSTROPHE CONVERSION
-' Converts straight single quotes (Chr 39) to their curly
-' forms, direction-aware: a quote at the start of a story or
-' after whitespace/opening punctuation is an OPENING quote
-' (ChrW 8216); everything else -- possessives, contractions,
-' closers -- is a closing/apostrophe mark (ChrW 8217). The old
-' blanket 8217 replacement turned 'quoted term' into two
-' closing quotes. (Elisions like 'tis after a space still get
-' 8216; that rarity is accepted.) Always runs on every close
-' attempt regardless of whether issues were found.
+' STRAIGHT-QUOTE CONVERSION
+' Converts straight quotes to their curly forms, direction-aware:
+' a quote at the start of a story or after whitespace/opening
+' punctuation is an OPENING quote; everything else --
+' possessives, contractions, closers -- is a closing mark. For
+' singles that is ChrW 8216 / ChrW 8217, for doubles ChrW 8220 /
+' ChrW 8221. The old blanket 8217 replacement turned 'quoted
+' term' into two closing quotes. (Elisions like 'tis after a
+' space still get 8216; that rarity is accepted.) Always runs on
+' every close attempt regardless of whether issues were found.
+'
+' WHICH FAMILIES. The close review converts APOSTROPHES ONLY, as it always has:
+' a straight double quote is something it REPORTS (the unmatched-quote check
+' reads the count of them), so silently rewriting them here would edit the text
+' out from under its own finding. ToggleCitationLinks (Ctrl+Shift+H) passes
+' includeDoubles because that press is the user asking for the cleanup, and it
+' runs nowhere near the close path.
 '
 ' TWO GATES, and they are the whole point of this pass being safe to run from
 ' inside DocumentBeforeClose.
@@ -1145,25 +1159,45 @@ End Sub
 ' document with no straight quotes now leaves the review a pure read, and a
 ' document that has them is edited exactly where it needs to be.
 ' ============================================================
+Public Sub SmartenStraightQuotes(Doc As Document, _
+                                 Optional ByVal includeDoubles As Boolean = False)
+    ' An opening double quote counts as an opener for a single that follows it,
+    ' so the inner mark in "'term'" opens rather than closing -- and the same
+    ' the other way round.
+    ConvertStraightChar Doc, Chr(39), ChrW(8216), ChrW(8217), Chr(34) & ChrW(8220)
+    If includeDoubles Then
+        ConvertStraightChar Doc, Chr(34), ChrW(8220), ChrW(8221), Chr(39) & ChrW(8216)
+    End If
+End Sub
+
+' Kept as the close review's entry point: apostrophes only, unchanged.
 Private Sub ConvertStraightApostrophes(Doc As Document)
+    SmartenStraightQuotes Doc
+End Sub
+
+' One quote family, across every reviewed story. partnerOpeners holds the marks
+' of the OTHER family that count as opening context for this one.
+Private Sub ConvertStraightChar(Doc As Document, ByVal straight As String, _
+                                 ByVal openCh As String, ByVal closeCh As String, _
+                                 ByVal partnerOpeners As String)
     Dim story As Range, rng As Range
     Dim bOpen As Boolean
     Dim prev  As String
 
     For Each story In ReviewStories(Doc)
         ' Gate 1: no straight quote in this story, nothing to convert.
-        If Not StoryHasChar(story, Chr(39)) Then GoTo NextStory
+        If Not StoryHasChar(story, straight) Then GoTo NextStory
 
         Set rng = story.Duplicate
         With rng.Find
             .ClearFormatting
-            .text = Chr(39)
+            .text = straight
             .MatchWildcards = False
             .Wrap = wdFindStop
             .Forward = True
             Do While .Execute
                 ' Gate 2: this hit may be a curly quote Word matched for us.
-                If rng.text = Chr(39) Then
+                If rng.text = straight Then
                     ' Probe the preceding character within the match's OWN story;
                     ' Doc.Range(...) would read body coordinates for a header hit.
                     bOpen = False
@@ -1172,14 +1206,16 @@ Private Sub ConvertStraightApostrophes(Doc As Document)
                         bOpen = True                 ' start of the story
                     Else
                         Select Case prev
-                            Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "[", ChrW(8220), Chr(34)
+                            Case " ", vbCr, vbTab, Chr(11), ChrW(160), "(", "["
                                 bOpen = True
+                            Case Else
+                                If InStr(1, partnerOpeners, prev, vbBinaryCompare) > 0 Then bOpen = True
                         End Select
                     End If
                     If bOpen Then
-                        rng.text = ChrW(8216)
+                        rng.text = openCh
                     Else
-                        rng.text = ChrW(8217)
+                        rng.text = closeCh
                     End If
                 End If
                 ' Collapse whether or not the hit was ours, so a curly quote is

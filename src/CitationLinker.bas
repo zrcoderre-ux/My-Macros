@@ -338,6 +338,21 @@ Public Sub ToggleCitationLinks()
     ' Runs last, after the link work, because adding a link re-derives the italic
     ' across its display and would otherwise overwrite this.
     ItalicizeSupraEverywhere doc
+
+    ' Straight quotes to curly, both families -- ' and " alike -- direction-aware,
+    ' so an opening mark curls open and a closing one (and every apostrophe)
+    ' curls closed. Silent, and one way like the passes above: it is typographic
+    ' cleanup the document always wants, not link decoration to be taken back
+    ' out on the next press. The close review runs the same helper on
+    ' apostrophes only; here the doubles come along, because a press of this
+    ' shortcut is the user asking for the cleanup.
+    modMain.SmartenStraightQuotes doc, True
+
+    ' A blank line ahead of each ALL-CAPS label, so the top-level sections read
+    ' apart. LAST of everything: it decides by where the text falls on the page,
+    ' so every pass that can move text -- the links, the headings, the supra
+    ' italics, the quotes -- has to be finished before it looks.
+    HeadingFormat.SpaceCapsHeadings doc
 End Sub
 
 ' Italicize every whole-word "supra" in the body. Returns how many were changed.
