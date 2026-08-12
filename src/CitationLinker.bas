@@ -820,7 +820,159 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     ' italicize the "supra" word so only the reporter stays roman. No-op when
     ' there is no ", supra" in the display.
     ItalicizeSupraWordInDisplay disp
+
+    ' And the parenthetical that introduces the case's short name, which the
+    ' clean slate above would otherwise leave roman.
+    ItalicizeShortNameParen disp, Mid$(s, nameStart, nameEnd - nameStart + 1), tailStart
 End Sub
+
+' Italicize the parenthetical that introduces a case's SHORT NAME. The short name
+' is part of the case name and carries its italics:
+'
+'   (Center ... v. Lennar Corp. (2009) 173 Cal.App.4th 1543, 1554
+'                                        (Center for Self-Improvement).)
+'                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this
+'
+' Needed because the clean slate in ItalicizeCaseName clears italic across the
+' whole display: without this the short name comes back roman on every press,
+' even when it was typed correctly to begin with.
+'
+' A parenthetical qualifies only when it opens with a capital AND its first word
+' is one of the case name's own words. That is what separates a short name from
+' the parentheticals that sit in exactly the same place and are NOT italic --
+' "(conc. opn. of Werdegar, J.)", "(en banc)", "(italics added)", and the
+' "(2009)" date itself.
+'
+' Looked for inside the link first, then through the rest of the paragraph after
+' it: the linker usually ends the display at the pincite, which leaves the short
+' name in the plain text beyond the field.
+Private Sub ItalicizeShortNameParen(ByVal disp As Range, ByVal caseName As String, _
+                                     ByVal tailStart As Long)
+    On Error Resume Next
+    If Len(Trim$(caseName)) = 0 Then Exit Sub
+
+    If MarkShortNameParen(disp, caseName, tailStart) Then Exit Sub
+
+    Dim m As Long: m = disp.Characters.count
+    If m < 1 Then Exit Sub
+    Dim after As Range
+    Set after = disp.Duplicate
+    after.SetRange disp.Characters(m).End, disp.Paragraphs(1).Range.End
+    If after Is Nothing Then Exit Sub
+    MarkShortNameParen after, caseName, 1
+End Sub
+
+' Scan one range's text from startAt for the short-name parenthetical, and
+' italicize it. True when one was found. Only the first few parentheticals are
+' examined -- the short name follows its own citation immediately, so anything
+' further along belongs to the next sentence.
+Private Function MarkShortNameParen(ByVal scope As Range, ByVal caseName As String, _
+                                     ByVal startAt As Long) As Boolean
+    On Error Resume Next
+    Dim s As String: s = scope.text
+    If Len(s) = 0 Then Exit Function
+    If startAt < 1 Then startAt = 1
+
+    Dim tries As Long
+    Dim op As Long: op = InStr(startAt, s, "(")
+    Do While op > 0 And tries < 4
+        tries = tries + 1
+        Dim cl As Long: cl = InStr(op + 1, s, ")")
+        If cl = 0 Then Exit Function
+        Dim a As Long, b As Long
+        If ShortNameSpan(s, op, cl, caseName, a, b) Then
+            Dim r As Range
+            Set r = SubRangeByChars(scope, a, b)
+            If r Is Nothing Then Exit Function
+            If r.Font.Italic <> True Then r.Font.Italic = True
+            MarkShortNameParen = True
+            Exit Function
+        End If
+        op = InStr(cl + 1, s, "(")
+    Loop
+End Function
+
+' The run inside "(...)" that is a case short name, as indices into s. False when
+' the parenthetical is anything else.
+Private Function ShortNameSpan(ByVal s As String, ByVal op As Long, ByVal cl As Long, _
+                                ByVal caseName As String, _
+                                ByRef a As Long, ByRef b As Long) As Boolean
+    Dim ns As Long: ns = op + 1
+    Dim ne As Long: ne = cl - 1
+    If ne < ns Then Exit Function
+
+    ' "(hereafter Lennar)" / "(hereinafter, Lennar)": the signal word stays roman.
+    Dim lead As Variant, v As Variant
+    lead = Array("hereafter", "hereinafter")
+    For Each v In lead
+        If LCase$(Mid$(s, ns, Len(v))) = v Then
+            ns = ns + Len(v)
+            Do While ns <= ne
+                If Mid$(s, ns, 1) = " " Or Mid$(s, ns, 1) = "," Then ns = ns + 1 Else Exit Do
+            Loop
+            Exit For
+        End If
+    Next v
+
+    ' Quotation marks around the short name are not part of it.
+    Do While ns <= ne
+        If IsQuoteChar(Mid$(s, ns, 1)) Then ns = ns + 1 Else Exit Do
+    Loop
+    Do While ne >= ns
+        If IsQuoteChar(Mid$(s, ne, 1)) Or Mid$(s, ne, 1) = " " Then ne = ne - 1 Else Exit Do
+    Loop
+    If ne < ns Then Exit Function
+
+    Dim f As String: f = Mid$(s, ns, 1)
+    If Not (f >= "A" And f <= "Z") Then Exit Function
+    If Not WordAppearsIn(FirstWordOf(Mid$(s, ns, ne - ns + 1)), caseName) Then Exit Function
+
+    a = ns
+    b = ne
+    ShortNameSpan = True
+End Function
+
+Private Function IsQuoteChar(ByVal c As String) As Boolean
+    Select Case c
+        Case Chr$(34), "'", ChrW$(8216), ChrW$(8217), ChrW$(8220), ChrW$(8221)
+            IsQuoteChar = True
+    End Select
+End Function
+
+' The leading run of letters, which is all the comparison below needs.
+Private Function FirstWordOf(ByVal s As String) As String
+    Dim i As Long
+    For i = 1 To Len(s)
+        If Not (Mid$(s, i, 1) Like "[A-Za-z]") Then Exit For
+    Next i
+    FirstWordOf = Left$(s, i - 1)
+End Function
+
+' True when w is one of text's words, compared on letters alone so a hyphen,
+' ampersand or period between them changes nothing ("Self-Improvement" is two
+' words either way, and "Corp." matches "Corp").
+Private Function WordAppearsIn(ByVal w As String, ByVal text As String) As Boolean
+    If Len(w) = 0 Then Exit Function
+    WordAppearsIn = (InStr(1, " " & LettersOnlyLower(text) & " ", _
+                           " " & LCase$(w) & " ", vbBinaryCompare) > 0)
+End Function
+
+' Lowercase the text with every non-letter reduced to a single space.
+Private Function LettersOnlyLower(ByVal s As String) As String
+    Dim i As Long, c As String, out As String, gap As Boolean
+    gap = True
+    For i = 1 To Len(s)
+        c = LCase$(Mid$(s, i, 1))
+        If c >= "a" And c <= "z" Then
+            out = out & c
+            gap = False
+        ElseIf Not gap Then
+            out = out & " "
+            gap = True
+        End If
+    Next i
+    LettersOnlyLower = Trim$(out)
+End Function
 
 ' Italicize a "supra" signal that appears inside the display AFTER the case name
 ' ("<name>, supra, <reporter>"). The clean-slate above left it roman; this adds
@@ -900,13 +1052,23 @@ End Sub
 ' inside the link.
 Private Sub ItalicizeSupraShortNameBefore(ByVal disp As Range)
     On Error Resume Next
-    Dim linkStart As Long: linkStart = disp.start
+    ' The link's TRUE text start. disp.Start points into the field code, so using
+    ' it as the window's right edge put the window in the wrong place to begin
+    ' with -- see SubRangeByChars for why the two coordinate systems differ.
+    If disp.Characters.count < 1 Then Exit Sub
+    Dim linkStart As Long: linkStart = disp.Characters(1).start
     If linkStart < 8 Then Exit Sub
 
     Dim lookLen As Long: lookLen = 70
     If lookLen > linkStart Then lookLen = linkStart
     Dim base As Long: base = linkStart - lookLen
-    Dim b As String: b = ActiveDocument.Range(base, linkStart).text
+    ' Hold the RANGE, not just its text: every index into b below has to be
+    ' converted back through this range's own Characters collection, never by
+    ' adding it to base.
+    Dim bRange As Range
+    Set bRange = ActiveDocument.Range(base, linkStart)
+    If bRange Is Nothing Then Exit Sub
+    Dim b As String: b = bRange.text
     If Len(b) = 0 Then Exit Sub
 
     ' This must be a supra context. The document reads "<short name>, supra,
@@ -972,10 +1134,41 @@ Private Sub ItalicizeSupraShortNameBefore(ByVal disp As Range)
     Loop
     If nameStart > nameEnd Then Exit Sub
 
-    Dim absS As Long: absS = base + nameStart - 1
-    Dim absE As Long: absE = base + nameEnd
-    If absE > absS Then ActiveDocument.Range(absS, absE).Font.Italic = True
+    ' Convert the two indices through the window's OWN characters. The old
+    ' "base + nameStart - 1" read a text index as a document position: it is
+    ' short by every field-code character between base and the name, so with any
+    ' link inside the window -- and the first full cite of a case is always
+    ' linked -- the italic landed on a span shifted off the short name. That is
+    ' what italicized "Center for" of one cite and the reporter tail of the one
+    ' before it, and left the rest of the name roman.
+    Dim r As Range
+    Set r = SubRangeByChars(bRange, nameStart, nameEnd)
+    If Not r Is Nothing Then r.Font.Italic = True
 End Sub
+
+' The range covering characters a..b of rng's TEXT, or Nothing when that run is
+' not there.
+'
+' This is the only safe way to turn an index into rng.Text back into a range. A
+' range's .Text and its .Characters agree character for character, but .Start
+' and .End count positions that .Text never returns -- a hyperlink's field code
+' among them. Index arithmetic on .Start is therefore wrong wherever a link
+' sits, which in a citation paragraph is everywhere.
+Private Function SubRangeByChars(ByVal rng As Range, ByVal a As Long, _
+                                  ByVal b As Long) As Range
+    On Error Resume Next
+    If rng Is Nothing Then Exit Function
+    If a < 1 Or b < a Then Exit Function
+    Dim m As Long: m = rng.Characters.count
+    If b > m Then Exit Function
+    ' Built off rng itself rather than ActiveDocument.Range: SetRange keeps the
+    ' result in rng's OWN story, so a caller working in a footnote doesn't get a
+    ' range pointing at those positions in the body.
+    Dim out As Range
+    Set out = rng.Duplicate
+    out.SetRange rng.Characters(a).start, rng.Characters(b).End
+    Set SubRangeByChars = out
+End Function
 
 ' Return the 1-based character index where the non-italic citation tail begins:
 ' the comma of ", supra", else the "(" of the first four-digit "(year)". Returns
