@@ -348,6 +348,11 @@ Public Sub ToggleCitationLinks()
     ' shortcut is the user asking for the cleanup.
     modMain.SmartenStraightQuotes doc, True
 
+    ' Citation italics, re-derived from the paragraph text and applied through
+    ' Find. Runs after every pass above that touches italics, so where it can
+    ' read a citation it has the last word on how that citation is set.
+    NormalizeCitationItalics doc
+
     ' A blank line ahead of each ALL-CAPS label, so the top-level sections read
     ' apart. LAST of everything: it decides by where the text falls on the page,
     ' so every pass that can move text -- the links, the headings, the supra
@@ -388,6 +393,434 @@ Private Function ItalicizeSupraEverywhere(ByVal doc As Document) As Long
     Loop
 
     ItalicizeSupraEverywhere = n
+End Function
+
+
+'==============================================================================
+' CITATION ITALICS -- FINAL PASS, READ FROM THE TEXT
+'==============================================================================
+' Every other italic routine in this module derives a citation's italics from ONE
+' HYPERLINK'S DISPLAY TEXT and positions the result through that field's
+' Characters collection. When a citation is covered by more than one link, or by
+' a link that begins partway into it, that arithmetic has nothing to correct it,
+' and the italics land on words the citation never puts in italics:
+'
+'   (Center for Self-Improvement & Community Development v. Lennar Corp. (2009)
+'    173 Cal.App.4th 1543, 1554 (Center for Self-Improvement).)
+'
+' came back with "Center for" and the reporter tail italic, the rest of the case
+' name roman, and the short name roman -- and the supra cite that followed it the
+' same way.
+'
+' This pass ignores the links completely. It reads the paragraph's VISIBLE TEXT,
+' works out the runs a California citation has, and then locates each run with
+' Word's own FIND and formats the range Find returns:
+'
+'   (Center ... v. Lennar Corp.   (2009) 173 Cal.App.4th 1543, 1554   (Center for
+'    -------- italic ---------    ------------ roman ------------      Self-
+'                                                                      Improvement)
+'                                                                      -- italic --
+'
+' No index is ever turned into a document position, which is the point: a text
+' index and a document position are different coordinate systems wherever a field
+' sits, and citations are exactly where the fields are. Find lands on the right
+' characters whatever is in the way.
+'
+' A citation it cannot read confidently is left exactly as it is -- the left edge
+' of a case name is a guess in running prose, and a wrong guess italicizes the
+' judge's own sentence. Body only, like the supra sweep above.
+Private Function NormalizeCitationItalics(ByVal doc As Document) As Long
+    On Error Resume Next
+    Dim p As Paragraph, n As Long
+    For Each p In doc.content.Paragraphs
+        n = n + NormalizeParaItalics(p)
+    Next p
+    NormalizeCitationItalics = n
+End Function
+
+' One paragraph. Full cites are found by their " v. ", short cites by their
+' ", supra" -- a full cite carrying both is simply seen twice, and the second
+' look asks for the formatting the first one already applied.
+Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
+    On Error Resume Next
+    Dim s As String
+    s = p.Range.text
+    If Len(s) = 0 Then Exit Function
+    If Right$(s, 1) = vbCr Then s = Left$(s, Len(s) - 1)
+    If Len(s) < 12 Then Exit Function
+
+    Dim n As Long
+    Dim i As Long
+
+    ' ---- Full cites: "<name> v. <name> (year) <reporter>" ----
+    i = 1
+    Do
+        Dim vp As Long: vp = InStr(i, s, " v. ", vbTextCompare)
+        If vp = 0 Then Exit Do
+        Dim nextI As Long: nextI = vp + 4
+        n = n + MarkCitationAt(p, s, vp, nextI)
+        i = nextI
+    Loop
+
+    ' ---- Short cites: "<short name>, supra, <reporter>" ----
+    i = 1
+    Do
+        Dim cp As Long: cp = InStr(i, s, ", supra", vbTextCompare)
+        If cp = 0 Then Exit Do
+        Dim nextC As Long: nextC = cp + 7
+        n = n + MarkCitationAt(p, s, cp, nextC)
+        i = nextC
+    Loop
+
+    NormalizeParaItalics = n
+End Function
+
+' Format the one citation whose parties end at anchor -- the " v. " of a full
+' cite, or the comma of a short cite's ", supra". nextScan comes back at the end
+' of what was handled so the caller does not read the same citation twice.
+' Returns 1 when the citation was read and formatted, 0 when it was left alone.
+Private Function MarkCitationAt(ByVal p As Paragraph, ByVal s As String, _
+                                 ByVal anchor As Long, ByRef nextScan As Long) As Long
+    ' Where the roman tail starts: the "(year)" or the ", supra".
+    Dim ts As Long
+    If IsSupraTail(s, anchor) Then ts = anchor Else ts = CiteTailStartAfter(s, anchor)
+    If ts <= 0 Then Exit Function
+
+    ' Where the case name starts. 0 means the left edge could not be trusted.
+    Dim boundary As Long
+    Dim ns As Long: ns = CaseNameLeftEdge(s, anchor, boundary)
+    If ns <= 0 Then Exit Function
+
+    Dim ne As Long: ne = ts - 1
+    Do While ne >= ns
+        If Mid$(s, ne, 1) = " " Then ne = ne - 1 Else Exit Do
+    Loop
+    If ne < ns Then Exit Function
+
+    Dim caseName As String: caseName = Mid$(s, ns, ne - ns + 1)
+    If InStr(1, caseName, " v. ", vbTextCompare) = 0 And Not IsSupraTail(s, ts) Then Exit Function
+
+    ' Find could not match the name as one string: a field boundary inside it can
+    ' break the match. Format the parties on either side of the "v." separately,
+    ' and the separator with them -- three shorter runs, each wholly inside or
+    ' wholly outside the link, so at least the case name still comes out italic.
+    If FormatRun(p, caseName, True) = 0 Then
+        Dim vpos As Long: vpos = InStr(1, caseName, " v. ", vbTextCompare)
+        If vpos > 1 Then
+            FormatRun p, Left$(caseName, vpos - 1), True
+            FormatRun p, " v. ", True
+            FormatRun p, Mid$(caseName, vpos + 4), True
+        End If
+    End If
+
+    ' The tail is roman. On a short cite it starts AFTER ", supra": the supra
+    ' signal is italic, and ItalicizeSupraEverywhere has just made it so.
+    Dim rf As Long: rf = ts
+    If IsSupraTail(s, ts) Then rf = ts + 7
+    Dim te As Long: te = CiteTailEnd(s, ts)
+    If te >= rf Then
+        Dim tailText As String: tailText = Mid$(s, rf, te - rf + 1)
+        If FormatRun(p, tailText, False) = 0 Then
+            ' Same field-boundary problem as the name: the link commonly starts
+            ' at the reporter, splitting the tail right after the date. Do the
+            ' two halves apart.
+            Dim sp As Long: sp = InStr(1, tailText, ") ")
+            If sp > 0 Then
+                FormatRun p, Left$(tailText, sp), False
+                FormatRun p, Mid$(tailText, sp + 2), False
+            End If
+        End If
+    End If
+
+    ' The parenthetical that introduces the case's short name is part of the case
+    ' name and carries its italics.
+    Dim a As Long, b As Long
+    If ShortNameAfter(s, te + 1, caseName, a, b) Then
+        FormatRun p, Mid$(s, a, b - a + 1), True
+    End If
+
+    If te + 1 > nextScan Then nextScan = te + 1
+    MarkCitationAt = 1
+End Function
+
+' Set or clear italic on every occurrence of text within the paragraph.
+'
+' FIND, not a computed range. Find searches the visible text and hands back a
+' range already positioned on it, so a run that crosses into or out of a
+' hyperlink field is formatted correctly without this code ever knowing the field
+' is there. Every attempt to compute these positions instead has put the italics
+' on the wrong words.
+'
+' Formatting the OTHER occurrences of the same run in the paragraph is correct,
+' not collateral: a case name is italic wherever it appears, and a reporter
+' citation is roman wherever it appears.
+Private Function FormatRun(ByVal p As Paragraph, ByVal text As String, _
+                            ByVal wantItalic As Boolean) As Long
+    On Error Resume Next
+    ' Find's search string caps at 255 characters; a longer run is left alone
+    ' rather than half-matched.
+    If Len(text) = 0 Or Len(text) > 250 Then Exit Function
+
+    Dim r As Range: Set r = p.Range.Duplicate
+    Dim guard As Long
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .text = text
+        .Forward = True
+        .Wrap = wdFindStop
+        .MatchCase = True
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        .Format = False
+        Do While .Execute
+            guard = guard + 1
+            If guard > 20 Then Exit Do
+            FormatRun = FormatRun + 1
+            ' Font.Italic answers wdUndefined for a mixed run, which equals
+            ' neither True nor False -- so a partly-italic citation is corrected
+            ' rather than skipped. Writing only what needs writing keeps this out
+            ' of the revision marks in a document edited with track changes on.
+            Dim cur As Long: cur = r.Font.Italic
+            If wantItalic Then
+                If cur <> True Then r.Font.Italic = True
+            Else
+                If cur <> False Then r.Font.Italic = False
+            End If
+            r.Collapse wdCollapseEnd
+        Loop
+    End With
+End Function
+
+' True when ", supra" starts at position k.
+Private Function IsSupraTail(ByVal s As String, ByVal k As Long) As Boolean
+    If k < 1 Then Exit Function
+    IsSupraTail = (LCase$(Mid$(s, k, 7)) = ", supra")
+End Function
+
+' The start of the roman tail after the parties: the ", supra" or the "(year)",
+' whichever comes first. 0 when neither is there -- and then the citation is left
+' alone, because without a tail there is nothing to say where the name stops.
+Private Function CiteTailStartAfter(ByVal s As String, ByVal anchor As Long) As Long
+    Dim rest As String: rest = Mid$(s, anchor)
+    Dim pSup As Long: pSup = InStr(1, rest, ", supra", vbTextCompare)
+    Dim pYr As Long: pYr = FindYearParen(rest)
+    Dim p As Long
+    If pSup > 0 And (pYr = 0 Or pSup < pYr) Then p = pSup Else p = pYr
+    If p = 0 Then Exit Function
+    CiteTailStartAfter = anchor + p - 1
+End Function
+
+' The last character of the roman tail: the date through the reporter and
+' pincite, stopping before whatever comes next -- a short-name or explanatory
+' parenthetical, a parallel cite after ";", or the ")" closing the citation
+' sentence. Those are somebody else's to decide; only the span this is sure of
+' gets rewritten.
+Private Function CiteTailEnd(ByVal s As String, ByVal ts As Long) As Long
+    Dim i As Long
+    Dim closePos As Long: closePos = ts
+
+    If Mid$(s, ts, 1) = "(" Then
+        closePos = 0
+        For i = ts + 1 To Len(s)
+            If Mid$(s, i, 1) = ")" Then
+                closePos = i
+                Exit For
+            End If
+        Next i
+        If closePos = 0 Then Exit Function
+    End If
+
+    Dim e As Long: e = Len(s)
+    For i = closePos + 1 To Len(s)
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = "(" Or c = "[" Or c = ")" Or c = "]" Or c = ";" Then
+            e = i - 1
+            Exit For
+        End If
+    Next i
+    Do While e > ts
+        If Mid$(s, e, 1) = " " Then e = e - 1 Else Exit Do
+    Loop
+    CiteTailEnd = e
+End Function
+
+' Where the case name that ends at anchor begins, or 0 when the left edge cannot
+' be trusted -- and an untrusted edge means the citation is left alone, because
+' guessing wide italicizes the judge's own prose.
+'
+' A CITATION SENTENCE answers this outright, and that is the shape nearly every
+' cite in a ruling has: the "(" opens the citation, so the name starts right
+' after it (past a "See" or "Accord,") and runs to the "(year)". Nothing is
+' inspected word by word, which matters -- party names contain the very words a
+' word filter has to distrust ("The Sports Authority", "Court Reporters, Inc.",
+' "In-N-Out"), and filtering them is what leaves half a case name roman.
+'
+' Only an IN-TEXT cite ("... the court in Smith v. Jones (2020) ...") has no
+' bracket to say where it begins, and only there does the walk below guess: a
+' capitalized word joins the name, a lowercase one joins only as a CONNECTOR
+' ("of", "for", "and", "ex rel.") and never becomes the start itself, so the
+' start is always the leftmost capitalized word accepted. "The court in Smith v.
+' Jones" starts at "Smith" -- "in" is a connector, "court" is not a name word,
+' and the walk stops there.
+'
+' boundary comes back as the "(" or "[" the citation sits inside, or 0.
+Private Function CaseNameLeftEdge(ByVal s As String, ByVal anchor As Long, _
+                                   ByRef boundary As Long) As Long
+    boundary = 0
+
+    ' --- Citation sentence: the bracket IS the answer. ---
+    Dim j As Long
+    For j = anchor - 1 To 1 Step -1
+        Dim c0 As String: c0 = Mid$(s, j, 1)
+        ' A closed parenthetical, or a parallel-cite semicolon, means the bracket
+        ' further left is not the one this citation opens with.
+        If c0 = ")" Or c0 = "]" Or c0 = ";" Then Exit For
+        If c0 = "(" Or c0 = "[" Then
+            boundary = j
+            CaseNameLeftEdge = SkipCiteSignals(s, j + 1, anchor)
+            Exit Function
+        End If
+    Next j
+
+    ' --- In-text cite: no bracket, so the edge has to be worked out. ---
+    Dim best As Long: best = 0
+    Dim k As Long: k = anchor - 1
+
+    Do While k >= 1
+        Do While k >= 1
+            If Mid$(s, k, 1) = " " Then k = k - 1 Else Exit Do
+        Loop
+        If k < 1 Then Exit Do
+
+        Dim c As String: c = Mid$(s, k, 1)
+        If c = "(" Or c = "[" Or c = ";" Or IsQuoteChar(c) Then
+            boundary = k
+            Exit Do
+        End If
+
+        Dim ws As Long: ws = k
+        Do While ws >= 1
+            Dim wc As String: wc = Mid$(s, ws, 1)
+            If wc = " " Or wc = "(" Or wc = "[" Then Exit Do
+            ws = ws - 1
+        Loop
+        ws = ws + 1
+
+        Dim w As String: w = Mid$(s, ws, k - ws + 1)
+        Dim f As String: f = Left$(w, 1)
+
+        If f >= "A" And f <= "Z" Then
+            If IsSentenceLeadWord(w) And Not OpensInRe(s, ws) Then Exit Do
+            best = ws
+        ElseIf f >= "a" And f <= "z" Then
+            If Not IsNameConnector(w) Then Exit Do
+        ElseIf f = "&" Then
+            ' joins the name, never starts it
+        Else
+            Exit Do
+        End If
+
+        k = ws - 1
+    Loop
+
+    CaseNameLeftEdge = best
+End Function
+
+' The first character of the case name inside a citation sentence: past the
+' spaces, and past a leading signal -- "See", "See also", "Accord,", "But see",
+' "Cf.", "e.g.," -- which is roman and no part of the name. Reuses the module's
+' own signal-word list. "In" is deliberately not one: "In re Marriage of ..." is
+' a case name. Falls back to fromPos if the whole span reads as signals, so a
+' misread can only leave the name where it was.
+Private Function SkipCiteSignals(ByVal s As String, ByVal fromPos As Long, _
+                                  ByVal limit As Long) As Long
+    Dim i As Long: i = fromPos
+    Dim guard As Long
+
+    Do While i < limit And guard < 6
+        guard = guard + 1
+        Do While i < limit
+            If Mid$(s, i, 1) = " " Then i = i + 1 Else Exit Do
+        Loop
+        Dim e As Long: e = i
+        Do While e < limit
+            If Mid$(s, e, 1) = " " Then Exit Do
+            e = e + 1
+        Loop
+        If e <= i Then Exit Do
+        If Not IsCiteSignalWord(LCase$(StripWordPunct(Mid$(s, i, e - i)))) Then Exit Do
+        i = e
+    Loop
+
+    Do While i < limit
+        If Mid$(s, i, 1) = " " Then i = i + 1 Else Exit Do
+    Loop
+    If i >= limit Then i = fromPos
+    SkipCiteSignals = i
+End Function
+
+' "In re ..." -- the one capitalized sentence word that does open a case name.
+Private Function OpensInRe(ByVal s As String, ByVal ws As Long) As Boolean
+    OpensInRe = (LCase$(Mid$(s, ws, 6)) = "in re ")
+End Function
+
+' Capitalized words that open a sentence or a signal, not a case name.
+Private Function IsSentenceLeadWord(ByVal w As String) As Boolean
+    Select Case LCase$(StripWordPunct(w))
+        Case "see", "accord", "compare", "citing", "quoting", "but", "and", "also", _
+             "cf", "eg", "ie", "the", "in", "under", "however", "here", "although", _
+             "because", "while", "when", "where", "whether", "if", "as", "at", _
+             "since", "thus", "nor", "following", "italics", "emphasis", "internal", _
+             "original", "id", "ibid", "court", "plaintiff", "defendant", "he", _
+             "she", "they", "it", "this", "that", "these", "those", "there"
+            IsSentenceLeadWord = True
+    End Select
+End Function
+
+' Lowercase words that sit INSIDE a case name.
+Private Function IsNameConnector(ByVal w As String) As Boolean
+    Select Case LCase$(StripWordPunct(w))
+        Case "of", "for", "and", "the", "de", "del", "la", "las", "los", "van", _
+             "von", "der", "den", "da", "du", "ex", "rel", "et", "al", "in", "re", _
+             "dba", "aka", "fka", "nka", "v"
+            IsNameConnector = True
+    End Select
+End Function
+
+' A word without its surrounding punctuation, so "Corp.," compares as "corp".
+Private Function StripWordPunct(ByVal w As String) As String
+    Dim a As Long: a = 1
+    Dim b As Long: b = Len(w)
+    Do While a <= b
+        If Mid$(w, a, 1) Like "[A-Za-z0-9]" Then Exit Do
+        a = a + 1
+    Loop
+    Do While b >= a
+        If Mid$(w, b, 1) Like "[A-Za-z0-9]" Then Exit Do
+        b = b - 1
+    Loop
+    If b < a Then Exit Function
+    StripWordPunct = Mid$(w, a, b - a + 1)
+End Function
+
+' The short-name parenthetical starting at or just after fromPos, as indices into
+' s. False when what is there is any other kind of parenthetical.
+Private Function ShortNameAfter(ByVal s As String, ByVal fromPos As Long, _
+                                 ByVal caseName As String, _
+                                 ByRef a As Long, ByRef b As Long) As Boolean
+    Dim i As Long: i = fromPos
+    If i < 1 Then i = 1
+    Do While i <= Len(s)
+        If Mid$(s, i, 1) = " " Then i = i + 1 Else Exit Do
+    Loop
+    If i > Len(s) Then Exit Function
+    If Mid$(s, i, 1) <> "(" Then Exit Function
+
+    Dim cl As Long: cl = InStr(i + 1, s, ")")
+    If cl = 0 Then Exit Function
+
+    ShortNameAfter = ShortNameSpan(s, i, cl, caseName, a, b)
 End Function
 
 
