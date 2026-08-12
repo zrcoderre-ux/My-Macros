@@ -157,15 +157,7 @@ Public Function FindFirstIssue(ByVal Doc As Document, _
         GoTo RunApostrophes
     End If
 
-    ' 6. Placeholder word "blank"
-    Set r = FindFirstBlank(Doc)
-    If Not r Is Nothing Then
-        sLabel = "Placeholder word ""blank"""
-        Set FindFirstIssue = r
-        GoTo RunApostrophes
-    End If
-
-    ' 7. Double spaces
+    ' 6. Double spaces
     Set r = FindFirstDoubleSpace(Doc)
     If Not r Is Nothing Then
         sLabel = "Double space"
@@ -205,7 +197,7 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' of a paragraph is a real highlight nobody can see -- which reads as "it
     ' says there is an issue and highlights nothing" -- so the dialog names what
     ' was found rather than leaving the user to hunt for a colour.
-    Dim nQuote As Long, nBracket As Long, nBlank As Long
+    Dim nQuote As Long, nBracket As Long
     Dim nSpace As Long, nFake As Long
 
     ' Everything below runs from inside DocumentBeforeClose. Background
@@ -279,12 +271,6 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
              + CheckUnmatchedPairs(Doc, "(", ")", HL_GREEN)
     If nBracket > 0 Then issues = True
 
-    ' Placeholder word "blank" (cyan; *blank* marks intentional use and is
-    ' skipped, then stripped back to plain "blank" by the restore pass)
-    nBlank = HighlightWord(Doc, "blank", HL_CYAN)
-    If nBlank > 0 Then issues = True
-    RestoreIntentionalBlanks Doc
-
     ' Double spaces
     nSpace = CheckDoubleSpaces(Doc)
     If nSpace > 0 Then issues = True
@@ -313,7 +299,6 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
 
     summary = Tally(nQuote, "unmatched smart quote") & _
               Tally(nBracket, "unmatched bracket or parenthesis") & _
-              Tally(nBlank, "placeholder word " & Chr(34) & "blank" & Chr(34)) & _
               Tally(nSpace, "double space") & _
               Tally(nFake, "possible leftover pseudonym")
 
@@ -750,42 +735,6 @@ Private Sub SortByPosition(ByRef positions() As Long, _
 End Sub
 
 ' ============================================================
-' BLANK WORD CHECK
-' Returns the first non-exempt "blank" hit highlighted in cyan.
-' *blank* (asterisks on both sides) is the intentional-use
-' marker and is skipped. Returns Nothing if no hits found.
-' ============================================================
-Private Function FindFirstBlank(Doc As Document) As Range
-    Dim rng        As Range
-    Dim charBefore As String
-    Dim charAfter  As String
-    Dim exempt     As Boolean
-
-    Set rng = Doc.content
-    With rng.Find
-        .ClearFormatting
-        .text = "blank"
-        .MatchCase = False
-        .MatchWholeWord = True
-        .MatchWildcards = False
-        .Wrap = wdFindStop
-        Do While .Execute
-            exempt = False
-            If rng.start > 0 And rng.End < Doc.content.End Then
-                charBefore = Doc.Range(rng.start - 1, rng.start).text
-                charAfter = Doc.Range(rng.End, rng.End + 1).text
-                If charBefore = "*" And charAfter = "*" Then exempt = True
-            End If
-            If Not exempt Then
-                rng.HighlightColorIndex = wdTurquoise
-                Set FindFirstBlank = rng.Duplicate
-                Exit Function
-            End If
-        Loop
-    End With
-End Function
-
-' ============================================================
 ' DOUBLE SPACE CHECK � FAST-EXIT
 ' Finds the first double space in Doc.Content (main body only;
 ' headers, footers, footnotes, and text boxes are excluded).
@@ -818,8 +767,7 @@ End Function
 ' headers and footers too. A running header lays out its caption with
 ' runs of spaces on purpose, so flagging them is noise, not a defect.
 ' The checks that DO cover the header are the ones where a header hit
-' means something: a leftover pseudonym, an unmatched bracket, a stray
-' "blank".
+' means something: a leftover pseudonym, an unmatched bracket.
 ' ============================================================
 Private Function CheckDoubleSpaces(Doc As Document) As Long
     Dim rng As Range
@@ -846,39 +794,6 @@ Private Function CheckDoubleSpaces(Doc As Document) As Long
             CheckDoubleSpaces = CheckDoubleSpaces + 1
         Loop
     End With
-End Function
-
-' ============================================================
-' HIGHLIGHT WORD (full run � all occurrences)
-' Used by RunAllDocumentChecks for the "blank" check.
-' ============================================================
-Private Function HighlightWord(Doc As Document, word As String, _
-                                color As Long) As Long
-    Dim story      As Range
-    Dim rng        As Range
-    Dim exempt     As Boolean
-
-    For Each story In ReviewStories(Doc)
-        Set rng = story.Duplicate
-        With rng.Find
-            .ClearFormatting
-            .text = word
-            .MatchCase = False
-            .MatchWholeWord = True
-            .MatchWildcards = False
-            .Wrap = wdFindStop
-            Do While .Execute
-                ' *blank* marks an intentional use. Probe within the match's OWN
-                ' story -- the old Doc.Range(...) probe used body coordinates,
-                ' which would read unrelated body text for a header match.
-                exempt = (CharBeforeRange(rng) = "*" And CharAfterRange(rng) = "*")
-                If Not exempt Then
-                    rng.HighlightColorIndex = RGBToHighlightIndex(color)
-                    HighlightWord = HighlightWord + 1
-                End If
-            Loop
-        End With
-    Next story
 End Function
 
 ' ============================================================
@@ -932,21 +847,14 @@ Private Function StoryHasText(rng As Range) As Boolean
     StoryHasText = (Len(Trim$(Replace(Replace(t, vbCr, ""), Chr$(7), ""))) > 0)
 End Function
 
-' The character immediately before / after a range, WITHIN the range's own
-' story. Doc.Range(pos - 1, pos) cannot be used for this: its coordinates are
-' the BODY's, so probing a header match that way reads unrelated body text.
+' The character immediately before a range, WITHIN the range's own story.
+' Doc.Range(pos - 1, pos) cannot be used for this: its coordinates are the
+' BODY's, so probing a header match that way reads unrelated body text.
 Private Function CharBeforeRange(rng As Range) As String
     On Error Resume Next
     Dim p As Range: Set p = rng.Duplicate
     p.Collapse Direction:=wdCollapseStart
     If p.MoveStart(wdCharacter, -1) <> 0 Then CharBeforeRange = p.text
-End Function
-
-Private Function CharAfterRange(rng As Range) As String
-    On Error Resume Next
-    Dim p As Range: Set p = rng.Duplicate
-    p.Collapse Direction:=wdCollapseEnd
-    If p.MoveEnd(wdCharacter, 1) <> 0 Then CharAfterRange = p.text
 End Function
 
 ' ============================================================
@@ -1096,30 +1004,6 @@ Public Function DocumentHasUserHighlights(Doc As Document) As Boolean
         End With
     Next story
 End Function
-
-' ============================================================
-' RESTORE INTENTIONAL BLANKS
-' *blank* is the marker for an intentional use of the word.
-' After HighlightWord flags all "blank" occurrences, this
-' restores any that were wrapped in asterisks back to plain
-' "blank" with no highlight. MatchWildcards = True is
-' intentional and isolated to this one function.
-' ============================================================
-Private Sub RestoreIntentionalBlanks(Doc As Document)
-    Dim story As Range
-    For Each story In ReviewStories(Doc)
-        With story.Duplicate.Find
-            .ClearFormatting
-            .Replacement.ClearFormatting
-            .text = "\*blank\*"
-            .Replacement.text = "blank"
-            .MatchCase = False
-            .MatchWildcards = True
-            .Wrap = wdFindStop      ' story-scoped: wdFindContinue would escape it
-            .Execute Replace:=wdReplaceAll
-        End With
-    Next story
-End Sub
 
 ' ============================================================
 ' STRAIGHT-QUOTE CONVERSION
