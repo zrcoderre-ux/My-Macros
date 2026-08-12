@@ -119,7 +119,6 @@ Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
                       "Found:" & vbCrLf & summary & vbCrLf & _
                       "Highlighted items:" & vbCrLf & vbCrLf & _
                       "  Green = unmatched punctuation or double space" & vbCrLf & _
-                      "  Cyan  = placeholder word ""blank""" & vbCrLf & _
                       "  Pink  = possible leftover pseudonym (anonymizer fake)" & vbCrLf & vbCrLf & _
                       "The review covers headers, footers, and footnotes as well " & _
                       "as the body, so a highlight may not be in view." & _
