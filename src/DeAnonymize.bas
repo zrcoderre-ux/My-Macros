@@ -30,9 +30,9 @@ Attribute VB_Name = "DeAnonymize"
 ' reading them literally corrupts the text in both directions.
 '
 ' MACROS YOU RUN:
-'   DeAnonymizeTentative - locate the key, then replace every fake with its
-'                          real value throughout the document (in place).
-'   ReAnonymizeTentative - the reverse: replace every real value with its fake,
+'   DeAnonymizeTentative - Ctrl+Shift+D: locate the key, then replace every fake
+'                          with its real value throughout the document (in place).
+'   ReAnonymizeTentative - Ctrl+Shift+R: the reverse: replace every real value with its fake,
 '                          then export the anonymized text as a NEW Markdown
 '                          (.md) file so it is safe to share. Hyperlinks are
 '                          stripped (keeping their display text) before the
