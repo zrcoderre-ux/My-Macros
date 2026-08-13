@@ -510,6 +510,15 @@ End Function
 Private Function ApplyMarks(ByVal p As Paragraph, ByRef marks() As Byte) As Long
     On Error Resume Next
     Dim top As Long: top = UBound(marks)
+
+    ' Where each hyperlink's display text begins. Formatting assigned to one of
+    ' those characters ALONE is absorbed by the field boundary and never reaches
+    ' the letter -- and the linker anchors on the citation, so that character is
+    ' the first letter of the case name. Those are written the long way round.
+    Dim linkStarts() As Long
+    Dim nLinks As Long
+    nLinks = CollectLinkStarts(p, linkStarts)
+
     Dim i As Long, n As Long
     Dim ch As Range
 
@@ -518,21 +527,99 @@ Private Function ApplyMarks(ByVal p As Paragraph, ByRef marks() As Byte) As Long
         If i > top Then Exit For
         Select Case marks(i)
             Case MARK_ITALIC
-                ' Writing only what needs writing keeps this out of the revision
-                ' marks in a document edited with track changes on.
-                If ch.Font.Italic <> True Then
-                    ch.Font.Italic = True
-                    n = n + 1
-                End If
+                If SetCharItalic(ch, True, linkStarts, nLinks) Then n = n + 1
             Case MARK_ROMAN
-                If ch.Font.Italic <> False Then
-                    ch.Font.Italic = False
-                    n = n + 1
-                End If
+                If SetCharItalic(ch, False, linkStarts, nLinks) Then n = n + 1
         End Select
     Next ch
 
     ApplyMarks = n
+End Function
+
+' Set one character's italic, and mean it.
+'
+' A plain assignment is enough almost everywhere, and where it is enough that is
+' all this does -- a character already set the right way is not written at all,
+' which keeps the pass out of the revision marks in a document edited with track
+' changes on.
+'
+' The exception is the first character of a hyperlink's display text. Word keeps
+' that character's formatting on the field boundary, so an assignment to the
+' character by itself is swallowed and the letter comes back unchanged: the first
+' letter of a case name stays roman while the rest of the name goes italic. The
+' cure is the one ItalicizeCaseName already uses -- extend the range one position
+' back into the boundary and format that -- with the character before it read
+' first and put back after, since extending drags it along and it is usually the
+' "(" that opens the citation.
+'
+' The same repair runs whenever a plain assignment does not take, so a boundary
+' this code did not predict is still handled.
+Private Function SetCharItalic(ByVal ch As Range, ByVal wantItalic As Boolean, _
+                                ByRef linkStarts() As Long, ByVal nLinks As Long) As Boolean
+    On Error Resume Next
+    If ch.Font.Italic = wantItalic Then Exit Function        ' already right
+
+    If Not StartsALink(ch.start, linkStarts, nLinks) Then
+        ch.Font.Italic = wantItalic
+        If ch.Font.Italic = wantItalic Then
+            SetCharItalic = True
+            Exit Function
+        End If
+    End If
+
+    If ch.start < 1 Then Exit Function
+
+    Dim before As Range: Set before = ch.Duplicate
+    before.SetRange ch.start - 1, ch.start
+    Dim prevState As Long: prevState = before.Font.Italic
+
+    Dim ext As Range: Set ext = ch.Duplicate
+    ext.SetRange ch.start - 1, ch.End
+    ext.Font.Italic = wantItalic
+
+    ' Put the dragged-along character back the way it was. wdUndefined is not a
+    ' state to restore, so a mixed reading is left alone.
+    If prevState = True Then
+        before.Font.Italic = True
+    ElseIf prevState = False Then
+        before.Font.Italic = False
+    End If
+
+    SetCharItalic = True
+End Function
+
+' The display-text start of every hyperlink in the paragraph. Characters(1).Start
+' is the first character the reader sees; the field's own .Start points into the
+' field code and is no use here.
+Private Function CollectLinkStarts(ByVal p As Paragraph, ByRef starts() As Long) As Long
+    On Error Resume Next
+    ReDim starts(0 To 0)
+    Dim total As Long: total = p.Range.Hyperlinks.count
+    If total < 1 Then Exit Function
+
+    ReDim starts(1 To total)
+    Dim k As Long, got As Long
+    For k = 1 To total
+        Dim hr As Range
+        Set hr = p.Range.Hyperlinks(k).Range
+        If hr.Characters.count > 0 Then
+            got = got + 1
+            starts(got) = hr.Characters(1).start
+        End If
+    Next k
+
+    CollectLinkStarts = got
+End Function
+
+Private Function StartsALink(ByVal pos As Long, ByRef starts() As Long, _
+                              ByVal nLinks As Long) As Boolean
+    Dim k As Long
+    For k = 1 To nLinks
+        If starts(k) = pos Then
+            StartsALink = True
+            Exit Function
+        End If
+    Next k
 End Function
 
 ' Mark characters a..b, clamped to the paragraph.
