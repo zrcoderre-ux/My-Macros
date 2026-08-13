@@ -9,7 +9,7 @@ Attribute VB_Name = "MacroKeyBindings"
 '
 ' KeyCode modifiers: Control = 512, Shift = 256.
 ' Letter/keys used here: V = 86, T = 84, C = 67, H = 72, D = 68, K = 75,
-' Spacebar = 32.
+' R = 82, Spacebar = 32.
 '
 ' Note: Ctrl+Shift+V, Ctrl+Shift+C, Ctrl+Shift+D, Ctrl+Shift+K, and
 ' Ctrl+Shift+Space are built-in Word shortcuts; these assignments deliberately
@@ -56,6 +56,12 @@ Private Sub ApplyMacroKeyBindings()
     ' Ctrl+Shift+D -> DeAnonymizeTentative   (restore real names from the key)
     KeyBindings.Add KeyCode:=BuildKeyCode(68, 512, 256), _
                     KeyCategory:=1, Command:="DeAnonymizeTentative"
+
+    ' Ctrl+Shift+R -> ReAnonymizeTentative   (the other direction: real -> fake,
+    ' exported as Markdown). Next to Ctrl+Shift+D on purpose -- the two halves of
+    ' the same toggle sit one key apart.
+    KeyBindings.Add KeyCode:=BuildKeyCode(82, 512, 256), _
+                    KeyCategory:=1, Command:="ReAnonymizeTentative"
 
     ' Ctrl+Shift+K -> FormatHeadings   (Keep with next + underline roman titles)
     KeyBindings.Add KeyCode:=BuildKeyCode(75, 512, 256), _
