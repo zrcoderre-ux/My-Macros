@@ -35,6 +35,12 @@ Private Const SCREENTIP_PREFIX As String = "CiteLink:: "  ' tag identifying our 
 ' Persisted in the registry (SaveSetting/GetSetting) so it survives Word
 ' restarts. Flip it with the ToggleCitationProvider macro -- no code edit
 ' needed. New installs default to Westlaw.
+' What the citation-italics pass decided about one character. 0 -- the default
+' for every character it did not read -- means leave that character exactly as
+' the document has it.
+Private Const MARK_ITALIC As Byte = 1
+Private Const MARK_ROMAN  As Byte = 2
+
 Private Const PROVIDER_APP     As String = "MyMacros"
 Private Const PROVIDER_SECTION As String = "CitationLinker"
 Private Const PROVIDER_KEY     As String = "Provider"
@@ -413,18 +419,24 @@ End Function
 ' same way.
 '
 ' This pass ignores the links completely. It reads the paragraph's VISIBLE TEXT,
-' works out the runs a California citation has, and then locates each run with
-' Word's own FIND and formats the range Find returns:
+' works out the runs a California citation has, records a decision for each
+' CHARACTER, and then writes those decisions one character at a time:
 '
 '   (Center ... v. Lennar Corp.   (2009) 173 Cal.App.4th 1543, 1554   (Center for
 '    -------- italic ---------    ------------ roman ------------      Self-
 '                                                                      Improvement)
 '                                                                      -- italic --
 '
-' No index is ever turned into a document position, which is the point: a text
-' index and a document position are different coordinate systems wherever a field
-' sits, and citations are exactly where the fields are. Find lands on the right
-' characters whatever is in the way.
+' ONE CHARACTER AT A TIME is the point, and it is the third mechanism tried here.
+' Arithmetic on Range.Start misses because .Start counts positions that .Text
+' never returns -- a hyperlink's field code among them -- and a citation is
+' exactly where the fields are. Word's Find misses because it will not match a
+' run that crosses into or out of a field, which is where the reporter half of a
+' citation always sits: the case name matched and went italic, the tail did not
+' match and kept whatever italic it already had, and the whole citation read as
+' italic, numbers and all. A single character is inside the field or outside it,
+' never both, and the Characters collection IS the text the marks were worked out
+' from, in order. See ApplyMarks.
 '
 ' A citation it cannot read confidently is left exactly as it is -- the left edge
 ' of a case name is a guess in running prose, and a wrong guess italicizes the
@@ -449,7 +461,14 @@ Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
     If Right$(s, 1) = vbCr Then s = Left$(s, Len(s) - 1)
     If Len(s) < 12 Then Exit Function
 
-    Dim n As Long
+    ' One byte per character of the paragraph: 0 = not ours, leave it exactly as
+    ' it is; MARK_ITALIC; MARK_ROMAN. Nothing is written to the document while
+    ' the citations are being read -- the marks are collected first and applied
+    ' in a single pass, so a citation read later cannot fight one read earlier.
+    Dim marks() As Byte
+    ReDim marks(1 To Len(s))
+
+    Dim found As Long
     Dim i As Long
 
     ' ---- Full cites: "<name> v. <name> (year) <reporter>" ----
@@ -458,7 +477,7 @@ Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
         Dim vp As Long: vp = InStr(i, s, " v. ", vbTextCompare)
         If vp = 0 Then Exit Do
         Dim nextI As Long: nextI = vp + 4
-        n = n + MarkCitationAt(p, s, vp, nextI)
+        found = found + MarkCitationAt(s, vp, nextI, marks)
         i = nextI
     Loop
 
@@ -468,19 +487,71 @@ Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
         Dim cp As Long: cp = InStr(i, s, ", supra", vbTextCompare)
         If cp = 0 Then Exit Do
         Dim nextC As Long: nextC = cp + 7
-        n = n + MarkCitationAt(p, s, cp, nextC)
+        found = found + MarkCitationAt(s, cp, nextC, marks)
         i = nextC
     Loop
 
-    NormalizeParaItalics = n
+    If found = 0 Then Exit Function
+    NormalizeParaItalics = ApplyMarks(p, marks)
 End Function
+
+' Write the marks onto the paragraph, ONE CHARACTER AT A TIME.
+'
+' Character by character on purpose. The Characters collection is the paragraph's
+' text, in order, one range per character -- so character i is exactly character
+' i of the string the marks were worked out from, whatever fields the paragraph
+' contains. Every mechanism tried before this one could miss by a whole run:
+' arithmetic on Range.Start counts positions .Text never returns, and Find will
+' not match a run that crosses into or out of a hyperlink field, which is where
+' the reporter half of a citation always sits. A single character is inside the
+' field or outside it, never both.
+'
+' Returns how many characters were actually changed.
+Private Function ApplyMarks(ByVal p As Paragraph, ByRef marks() As Byte) As Long
+    On Error Resume Next
+    Dim top As Long: top = UBound(marks)
+    Dim i As Long, n As Long
+    Dim ch As Range
+
+    For Each ch In p.Range.Characters
+        i = i + 1
+        If i > top Then Exit For
+        Select Case marks(i)
+            Case MARK_ITALIC
+                ' Writing only what needs writing keeps this out of the revision
+                ' marks in a document edited with track changes on.
+                If ch.Font.Italic <> True Then
+                    ch.Font.Italic = True
+                    n = n + 1
+                End If
+            Case MARK_ROMAN
+                If ch.Font.Italic <> False Then
+                    ch.Font.Italic = False
+                    n = n + 1
+                End If
+        End Select
+    Next ch
+
+    ApplyMarks = n
+End Function
+
+' Mark characters a..b, clamped to the paragraph.
+Private Sub MarkRun(ByRef marks() As Byte, ByVal a As Long, ByVal b As Long, _
+                     ByVal what As Byte)
+    If a < 1 Then a = 1
+    If b > UBound(marks) Then b = UBound(marks)
+    Dim i As Long
+    For i = a To b
+        marks(i) = what
+    Next i
+End Sub
 
 ' Format the one citation whose parties end at anchor -- the " v. " of a full
 ' cite, or the comma of a short cite's ", supra". nextScan comes back at the end
 ' of what was handled so the caller does not read the same citation twice.
 ' Returns 1 when the citation was read and formatted, 0 when it was left alone.
-Private Function MarkCitationAt(ByVal p As Paragraph, ByVal s As String, _
-                                 ByVal anchor As Long, ByRef nextScan As Long) As Long
+Private Function MarkCitationAt(ByVal s As String, ByVal anchor As Long, _
+                                 ByRef nextScan As Long, ByRef marks() As Byte) As Long
     ' Where the roman tail starts: the "(year)" or the ", supra".
     Dim ts As Long
     If IsSupraTail(s, anchor) Then ts = anchor Else ts = CiteTailStartAfter(s, anchor)
@@ -500,96 +571,25 @@ Private Function MarkCitationAt(ByVal p As Paragraph, ByVal s As String, _
     Dim caseName As String: caseName = Mid$(s, ns, ne - ns + 1)
     If InStr(1, caseName, " v. ", vbTextCompare) = 0 And Not IsSupraTail(s, ts) Then Exit Function
 
-    ' Find could not match the name as one string: a field boundary inside it can
-    ' break the match. Format the parties on either side of the "v." separately,
-    ' and the separator with them -- three shorter runs, each wholly inside or
-    ' wholly outside the link, so at least the case name still comes out italic.
-    If FormatRun(p, caseName, True) = 0 Then
-        Dim vpos As Long: vpos = InStr(1, caseName, " v. ", vbTextCompare)
-        If vpos > 1 Then
-            FormatRun p, Left$(caseName, vpos - 1), True
-            FormatRun p, " v. ", True
-            FormatRun p, Mid$(caseName, vpos + 4), True
-        End If
-    End If
+    MarkRun marks, ns, ne, MARK_ITALIC
 
-    ' The tail is roman. On a short cite it starts AFTER ", supra": the supra
-    ' signal is italic, and ItalicizeSupraEverywhere has just made it so.
+    ' The tail is roman: the date through the reporter and pincite. On a short
+    ' cite the run starts AFTER ", supra" -- the supra signal is italic, and
+    ' ItalicizeSupraEverywhere has just made it so.
     Dim rf As Long: rf = ts
     If IsSupraTail(s, ts) Then rf = ts + 7
     Dim te As Long: te = CiteTailEnd(s, ts)
-    If te >= rf Then
-        Dim tailText As String: tailText = Mid$(s, rf, te - rf + 1)
-        If FormatRun(p, tailText, False) = 0 Then
-            ' Same field-boundary problem as the name: the link commonly starts
-            ' at the reporter, splitting the tail right after the date. Do the
-            ' two halves apart.
-            Dim sp As Long: sp = InStr(1, tailText, ") ")
-            If sp > 0 Then
-                FormatRun p, Left$(tailText, sp), False
-                FormatRun p, Mid$(tailText, sp + 2), False
-            End If
-        End If
-    End If
+    If te >= rf Then MarkRun marks, rf, te, MARK_ROMAN
 
     ' The parenthetical that introduces the case's short name is part of the case
     ' name and carries its italics.
     Dim a As Long, b As Long
     If ShortNameAfter(s, te + 1, caseName, a, b) Then
-        FormatRun p, Mid$(s, a, b - a + 1), True
+        MarkRun marks, a, b, MARK_ITALIC
     End If
 
     If te + 1 > nextScan Then nextScan = te + 1
     MarkCitationAt = 1
-End Function
-
-' Set or clear italic on every occurrence of text within the paragraph.
-'
-' FIND, not a computed range. Find searches the visible text and hands back a
-' range already positioned on it, so a run that crosses into or out of a
-' hyperlink field is formatted correctly without this code ever knowing the field
-' is there. Every attempt to compute these positions instead has put the italics
-' on the wrong words.
-'
-' Formatting the OTHER occurrences of the same run in the paragraph is correct,
-' not collateral: a case name is italic wherever it appears, and a reporter
-' citation is roman wherever it appears.
-Private Function FormatRun(ByVal p As Paragraph, ByVal text As String, _
-                            ByVal wantItalic As Boolean) As Long
-    On Error Resume Next
-    ' Find's search string caps at 255 characters; a longer run is left alone
-    ' rather than half-matched.
-    If Len(text) = 0 Or Len(text) > 250 Then Exit Function
-
-    Dim r As Range: Set r = p.Range.Duplicate
-    Dim guard As Long
-    With r.Find
-        .ClearFormatting
-        .Replacement.ClearFormatting
-        .text = text
-        .Forward = True
-        .Wrap = wdFindStop
-        .MatchCase = True
-        .MatchWholeWord = False
-        .MatchWildcards = False
-        .Format = False
-        Do While .Execute
-            guard = guard + 1
-            If guard > 20 Then Exit Do
-            FormatRun = FormatRun + 1
-            ' Font.Italic answers wdUndefined for a mixed run, which equals
-            ' neither True nor False -- so a partly-italic citation is corrected
-            ' rather than skipped. Writing only what needs writing keeps this out
-            ' of the revision marks in a document edited with track changes on.
-            Dim cur As Long: cur = r.Font.Italic
-            If wantItalic Then
-                If cur <> True Then r.Font.Italic = True
-            Else
-                If cur <> False Then r.Font.Italic = False
-            End If
-            r.Collapse wdCollapseEnd
-        Loop
-    End With
 End Function
 
 ' True when ", supra" starts at position k.
