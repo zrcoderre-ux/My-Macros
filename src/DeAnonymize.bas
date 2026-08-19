@@ -392,10 +392,13 @@ Public Sub DeAnonymizeTentative()
 
     ' Safety net: flag any pseudonym-pool word still present (even inside a
     ' larger word) in pink, so a fake the key missed doesn't slip through.
+    ' skipCaseNames: a pool word inside an italic cited case name is left alone
+    ' -- cases are never pseudonymized, so a hit there is the published
+    ' authority itself, not a leaked fake.
     SetPhase "Scanning for leftover pseudonyms"
     tMark = Timer
     Dim nFlags As Long
-    nFlags = HighlightResidualPseudonyms(oDoc)
+    nFlags = HighlightResidualPseudonyms(oDoc, skipCaseNames:=True)
     sTimes = sTimes & "  Pseudonym scan: " & PhaseSecs(tMark) & vbCrLf
 
     SetPhase ""
@@ -3516,12 +3519,12 @@ End Function
 ' skipCaseNames: leave pool words that sit inside a CITED CASE NAME alone. The
 ' pool is built of ordinary surnames, so a published authority routinely carries
 ' one ("Nash v. Superior Court", "Talbot, supra") and the net flagged it pink on
-' every close -- a standing false positive on text that was never a fake to begin
-' with. Passed True by the close review ONLY (modMain.RunAllDocumentChecks); the
-' de-anonymize pass leaves it False and still flags everything, because that run
-' is the one that has just rewritten names and is the last check before a shared
-' copy goes out. Email domains are never affected either way: a placeholder
-' domain is not part of a case name, so it stays flagged for both callers.
+' every pass -- a standing false positive on text that was never a fake to begin
+' with: cases are never pseudonymized, so a hit inside one is always the
+' authority itself. Passed True by both callers -- the close review
+' (modMain.RunAllDocumentChecks) and the de-anonymize macro. Email domains are
+' never affected either way: a placeholder domain is not part of a case name,
+' so it stays flagged regardless.
 Public Function HighlightResidualPseudonyms(ByVal oDoc As Document, _
                                             Optional ByVal bodyOnly As Boolean = False, _
                                             Optional ByVal skipCaseNames As Boolean = False) As Long
@@ -3665,8 +3668,8 @@ End Function
 ' skipCaseNames leaves a hit inside a cited case name unmarked (see InCaseName).
 ' A skipped hit still counts against MAX_HITS_PER_TERM: the cap is there to stop
 ' a runaway term, and a document full of citations must not turn it into an
-' unbounded scan. That also keeps the cap behaving exactly as before for the
-' de-anonymize caller, where nothing is ever skipped and seen = n.
+' unbounded scan. A caller that passes False (none today) still gets the old
+' behavior, where nothing is skipped and seen = n.
 Private Function HighlightExact(ByVal rng As Range, ByVal term As String, _
                                  Optional ByVal skipCaseNames As Boolean = False) As Long
     On Error Resume Next
@@ -3686,7 +3689,7 @@ Private Function HighlightExact(ByVal rng As Range, ByVal term As String, _
             seen = seen + 1
             ' Nested, not "skipCaseNames And InCaseName(r)": VBA's And does not
             ' short-circuit, so the flat form would read the font of every hit
-            ' for the de-anonymize caller, which never skips anything.
+            ' even for a caller that skips nothing.
             Dim mark As Boolean: mark = True
             If skipCaseNames Then
                 If InCaseName(r) Then mark = False
