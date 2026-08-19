@@ -75,10 +75,11 @@ Attribute VB_Name = "DeAnonymize"
 '     put one more edit into the judge's open document, which the reload at the
 '     end of the run then has to undo. De-anonymize still covers headers, because
 '     that direction is editing the real document on purpose.
-'   - Re-anonymize leaves names inside italic text alone: cited case names in a
-'     brief are italicized, so a party surname that also names a published case
-'     (e.g. "Nash v. Superior Court") is preserved rather than rewritten. This
-'     mirrors PDF-Linker's rule -- renaming a cited decision is worse than
+'   - Re-anonymize leaves names touching italic text alone: cited case names in
+'     a brief are italicized, so a party surname that also names a published
+'     case (e.g. "Nash v. Superior Court") is preserved rather than rewritten
+'     -- even when the italics are sloppy and cover only part of the match.
+'     This mirrors PDF-Linker's rule -- renaming a cited decision is worse than
 '     leaving a party name in -- and its caption exemption (the own caption/prose
 '     aren't italic, so the current parties are still replaced).
 '   - MARKUP. Replacement covers the comments story too, so a comment that names
@@ -725,8 +726,8 @@ Public Sub ReAnonymizeTentative()
            KeepRowsNote(nKeepRows) & vbCrLf & vbCrLf & _
            "Your document's page header was not touched: the export reads the " & _
            "body only, so nothing in a header reaches either file." & vbCrLf & vbCrLf & _
-           "Names inside italic cited case names were left as-is so a party " & _
-           "surname that also names a published case wasn't rewritten -- check " & _
+           "Names touching italic text (cited case names, even partly italic) " & _
+           "were left as-is so a published case wasn't renamed -- check " & _
            "any italicized cites if a real party name should have been replaced." & _
            MarkupNote(nComments, markedReal, markedFake, nResidual) & vbCrLf & vbCrLf & _
            "Saved an anonymized Markdown file (safe to share) to:" & vbCrLf & _
@@ -2913,8 +2914,9 @@ End Sub
 ' by losing occurrences (replacement removes the search term), so a stale hit
 ' costs one wasted sweep -- it can never skip a story that still needs one.
 '
-' protectCitations (re-anonymize only): leave any match that sits in italic text
-' untouched, so a real party name that also appears inside a cited case name
+' protectCitations (re-anonymize only): leave any match that touches italic text
+' untouched -- wholly or partly italic alike -- so a real party name that also
+' appears inside a cited case name
 ' (e.g. "Nash v. Superior Court") is not rewritten in the shared copy. This
 ' mirrors the PDF-Linker pseudonymizer's cardinal invariant -- renaming a cited
 ' decision is a worse failure than leaving a party name in -- and its caption
@@ -3100,8 +3102,8 @@ End Function
 '   - Italic protection: with protectCitations the native Find carries
 '     .Font.Italic = False, so a fully-italic cited case name is never matched.
 '     A partially-italic span fails the uniform-format criterion and is left for
-'     the manual sweep, whose existing rule (skip only when the WHOLE match is
-'     italic) then decides it -- same outcome as before.
+'     the manual sweep, which also refuses it (any italic contact protects a
+'     match there) -- so no italic-touching text is rewritten by either pass.
 '   - Odd mixed casings ("nAsH") match none of the three forms and fall through
 '     to the manual sweep, exactly as they always did.
 ' Returns True when any pass replaced something.
@@ -3215,14 +3217,22 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         '     "Nash" inside "Nashville" is not. Multi-word / punctuated finds
         '     (whole = False) keep the old literal-substring behavior.
         '
-        '  2. protectCitations (re-anonymize): a match in italic text is a cited
-        '     authority, left as-is so a published case name that shares a party
-        '     surname isn't rewritten in the shared copy.
+        '  2. protectCitations (re-anonymize): a match touching italic text is a
+        '     cited authority, left as-is so a published case name that shares a
+        '     party surname isn't rewritten in the shared copy. ANY italic
+        '     contact protects: Font.Italic = True is a case name outright, and
+        '     wdUndefined (partly italic) is almost always a citation with
+        '     sloppy italics -- a missed character, or a value straddling the
+        '     citation's edge -- and renaming a cited decision is a worse
+        '     failure than leaving a real name in the shared copy. Only a
+        '     uniformly NON-italic match (ordinary prose) is replaced.
         Dim doReplace As Boolean: doReplace = True
         If whole Then
             If Not WholeTokenBoundaries(scan) Then doReplace = False
         End If
-        If doReplace And protectCitations And scan.Font.Italic = True Then doReplace = False
+        If doReplace And protectCitations Then
+            If Not (scan.Font.Italic = False) Then doReplace = False
+        End If
         If doReplace Then
             ' assign directly (no smart-case) after recasing the replacement
             ' to the casing the fake appeared in.
