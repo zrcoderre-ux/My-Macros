@@ -700,9 +700,22 @@ End Function
 
 ' The last character of the roman tail: the date through the reporter and
 ' pincite, stopping before whatever comes next -- a short-name or explanatory
-' parenthetical, a parallel cite after ";", or the ")" closing the citation
-' sentence. Those are somebody else's to decide; only the span this is sure of
-' gets rewritten.
+' parenthetical, a parallel cite after ";", the ")" closing the citation
+' sentence, or (for an in-text cite) the sentence's own prose. Those are
+' somebody else's to decide; only the span this is sure of gets rewritten.
+'
+' The tail is walked TOKEN BY TOKEN, and only tokens a citation tail can
+' contain are taken (IsCiteTailToken): volume/page numbers, reporter
+' abbreviations, and the pincite connectives. The bracket characters alone
+' used to be the stop, and an IN-TEXT cite has none before the next
+' parenthetical -- so its roman run swept through the prose that followed, and
+' when a LATER citation sat in that prose ("In Doe v. Roe (2000) 20 Cal.4th
+' 100, 110, and later in Bruesewitz v. Wyeth LLC (2011) 562 U.S. 223, 242,
+' ..."), Doe's tail marked Bruesewitz's case name ROMAN and pushed nextScan
+' past its " v. " anchor, so the name never got its italics back. A supra
+' cite's tail did the same one loop later, overwriting italics the full-cite
+' pass had just applied. The first prose word fails every token test, which
+' stops the tail at the citation's true end.
 Private Function CiteTailEnd(ByVal s As String, ByVal ts As Long) As Long
     Dim i As Long
     Dim closePos As Long: closePos = ts
@@ -718,18 +731,92 @@ Private Function CiteTailEnd(ByVal s As String, ByVal ts As Long) As Long
         If closePos = 0 Then Exit Function
     End If
 
-    Dim e As Long: e = Len(s)
-    For i = closePos + 1 To Len(s)
-        Dim c As String: c = Mid$(s, i, 1)
-        If c = "(" Or c = "[" Or c = ")" Or c = "]" Or c = ";" Then
-            e = i - 1
+    Dim e As Long: e = closePos
+    Dim c As String
+    Dim tokEnd As Long
+    i = closePos + 1
+    Do While i <= Len(s)
+        Do While i <= Len(s)
+            If Mid$(s, i, 1) = " " Then i = i + 1 Else Exit Do
+        Loop
+        If i > Len(s) Then Exit Do
+        c = Mid$(s, i, 1)
+        If c = "(" Or c = "[" Or c = ")" Or c = "]" Or c = ";" Then Exit Do
+        tokEnd = i
+        Do While tokEnd <= Len(s)
+            c = Mid$(s, tokEnd, 1)
+            If c = " " Or c = "(" Or c = "[" Or c = ")" Or c = "]" Or c = ";" Then Exit Do
+            tokEnd = tokEnd + 1
+        Loop
+        If Not IsCiteTailToken(Mid$(s, i, tokEnd - i)) Then Exit Do
+        e = tokEnd - 1
+        i = tokEnd
+    Loop
+    CiteTailEnd = e
+End Function
+
+' True when tok can sit inside a citation's roman tail: a volume, page, or pin
+' range ("562", "223,", "1266-1267,"), a reporter abbreviation ("U.S.",
+' "Cal.App.4th", "Rptr.", "S.Ct."), an ordinal reporter part ("2d", "4th"), or
+' a pincite connective ("supra", "at", "p.", "pp.", "fn.", "fns."). The first
+' word of following prose -- lowercase, or capitalized without a period --
+' fails every test, and that is what ends the tail.
+Private Function IsCiteTailToken(ByVal tok As String) As Boolean
+    If Len(tok) = 0 Then Exit Function
+
+    ' Bare punctuation rides along (the "," between "supra" and the reporter).
+    Dim core As String: core = StripWordPunct(tok)
+    If Len(core) = 0 Then
+        IsCiteTailToken = True
+        Exit Function
+    End If
+
+    Select Case LCase$(core)
+        Case "supra", "at", "p", "pp", "fn", "fns"
+            IsCiteTailToken = True
+            Exit Function
+    End Select
+
+    ' Number run: digits with any of . , - and the en-dash between or after
+    ' them ("223,", "1266-1267,", "242.").
+    Dim i As Long, c As String
+    Dim allNum As Boolean: allNum = True
+    Dim hasDigit As Boolean
+    For i = 1 To Len(tok)
+        c = Mid$(tok, i, 1)
+        If c Like "#" Then
+            hasDigit = True
+        ElseIf c <> "." And c <> "," And c <> "-" And c <> ChrW$(8211) Then
+            allNum = False
             Exit For
         End If
     Next i
-    Do While e > ts
-        If Mid$(s, e, 1) = " " Then e = e - 1 Else Exit Do
-    Loop
-    CiteTailEnd = e
+    If allNum And hasDigit Then
+        IsCiteTailToken = True
+        Exit Function
+    End If
+
+    ' Ordinal reporter part: a digit followed by letters ("2d", "4th").
+    If Mid$(core, 1, 1) Like "#" Then
+        Dim alnum As Boolean: alnum = True
+        For i = 1 To Len(core)
+            If Not Mid$(core, i, 1) Like "[A-Za-z0-9]" Then
+                alnum = False
+                Exit For
+            End If
+        Next i
+        If alnum Then
+            IsCiteTailToken = True
+            Exit Function
+        End If
+    End If
+
+    ' Reporter abbreviation: starts with a capital and carries a period
+    ' ("U.S.", "Cal.App.4th", "L.Ed.2d"). A case name's first word has no
+    ' period, so a following in-text citation stops the tail here too.
+    If Mid$(tok, 1, 1) Like "[A-Z]" And InStr(1, tok, ".") > 0 Then
+        IsCiteTailToken = True
+    End If
 End Function
 
 ' Where the case name that ends at anchor begins, or 0 when the left edge cannot
