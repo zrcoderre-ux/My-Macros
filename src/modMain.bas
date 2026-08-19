@@ -292,8 +292,8 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' Superior Court") is not flagged here. The pool is ordinary surnames, so
     ' every ruling that cites authority collected pink marks on citations that
     ' were never fakes, and the review is run on every close. The de-anonymize
-    ' pass still flags them -- it calls this without the flag, so the check that
-    ' matters right after names have been rewritten is unchanged.
+    ' pass skips them too: cases are never pseudonymized, so a hit inside one
+    ' is always the published authority, not a leaked fake.
     nFake = DeAnonymize.HighlightResidualPseudonyms(Doc, skipCaseNames:=True)
     If nFake > 0 Then issues = True
 
