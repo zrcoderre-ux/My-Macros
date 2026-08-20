@@ -63,6 +63,12 @@ Attribute VB_Name = "DeAnonymize"
 '   - De-anonymize replaces longest fakes first, re-anonymize replaces longest
 '     real values first, so a bare-surname token never rewrites part of a
 '     longer full name.
+'   - POSSESSIVES round-trip from either kind of key row. A bare-name row
+'     ("Zachary" -> "John") already covers "Zachary's" at replace time, because
+'     the token-boundary rule treats an apostrophe as a boundary. A POSSESSIVE
+'     row ("Zachary's" -> "John's") is widened when the key is read: a derived
+'     bare mapping ("Zachary" -> "John") is added unless the key already covers
+'     that name. See DeriveBarePossessives.
 '   - Court identity (Department 515, Judge Honorable Alison Mackenzie, Judicial
 '     Assistant Steve Temblador, Courtroom Assistant Nancy Quintanilla) lives in
 '     the page header. De-anonymize fills it in there, which is the point of it.
@@ -307,8 +313,8 @@ Public Sub DeAnonymizeTentative()
     tMark = Timer
 
     Dim maps() As Mapping
-    Dim nMaps As Long, nKeepRows As Long, nUnusedRows As Long
-    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows, nUnusedRows) Then
+    Dim nMaps As Long, nKeepRows As Long, nUnusedRows As Long, nDerived As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows, nUnusedRows, nDerived) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
                "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
@@ -418,7 +424,7 @@ Public Sub DeAnonymizeTentative()
            " pseudonym(s), and filled in the court-identity header " & _
            "(department, judge, staff)." & UnusedRowsNote(nUnusedRows) & _
            AmbiguousNote(nAmbiguous) & KeepRowsNote(nKeepRows) & _
-           FragmentNote(nFragmentSkips) & sFlagLine & _
+           FragmentNote(nFragmentSkips) & DerivedRowsNote(nDerived) & sFlagLine & _
            TimingNote(sTimes, tRun, nRevs) & vbCrLf & vbCrLf & _
            "Review the result before finalizing.", vbInformation, "De-Anonymize"
     Exit Sub
@@ -456,8 +462,8 @@ Public Sub ReAnonymizeTentative()
     If Len(keyPath) = 0 Then Exit Sub          ' user cancelled the picker
 
     Dim maps() As Mapping
-    Dim nMaps As Long, nKeepRows As Long
-    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows) Then
+    Dim nMaps As Long, nKeepRows As Long, nDerived As Long
+    If Not ReadPseudonymKey(keyPath, maps, nMaps, nKeepRows, , nDerived) Then
         MsgBox "Could not read any real/fake mappings from:" & vbCrLf & vbCrLf & _
                keyPath & vbCrLf & vbCrLf & _
                "Make sure this is the pseudonym_key.xlsx PDF-Linker wrote " & _
@@ -723,7 +729,7 @@ Public Sub ReAnonymizeTentative()
 
     MsgBox "Re-anonymized: replaced " & distinctHits & " of " & nMaps & _
            " value(s) and blanked the court identity in the exported text." & _
-           KeepRowsNote(nKeepRows) & vbCrLf & vbCrLf & _
+           KeepRowsNote(nKeepRows) & DerivedRowsNote(nDerived) & vbCrLf & vbCrLf & _
            "Your document's page header was not touched: the export reads the " & _
            "body only, so nothing in a header reaches either file." & vbCrLf & vbCrLf & _
            "Names touching italic text (cited case names, even partly italic) " & _
@@ -2119,11 +2125,13 @@ Private Function ReadPseudonymKey(ByVal path As String, _
                                    ByRef maps() As Mapping, _
                                    ByRef nMaps As Long, _
                                    Optional ByRef nKeepRows As Long, _
-                                   Optional ByRef nUnusedRows As Long) As Boolean
+                                   Optional ByRef nUnusedRows As Long, _
+                                   Optional ByRef nDerived As Long) As Boolean
     On Error GoTo Fail
     nMaps = 0
     nKeepRows = 0
     nUnusedRows = 0
+    nDerived = 0
 
     Dim xl As Object
     Dim startedXl As Boolean: startedXl = False
@@ -2240,6 +2248,10 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     If startedXl Then xl.Quit
     Set wb = Nothing: Set xl = Nothing
 
+    ' Widen the key: a possessive row ("Zachary's" -> "John's") only ever
+    ' matches the possessive form, so derive the bare-name mapping from it too.
+    nDerived = DeriveBarePossessives(maps, nMaps)
+
     ReadPseudonymKey = (nMaps > 0)
     Exit Function
 
@@ -2268,6 +2280,75 @@ Private Function NzText(ByVal v As Variant) As String
     Else
         NzText = CStr(v)
     End If
+End Function
+
+' Widen the key with the BARE form of every possessive row. A row like
+' "Zachary's" -> "John's" only ever matches the possessive form, so a bare
+' "Zachary" in the document (or, de-anonymizing, a bare "John" in the draft)
+' slipped past the whole key. Deriving "Zachary" -> "John" from it covers both
+' directions, since every mapping is searched by whichever side the run needs.
+'
+' The REVERSE case needs no derived rows: replacement's token-boundary rule
+' treats an apostrophe as a boundary, so a bare-name row ("Zachary" -> "John")
+' already rewrites "Zachary's" to "John's" -- that is the long-standing
+' possessive fix in WholeTokenBoundaries.
+'
+' A derived row is skipped when the key already covers it: another row with the
+' same real value owns the bare name (trust the key over a derivation), and
+' another row with the same fake would make that fake ambiguous -- the guard in
+' ReplaceAllMappings would then retire BOTH rows, so declining to derive is
+' strictly safer. Derived rows inherit forwardOnly, so a bare form derived from
+' an "alt spelling" row stays forward-only like its parent. Returns how many
+' rows were added.
+Private Function DeriveBarePossessives(ByRef maps() As Mapping, _
+                                       ByRef nMaps As Long) As Long
+    Dim nOrig As Long: nOrig = nMaps
+    Dim added As Long: added = 0
+
+    Dim i As Long, j As Long
+    Dim bareReal As String, bareFake As String
+    For i = 1 To nOrig
+        bareReal = StripPossessive(maps(i).real)
+        bareFake = StripPossessive(maps(i).fake)
+        ' Both sides must be possessive: stripping only one would bind a bare
+        ' name to a possessive (or vice versa) and corrupt the text it touched.
+        ' A bare pair that came out identical is no mapping at all (the reader
+        ' drops such rows for the same reason).
+        If Len(bareReal) > 0 And Len(bareFake) > 0 Then
+            If StrComp(bareReal, bareFake, vbTextCompare) <> 0 Then
+                Dim covered As Boolean: covered = False
+                For j = 1 To nMaps
+                    If StrComp(maps(j).real, bareReal, vbTextCompare) = 0 _
+                       Or StrComp(maps(j).fake, bareFake, vbTextCompare) = 0 Then
+                        covered = True
+                        Exit For
+                    End If
+                Next j
+                If Not covered Then
+                    nMaps = nMaps + 1
+                    If nMaps > UBound(maps) Then ReDim Preserve maps(1 To nMaps + 16)
+                    maps(nMaps).real = bareReal
+                    maps(nMaps).fake = bareFake
+                    maps(nMaps).forwardOnly = maps(i).forwardOnly
+                    added = added + 1
+                End If
+            End If
+        End If
+    Next i
+
+    DeriveBarePossessives = added
+End Function
+
+' The value without its trailing possessive 's, or "" when it doesn't end in
+' one. Straight (') and curly (Word's autocorrect ’) apostrophes both qualify,
+' and the s may be either case ("ZACHARY'S" in a caption). Values of "'s" alone
+' (nothing left after stripping) answer "".
+Private Function StripPossessive(ByVal s As String) As String
+    If Len(s) < 3 Then Exit Function
+    Dim apo As String: apo = Mid$(s, Len(s) - 1, 1)
+    If apo <> "'" And apo <> ChrW$(8217) Then Exit Function
+    If LCase$(Right$(s, 1)) <> "s" Then Exit Function
+    StripPossessive = Left$(s, Len(s) - 2)
 End Function
 
 '==============================================================================
@@ -2549,6 +2630,19 @@ Private Function KeepRowsNote(ByVal nKeepRows As Long) As String
                    "{braced} keep-spec). Those are " & _
                    "operator instructions to leave a value alone, not " & _
                    "pseudonyms, so there is nothing to swap for them."
+End Function
+
+' One line for the result dialog when bare-name mappings were derived from
+' possessive key rows (see DeriveBarePossessives), so the "X of Y" tally's
+' larger Y is explained and a derived row the document never needed doesn't
+' read as a miss. Empty when none were derived.
+Private Function DerivedRowsNote(ByVal nDerived As Long) As String
+    If nDerived <= 0 Then Exit Function
+    DerivedRowsNote = vbCrLf & vbCrLf & "Added " & nDerived & " mapping(s) " & _
+                      "derived from possessive key rows: a row like " & _
+                      """Zachary's"" -> ""John's"" also swaps the bare name, " & _
+                      "so ""Zachary""/""John"" round-trip too. A derived " & _
+                      "mapping the document never used is not a miss."
 End Function
 
 ' True when the key's Replacement cell holds an operator KEEP INSTRUCTION rather
