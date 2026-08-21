@@ -2221,12 +2221,21 @@ Private Function ParaIsCodeSectionHeading(ByVal rng As Range) As Boolean
     ParaIsCodeSectionHeading = IsCodeSectionHeadingText(s)
 End Function
 
-' Regex test: an entire line that is a code-section citation, optionally led by
-' a roman numeral + period. Accepts an optional code-name run ("Civil Code ",
-' "Code Civ. Proc., ") before the section marker (Section / Sec. / section
+' Regex test plus a code-name check: an entire line that is a code-section
+' citation, optionally led by a roman numeral + period. The pattern accepts an
+' optional run of words before the section marker (Section / Sec. / section
 ' sign), then a section number with optional dotted parts and (a)(1)-style
 ' subdivisions -- and NOTHING after it, so "Section 5 of the lease" (a sentence)
 ' does not match. Case-insensitive.
+'
+' The pattern alone was not enough. Its leading run allows spaces, so it read a
+' whole PROSE SENTENCE that happens to end on a code section as the code's name,
+' whenever the sentence was short enough to clear the length cap above. "The sole
+' cause of action is for Violation of Health and Safety Code Section 25249.6." is
+' 84 characters, and the run swallowed everything in front of "Section" -- so
+' unlinking that sentence's citation underlined it instead of clearing it. The
+' run is now captured and has to read as the name of a code before the line
+' counts as a heading.
 Private Function IsCodeSectionHeadingText(ByVal s As String) As Boolean
     Static re As Object
     If re Is Nothing Then
@@ -2234,11 +2243,92 @@ Private Function IsCodeSectionHeadingText(ByVal s As String) As Boolean
         re.IgnoreCase = True
         re.Global = False
         re.Pattern = "^(?:[IVXLCDM]{1,7}\.\s+)?" & _
-                     "(?:[A-Za-z][A-Za-z.,'&/ ]*\s)?" & _
+                     "([A-Za-z][A-Za-z.,'&/ ]*\s)?" & _
                      "(?:" & ChrW(167) & "|Section|Sec\.)\s*" & _
                      "\d[\d.]*(?:\s*\([A-Za-z0-9]+\))*\.?$"
     End If
-    IsCodeSectionHeadingText = re.Test(s)
+
+    Dim ms As Object
+    Set ms = re.Execute(s)
+    If ms.count = 0 Then Exit Function
+
+    ' The run is optional, and a group that did not participate comes back Empty
+    ' rather than "" -- hence the concatenation.
+    IsCodeSectionHeadingText = IsCodeNameRun(Trim$("" & ms.Item(0).SubMatches(0)))
+End Function
+
+
+' True when s -- the run of words in front of the section marker -- reads as the
+' NAME OF A CODE and nothing else. An empty run is true: "Section 1942.4" alone
+' on a line needs no code name in front of it.
+'
+' A code name is short, it says "Code", and it is written in title case: every
+' word is capitalized or abbreviated apart from the few lowercase connectors a
+' code name carries ("Health AND Safety Code", "Code OF Civil Procedure"). A
+' sentence fails all three. "The sole cause of action is for Violation of Health
+' and Safety Code" runs twelve words and carries lowercase verbs and articles no
+' code name has, so the line it opens is prose, and its citation is unlinked and
+' un-underlined like every other citation in the body.
+Private Function IsCodeNameRun(ByVal s As String) As Boolean
+    ' "Welfare and Institutions Code" is four words, "Code of Civil Procedure"
+    ' four; six leaves room for a "Cal." or a "Former" in front.
+    Const MAX_WORDS As Long = 6
+
+    Dim parts() As String
+    Dim i As Long, n As Long
+    Dim w As String, bare As String
+    Dim firstBare As String, lastBare As String
+
+    s = Trim$(s)
+    If Len(s) = 0 Then
+        IsCodeNameRun = True
+        Exit Function
+    End If
+
+    parts = Split(s, " ")
+    For i = LBound(parts) To UBound(parts)
+        w = Trim$(parts(i))
+        If Len(w) > 0 Then
+            ' The ampersand of "Health & Saf. Code" is a word of the name but
+            ' carries no letters, so it is counted and otherwise passed over.
+            n = n + 1
+            If n > MAX_WORDS Then Exit Function
+
+            If w <> "&" Then
+                bare = LettersOnlyLower(w)
+                If Len(bare) = 0 Then Exit Function      ' punctuation on its own
+                If Not IsCodeNameWord(w, bare) Then Exit Function
+                ' A signal opens a citation sentence, never a code name.
+                If n = 1 Then
+                    If IsCiteSignalWord(bare) Then Exit Function
+                    firstBare = bare
+                End If
+                lastBare = bare
+            End If
+        End If
+    Next i
+
+    ' The name has to actually name a code, at one end or the other: "Civil Code"
+    ' and "Health & Saf. Code," end on it, "Code of Civil Procedure" opens on it.
+    IsCodeNameRun = IsCodeWord(firstBare) Or IsCodeWord(lastBare)
+End Function
+
+
+' One word of a code name: capitalized or abbreviated ("Health", "Saf."), or one
+' of the lowercase connectors a code name is allowed to carry. Binary compare, so
+' "[A-Z]" is the capital letters and nothing else.
+Private Function IsCodeNameWord(ByVal w As String, ByVal bare As String) As Boolean
+    Select Case bare
+        Case "and", "of", "the"
+            IsCodeNameWord = True
+        Case Else
+            IsCodeNameWord = (Left$(w, 1) Like "[A-Z]")
+    End Select
+End Function
+
+
+Private Function IsCodeWord(ByVal bare As String) As Boolean
+    IsCodeWord = (bare = "code" Or bare = "codes")
 End Function
 
 
