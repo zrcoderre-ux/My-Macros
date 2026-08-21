@@ -9,12 +9,14 @@ Attribute VB_Name = "MacroKeyBindings"
 '
 ' KeyCode modifiers: Control = 512, Shift = 256.
 ' Letter/keys used here: V = 86, T = 84, C = 67, H = 72, D = 68, K = 75,
-' R = 82, Spacebar = 32.
+' R = 82, B = 66, Spacebar = 32.
 '
-' Note: Ctrl+Shift+V, Ctrl+Shift+C, Ctrl+Shift+D, Ctrl+Shift+K, and
+' Note: Ctrl+Shift+V, Ctrl+Shift+C, Ctrl+Shift+D, Ctrl+Shift+K, Ctrl+Shift+B and
 ' Ctrl+Shift+Space are built-in Word shortcuts; these assignments deliberately
 ' override them in this template. (Ctrl+Shift+K is Word's small caps, which
-' nothing here uses; the letter is worth more as "Keep with next".)
+' nothing here uses; the letter is worth more as "Keep with next". Ctrl+Shift+B
+' is Word's second shortcut for bold; Ctrl+B still bolds, so the letter is worth
+' more as "Body".)
 ' ============================================================
 Option Explicit
 
@@ -62,6 +64,11 @@ Private Sub ApplyMacroKeyBindings()
     ' the same toggle sit one key apart.
     KeyBindings.Add KeyCode:=BuildKeyCode(82, 512, 256), _
                     KeyCategory:=1, Command:="ReAnonymizeTentative"
+
+    ' Ctrl+Shift+B -> ReplaceBodyKeepHeader   (paste over the body of a merged
+    ' order, leaving the section break that holds the header in place).
+    KeyBindings.Add KeyCode:=BuildKeyCode(66, 512, 256), _
+                    KeyCategory:=1, Command:="ReplaceBodyKeepHeader"
 
     ' Ctrl+Shift+K -> FormatHeadings   (Keep with next + underline roman titles)
     KeyBindings.Add KeyCode:=BuildKeyCode(75, 512, 256), _
