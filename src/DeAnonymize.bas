@@ -399,9 +399,10 @@ Public Sub DeAnonymizeTentative()
 
     ' Safety net: flag any pseudonym-pool word still present (even inside a
     ' larger word) in pink, so a fake the key missed doesn't slip through.
-    ' skipCaseNames: a pool word inside an italic cited case name is left alone
-    ' -- cases are never pseudonymized, so a hit there is the published
-    ' authority itself, not a leaked fake.
+    ' skipCaseNames: a pool word inside a cited case name is left alone -- cases
+    ' are never pseudonymized, so a hit there is the published authority itself,
+    ' not a leaked fake. Any italic contact marks the case name, so a citation
+    ' whose italics are ragged is skipped too (see InCaseName).
     SetPhase "Scanning for leftover pseudonyms"
     tMark = Timer
     Dim nFlags As Long
@@ -3620,7 +3621,9 @@ End Function
 ' close review leaves this False and gets the full coverage the manual
 ' de-anonymize caller has always had.
 '
-' skipCaseNames: leave pool words that sit inside a CITED CASE NAME alone. The
+' skipCaseNames: leave pool words that sit inside a CITED CASE NAME alone -- a
+' case name being any match that TOUCHES italic text, ragged italics included
+' (InCaseName), the same test the replacement sweep uses to protect one. The
 ' pool is built of ordinary surnames, so a published authority routinely carries
 ' one ("Nash v. Superior Court", "Talbot, supra") and the net flagged it pink on
 ' every pass -- a standing false positive on text that was never a fake to begin
@@ -3811,14 +3814,25 @@ End Function
 
 ' True when a match sits inside a cited case name. Case names are italicized in
 ' these documents, and that is already the signal the replacement sweep trusts
-' for the same purpose: ReplaceInRange's protectCitations leaves an italic match
-' alone so a published case name sharing a party surname isn't rewritten. Word
-' returns wdUndefined for a partly-italic span, so "= True" means the WHOLE match
-' is italic -- the same whole-match rule that sweep applies, and it keeps a fake
-' that merely abuts a citation flagged.
+' for the same purpose: ReplaceInRange's protectCitations leaves a match touching
+' italic text alone so a published case name sharing a party surname isn't
+' rewritten.
+'
+' ANY italic contact counts, which is the same rule that sweep applies:
+' Font.Italic = True is a case name outright, and wdUndefined (partly italic) is
+' a citation whose italics are ragged -- a character the toggle missed, an
+' italicized run that starts one letter in, or a match straddling the citation's
+' edge. This used to require the WHOLE match to be italic, and the ragged ones
+' were the pink marks that kept landing on case names after a de-anonymize run.
+'
+' Italic is deliberately the ONLY signal. The textual grammar of a citation
+' ("X v. Y") would also match the caption and running header, where the parties
+' are the pseudonyms and a fake left behind is the most damaging one to miss.
 Private Function InCaseName(ByVal rng As Range) As Boolean
     On Error Resume Next
-    InCaseName = (rng.Font.Italic = True)
+    ' Not (= False): True and wdUndefined both mean italic is present. An
+    ' unreadable font leaves the default False -- the hit stays flagged.
+    InCaseName = Not (rng.Font.Italic = False)
 End Function
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,

@@ -288,12 +288,13 @@ Public Sub RunAllDocumentChecks(ByVal Doc As Document, _
     ' actually run are the handful of words the document contains; screen redraw
     ' is already suspended for the whole run by SuppressForReview.
     '
-    ' skipCaseNames: a pool word inside a CITED CASE NAME (italic, e.g. "Nash v.
-    ' Superior Court") is not flagged here. The pool is ordinary surnames, so
-    ' every ruling that cites authority collected pink marks on citations that
-    ' were never fakes, and the review is run on every close. The de-anonymize
-    ' pass skips them too: cases are never pseudonymized, so a hit inside one
-    ' is always the published authority, not a leaked fake.
+    ' skipCaseNames: a pool word inside a CITED CASE NAME (any match touching
+    ' italic text, e.g. "Nash v. Superior Court") is not flagged here. The pool
+    ' is ordinary surnames, so every ruling that cites authority collected pink
+    ' marks on citations that were never fakes, and the review is run on every
+    ' close. The de-anonymize pass skips them too: cases are never
+    ' pseudonymized, so a hit inside one is always the published authority, not
+    ' a leaked fake.
     nFake = DeAnonymize.HighlightResidualPseudonyms(Doc, skipCaseNames:=True)
     If nFake > 0 Then issues = True
 
