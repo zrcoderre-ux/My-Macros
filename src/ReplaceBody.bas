@@ -18,8 +18,10 @@ Attribute VB_Name = "ReplaceBody"
 '                           section, leaving that section's terminating mark --
 '                           and so its header, footer and page setup -- exactly
 '                           where it was. What Ctrl+A, Ctrl+V does, minus the
-'                           collateral damage. Must stay a no-argument Public Sub
-'                           to remain key-bindable.
+'                           collateral damage. Then runs the citation-link toggle
+'                           (Ctrl+Shift+H) over the document it just pasted in.
+'                           Must stay a no-argument Public Sub to remain
+'                           key-bindable.
 '
 ' WHICH SECTION IT REPLACES. The one the cursor is in. If the selection spans
 ' sections, or sits in a section holding no text (clicking past the break of a
@@ -35,7 +37,9 @@ Attribute VB_Name = "ReplaceBody"
 '     paragraph so the terminator's own formatting does not win.
 '   - Headers are never read or written here. They survive by not being in the
 '     way of the paste.
-'   - The whole run is one undo record: Ctrl+Z puts the old body back.
+'   - The whole run is one undo record: Ctrl+Z puts the old body back. The link
+'     toggle that follows is outside that record and keeps its own undo, so the
+'     Ctrl+Z that restores the old body is the second press, not the first.
 '==============================================================================
 Option Explicit
 
@@ -99,6 +103,36 @@ Public Sub ReplaceBodyKeepHeader()
     bUndoOpen = False
 
     Application.StatusBar = "Body replaced. Header, footer and page setup kept."
+
+    ' A body pasted in from outside arrives with its citations unlinked, and
+    ' without the heading, supra, curly-quote and italic passes that ride along
+    ' with the link work. Ctrl+Shift+H is what gets pressed next every time, so
+    ' press it here rather than charge a second keystroke for it. It is the same
+    ' toggle, not a one-way "add": a body pasted in with its links already on
+    ' comes back out unlinked, exactly as that shortcut would do it on its own.
+    '
+    ' Deliberately after EndCustomRecord: the toggle manages its own undo, and
+    ' folding it into this record would make Ctrl+Z unpick the links a step at a
+    ' time before it ever got back to the old body.
+    '
+    ' The paste is already done and reported by this point, so a failure inside
+    ' the toggle is not a failure of the replace -- it gets its own message and
+    ' does not send the caller down Fail.
+    On Error Resume Next
+    CitationLinker.ToggleCitationLinks
+    If Err.Number <> 0 Then
+        lErr = Err.Number
+        sErr = Err.Description
+        Err.Clear
+        On Error GoTo 0
+        MsgBox "The body was replaced, but the citation links could not be " & _
+               "toggled. Press Ctrl+Shift+H to run that pass on its own." & _
+               vbCrLf & vbCrLf & "Error " & lErr & ": " & sErr, _
+               vbExclamation, "Replace Body"
+        Exit Sub
+    End If
+    On Error GoTo 0
+
     Exit Sub
 
 Fail:

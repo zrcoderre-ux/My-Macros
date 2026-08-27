@@ -66,7 +66,8 @@ Private Sub ApplyMacroKeyBindings()
                     KeyCategory:=1, Command:="ReAnonymizeTentative"
 
     ' Ctrl+Shift+B -> ReplaceBodyKeepHeader   (paste over the body of a merged
-    ' order, leaving the section break that holds the header in place).
+    ' order, leaving the section break that holds the header in place, then run
+    ' the Ctrl+Shift+H citation-link toggle over what was just pasted in).
     KeyBindings.Add KeyCode:=BuildKeyCode(66, 512, 256), _
                     KeyCategory:=1, Command:="ReplaceBodyKeepHeader"
 
