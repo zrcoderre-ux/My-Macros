@@ -1,0 +1,26 @@
+# Line endings and binary safety for a Word VBA project.
+#
+# The VBE is a CRLF tool at both ends: Export-Macros.ps1 writes the modules in
+# src/ with CRLF, and Import-Macros.ps1 hands those same files back to
+# VBComponents.Import. Normalizing to LF in the repo and checking out CRLF means
+# the working tree matches what the VBE expects on every machine, whatever
+# core.autocrlf happens to be set to there -- rather than leaving that to a
+# per-clone setting nobody remembers to check.
+*.bas   text eol=crlf
+*.cls   text eol=crlf
+*.frm   text eol=crlf
+
+# The form's resource file is an OLE compound document, not text. Git's own
+# heuristic already reads it as binary on the strength of its NUL bytes, so this
+# line changes nothing today -- it is here so the form does not depend on that
+# heuristic continuing to fire. One LF rewritten to CRLF inside it corrupts the
+# form, and a corrupt .frx fails at import, which surfaces as a compile error in
+# a module that has nothing wrong with it.
+*.frx   binary
+
+# Windows scripts, and the .dotm if one is ever committed deliberately.
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.dotm  binary
+
+*.md    text
