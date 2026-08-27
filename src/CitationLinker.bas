@@ -75,6 +75,11 @@ Private Sub AddCitationLinks()
     Set doc = ActiveDocument
     If doc Is Nothing Then Exit Sub
 
+    ' Declared up here because the early exits below now link too: a document
+    ' the bridge finds nothing in can still carry Rules of Court references,
+    ' and CleanUp reports this count on every path.
+    Dim added As Long
+
     ' Re-running should not stack links, so clear ours first.
     RemoveCitationLinks_Quiet doc
 
@@ -149,8 +154,12 @@ Private Sub AddCitationLinks()
     Dim tsv As String
     tsv = ReadUtf8File(tmpOut)
     If Len(Trim$(tsv)) = 0 Then
-        MsgBox "No legal authorities were detected.", vbInformation, "Citation Linker"
-        Exit Sub
+        ' Nothing from the bridge is not nothing to link. The Rules of Court
+        ' pass reads the document itself, so a ruling that cites rules and no
+        ' cases still has links to place; CleanUp reports what it did.
+        Application.ScreenUpdating = False
+        LinkRulesOfCourt doc, added
+        GoTo CleanUp
     End If
 
     ' Parse rows. Normalize CRLF first: a bridge writing in Windows text mode
@@ -181,8 +190,10 @@ Private Sub AddCitationLinks()
         End If
     Next i
     If cnt = 0 Then
-        MsgBox "No legal authorities were detected.", vbInformation, "Citation Linker"
-        Exit Sub
+        ' As above: no rows from the bridge still leaves the rule pass its work.
+        Application.ScreenUpdating = False
+        LinkRulesOfCourt doc, added
+        GoTo CleanUp
     End If
     ReDim Preserve rows(0 To cnt - 1)
 
@@ -195,10 +206,8 @@ Private Sub AddCitationLinks()
     Application.ScreenUpdating = False
     On Error GoTo CleanUp
 
-    Dim added As Long
     Dim curBlk As Long, hasN As NormResult
     curBlk = -1
-    added = 0
 
     Dim k As Long
     For k = UBound(keep) To LBound(keep) Step -1
@@ -248,6 +257,10 @@ NextK:
     ' reuse that full cite's URL.
     LinkOrphanSupraCites doc, keep, added
 
+    ' And the California Rules of Court references, which the bridge does not
+    ' detect at all. See LinkRulesOfCourt for what counts as one.
+    LinkRulesOfCourt doc, added
+
 CleanUp:
     ' Capture the error before any On Error statement clears it.
     Dim lErrN As Long, sErrD As String
@@ -264,6 +277,8 @@ CleanUp:
                "If this mentions a missing file or path, check PYTHON_EXE and " & _
                "SCRIPT_DIR at the top of the module.", _
                vbExclamation, "Citation Linker"
+    ElseIf added = 0 Then
+        MsgBox "No legal authorities were detected.", vbInformation, "Citation Linker"
     Else
         MsgBox "Linked " & added & " citation" & IIf(added = 1, "", "s") & _
                " (" & ProviderDisplay(CitationProvider()) & ").", _
@@ -1176,7 +1191,8 @@ Private Function RemoveCitationLinks_Quiet(ByVal doc As Document, _
 End Function
 
 
-Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String) As Boolean
+Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As String, _
+                         Optional ByVal noItalics As Boolean = False) As Boolean
     On Error GoTo Fail
 
     ' First, cut off any tail of the PREVIOUS SENTENCE the span opened with; then
@@ -1255,7 +1271,9 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     ' anything applied to the first display character gets absorbed), re-derive
     ' the italic from citation structure: in a case cite the case name is
     ' everything to the left of the "(year)" date, or of ", supra".
-    ItalicizeCaseName h.Range
+    ' Skipped for a rule reference: "rule 3.1350(f)" carries no case name, and
+    ' the logic below is written to read a case cite, not a rule number.
+    If Not noItalics Then ItalicizeCaseName h.Range
 
     AddLink = True
     Exit Function
@@ -2063,10 +2081,162 @@ Fail:
 End Function
 
 
+'==============================================================================
+' CALIFORNIA RULES OF COURT
+'==============================================================================
+
+' Hyperlink every California Rules of Court reference in the body.
+'
+' In a California civil ruling a rule number written "rule 3.1350(f)" means the
+' California Rules of Court -- that is what the bare word "rule" is understood
+' to say -- so it is linked as one, whether or not the sentence spells out
+' "California Rules of Court, rule ..." first. The address is the official rule
+' page on courts.ca.gov, which is free and needs no provider account, unlike
+' the case links this module gets from the bridge.
+'
+' What counts as a rule number is the Rules of Court's own numbering: a title
+' number (1 through 10), a period, the rule number, and any run of subdivision
+' parentheticals -- "rule 8.204(a)(1)(B)". A rule cited without a title number
+' belongs to some other body of rules ("rule 12(b)(6)") and is left alone, as
+' is a title outside 1-10.
+'
+' THE ONE EXCEPTION IS A LOCAL RULE. "local rule 3.57" and "Local Rules, rule
+' 3.57" name a superior court's own rules, which are not published on that
+' site and are not the Rules of Court; a "local" in either of the two words
+' before the reference takes it out of this pass entirely.
+'
+' Runs after the bridge links are placed and skips any span already sitting
+' inside a hyperlink, so a rule the extractor did catch keeps its link.
+' Best-effort throughout: any failure is swallowed rather than allowed to
+' disturb the links already placed.
+Private Sub LinkRulesOfCourt(ByVal doc As Document, ByRef added As Long)
+    On Error Resume Next
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    ' "rule 3.1350" / "rules 8.204", plus any subdivision tail. The subdivision
+    ' class excludes whitespace and nested parens so it cannot run away into a
+    ' parenthetical of prose: "rule 3.1350 (which the parties ignored)" links
+    ' the rule number alone.
+    re.Pattern = "\brules?\s+(\d{1,2})\.(\d{1,4})(?:\([^()\s]{1,8}\))*"
+
+    Dim p As Paragraph
+    For Each p In doc.Paragraphs
+        Dim raw As String
+        raw = ParagraphRawText(p.Range)
+        If Len(raw) = 0 Then GoTo NextPara
+
+        Dim ms As Object
+        Set ms = re.Execute(raw)
+        If ms.count = 0 Then GoTo NextPara
+
+        Dim mm As Object
+        For Each mm In ms
+            ' FirstIndex is 0-based; PrecededByLocal reads 1-based positions.
+            If Not PrecededByLocal(raw, mm.FirstIndex + 1) Then
+                Dim url As String
+                url = RuleOfCourtUrl(mm.SubMatches(0), mm.SubMatches(1))
+                If Len(url) > 0 Then
+                    LinkTextIfUnlinked p.Range, mm.Value, url, added, "rule", True
+                End If
+            End If
+        Next mm
+NextPara:
+    Next p
+End Sub
+
+
+' The courts.ca.gov address for one rule: title "3" and number "1350" in,
+' "https://courts.ca.gov/cms/rules/index/three/rule3_1350" out. The site spells
+' the title out in the path and writes the rule with an underscore for its
+' period. Returns "" when the title number is not a Rules of Court title, which
+' is the caller's signal to leave the reference unlinked.
+Private Function RuleOfCourtUrl(ByVal titleNum As String, ByVal ruleNum As String) As String
+    Dim titleWord As String
+    titleWord = RuleTitleWord(titleNum)
+    If Len(titleWord) = 0 Then Exit Function
+
+    RuleOfCourtUrl = "https://courts.ca.gov/cms/rules/index/" & titleWord & _
+                     "/rule" & CStr(CLng(titleNum)) & "_" & ruleNum
+End Function
+
+
+' Title number to the word courts.ca.gov puts in the path. The Rules of Court
+' run from title one to title ten; anything else is not one of them.
+Private Function RuleTitleWord(ByVal titleNum As String) As String
+    Select Case CLng(titleNum)
+        Case 1:  RuleTitleWord = "one"
+        Case 2:  RuleTitleWord = "two"
+        Case 3:  RuleTitleWord = "three"
+        Case 4:  RuleTitleWord = "four"
+        Case 5:  RuleTitleWord = "five"
+        Case 6:  RuleTitleWord = "six"
+        Case 7:  RuleTitleWord = "seven"
+        Case 8:  RuleTitleWord = "eight"
+        Case 9:  RuleTitleWord = "nine"
+        Case 10: RuleTitleWord = "ten"
+    End Select
+End Function
+
+
+' True when one of the two words before a rule reference is "local".
+'
+' Two words, not one, because the two shapes put a different number of them in
+' the way: "local rule 3.57" sits right against the reference, while "Local
+' Rules, rule 3.57" -- how a superior court's own rules are cited in full --
+' puts "Rules," between them.
+'
+' The walk back over the punctuation between words is capped, so this cannot
+' step across a long run of it into a preceding clause and find a "local" that
+' has nothing to do with this rule.
+Private Function PrecededByLocal(ByVal raw As String, ByVal matchStart As Long) As Boolean
+    Const MAXGAP As Long = 4
+
+    Dim i As Long
+    i = matchStart - 1
+
+    Dim w As Long
+    For w = 1 To 2
+        ' Back over the punctuation and spaces to the end of the previous word.
+        Dim gap As Long
+        gap = 0
+        Do While i >= 1
+            If IsRuleWordChar(Mid$(raw, i, 1)) Then Exit Do
+            gap = gap + 1
+            If gap > MAXGAP Then Exit Function
+            i = i - 1
+        Loop
+        If i < 1 Then Exit Function
+
+        ' And then across the word itself.
+        Dim wordEnd As Long
+        wordEnd = i
+        Do While i >= 1
+            If Not IsRuleWordChar(Mid$(raw, i, 1)) Then Exit Do
+            i = i - 1
+        Loop
+
+        If StrComp(Mid$(raw, i + 1, wordEnd - i), "local", vbTextCompare) = 0 Then
+            PrecededByLocal = True
+            Exit Function
+        End If
+    Next w
+End Function
+
+
+Private Function IsRuleWordChar(ByVal ch As String) As Boolean
+    IsRuleWordChar = (ch Like "[A-Za-z0-9]")
+End Function
+
+
 ' Find needle inside scope with Word Find (so field/footnote positions are
 ' handled) and hyperlink the first occurrence that is not already linked.
 Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
-                               ByVal url As String, ByRef added As Long)
+                               ByVal url As String, ByRef added As Long, _
+                               Optional ByVal typ As String = "case", _
+                               Optional ByVal noItalics As Boolean = False)
     On Error GoTo Done
     If Len(needle) = 0 Or Len(needle) > 250 Then Exit Sub
 
@@ -2090,7 +2260,7 @@ Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
         If Not fr.Find.Found Then Exit Do
 
         If fr.Hyperlinks.Count = 0 Then
-            If AddLink(fr, url, "case") Then added = added + 1
+            If AddLink(fr, url, typ, noItalics) Then added = added + 1
             Exit Do
         End If
 
