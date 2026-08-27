@@ -77,8 +77,13 @@ Private Sub AddCitationLinks()
 
     ' Declared up here because the early exits below now link too: a document
     ' the bridge finds nothing in can still carry Rules of Court references,
-    ' and CleanUp reports this count on every path.
+    ' and CleanUp reports this count on every path. The row array goes with it:
+    ' those exits hand it to the rule pass before the bridge's rows have been
+    ' filtered into it, so its declaration has to come first. Unallocated is the
+    ' right state there -- no bridge rows means no case cite to borrow a URL
+    ' from, and RuleUrl falls through to the public courts.ca.gov address.
     Dim added As Long
+    Dim keep() As CiteRow
 
     ' Re-running should not stack links, so clear ours first.
     RemoveCitationLinks_Quiet doc
@@ -198,7 +203,6 @@ Private Sub AddCitationLinks()
     ReDim Preserve rows(0 To cnt - 1)
 
     SortRows rows
-    Dim keep() As CiteRow
     keep = FilterOverlaps(rows)
 
     ' Apply links in reverse document order so any positional shift from a
