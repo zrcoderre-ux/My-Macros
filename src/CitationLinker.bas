@@ -158,7 +158,7 @@ Private Sub AddCitationLinks()
         ' pass reads the document itself, so a ruling that cites rules and no
         ' cases still has links to place; CleanUp reports what it did.
         Application.ScreenUpdating = False
-        LinkRulesOfCourt doc, added
+        LinkRulesOfCourt doc, keep, added
         GoTo CleanUp
     End If
 
@@ -192,7 +192,7 @@ Private Sub AddCitationLinks()
     If cnt = 0 Then
         ' As above: no rows from the bridge still leaves the rule pass its work.
         Application.ScreenUpdating = False
-        LinkRulesOfCourt doc, added
+        LinkRulesOfCourt doc, keep, added
         GoTo CleanUp
     End If
     ReDim Preserve rows(0 To cnt - 1)
@@ -257,9 +257,9 @@ NextK:
     ' reuse that full cite's URL.
     LinkOrphanSupraCites doc, keep, added
 
-    ' And the California Rules of Court references, which the bridge does not
-    ' detect at all. See LinkRulesOfCourt for what counts as one.
-    LinkRulesOfCourt doc, added
+    ' And the California Rules of Court references the bridge left bare. It
+    ' hands over its own rows so those links can point where its do.
+    LinkRulesOfCourt doc, keep, added
 
 CleanUp:
     ' Capture the error before any On Error statement clears it.
@@ -2087,12 +2087,20 @@ End Function
 
 ' Hyperlink every California Rules of Court reference in the body.
 '
-' In a California civil ruling a rule number written "rule 3.1350(f)" means the
-' California Rules of Court -- that is what the bare word "rule" is understood
-' to say -- so it is linked as one, whether or not the sentence spells out
-' "California Rules of Court, rule ..." first. The address is the official rule
-' page on courts.ca.gov, which is free and needs no provider account, unlike
-' the case links this module gets from the bridge.
+' The bridge already reads a rule cited in FULL -- "Cal. Rules of Court, rule
+' 3.1350(f)" -- and links it to Lexis or Westlaw along with everything else.
+' What it does not read is the bare form the rest of a ruling uses once that
+' full cite has been given: "rule 3.1350(f)", "rules 3.1350, 3.1354, and
+' 8.204". In a California civil ruling a rule number written that way is the
+' Rules of Court, so this pass links it as one.
+'
+' THE PROVIDER COMES FIRST. A bare reference takes the URL the bridge gave the
+' full cite of the SAME rule elsewhere in the document, so it lands where the
+' spelled-out cite lands -- the same borrow LinkOrphanSupraCites makes from a
+' case's full cite, and the reason a rule link follows the Lexis/Westlaw toggle
+' without knowing anything about either service. Only when the document never
+' cites that rule in full is there nothing to borrow, and only then does the
+' link fall back to the free official page on courts.ca.gov.
 '
 ' What counts as a rule number is the Rules of Court's own numbering: a title
 ' number (1 through 10), a period, the rule number, and any run of subdivision
@@ -2101,26 +2109,39 @@ End Function
 ' is a title outside 1-10.
 '
 ' THE ONE EXCEPTION IS A LOCAL RULE. "local rule 3.57" and "Local Rules, rule
-' 3.57" name a superior court's own rules, which are not published on that
-' site and are not the Rules of Court; a "local" in either of the two words
-' before the reference takes it out of this pass entirely.
+' 3.57" name a superior court's own rules, which are neither the Rules of Court
+' nor on that site; a "local" in either of the two words before the reference
+' takes it out of this pass entirely.
 '
 ' Runs after the bridge links are placed and skips any span already sitting
-' inside a hyperlink, so a rule the extractor did catch keeps its link.
+' inside a hyperlink, so a rule the bridge did catch keeps its own link.
 ' Best-effort throughout: any failure is swallowed rather than allowed to
 ' disturb the links already placed.
-Private Sub LinkRulesOfCourt(ByVal doc As Document, ByRef added As Long)
+Private Sub LinkRulesOfCourt(ByVal doc As Document, ByRef keep() As CiteRow, _
+                             ByRef added As Long)
     On Error Resume Next
+
+    ' One rule number: title, period, number, and any subdivision tail. The
+    ' subdivision class excludes whitespace and nested parens so it cannot run
+    ' away into a parenthetical of prose -- "rule 3.1350 (which the parties
+    ' ignored)" links the rule number alone.
+    Const NUM As String = "\d{1,2}\.\d{1,4}(?:\([^()\s]{1,8}\))*"
 
     Dim re As Object
     Set re = CreateObject("VBScript.RegExp")
     re.Global = True
     re.IgnoreCase = True
-    ' "rule 3.1350" / "rules 8.204", plus any subdivision tail. The subdivision
-    ' class excludes whitespace and nested parens so it cannot run away into a
-    ' parenthetical of prose: "rule 3.1350 (which the parties ignored)" links
-    ' the rule number alone.
-    re.Pattern = "\brules?\s+(\d{1,2})\.(\d{1,4})(?:\([^()\s]{1,8}\))*"
+    ' The word, the first number, and the rest of an enumeration after it.
+    ' Which of those trailing numbers are really rules is decided in
+    ' LinkRuleReference, from the word and the connectors; the pattern only has
+    ' to reach far enough to offer them.
+    re.Pattern = "\b(rules?)\s+" & NUM & _
+                 "(?:(?:,\s*and\s+|,\s*or\s+|,\s*|\s+and\s+|\s+or\s+)" & NUM & ")*"
+
+    Dim reNum As Object
+    Set reNum = CreateObject("VBScript.RegExp")
+    reNum.Global = True
+    reNum.Pattern = NUM
 
     Dim p As Paragraph
     For Each p In doc.Paragraphs
@@ -2130,22 +2151,167 @@ Private Sub LinkRulesOfCourt(ByVal doc As Document, ByRef added As Long)
 
         Dim ms As Object
         Set ms = re.Execute(raw)
-        If ms.count = 0 Then GoTo NextPara
+        If ms.Count = 0 Then GoTo NextPara
 
         Dim mm As Object
         For Each mm In ms
             ' FirstIndex is 0-based; PrecededByLocal reads 1-based positions.
             If Not PrecededByLocal(raw, mm.FirstIndex + 1) Then
-                Dim url As String
-                url = RuleOfCourtUrl(mm.SubMatches(0), mm.SubMatches(1))
-                If Len(url) > 0 Then
-                    LinkTextIfUnlinked p.Range, mm.Value, url, added, "rule", True
-                End If
+                LinkRuleReference p.Range, mm.Value, _
+                    (StrComp(mm.SubMatches(0), "rules", vbTextCompare) = 0), _
+                    reNum, keep, added
             End If
         Next mm
 NextPara:
     Next p
 End Sub
+
+
+' Link one rule reference inside one paragraph: "rule 3.1350(f)", or a whole
+' enumeration such as "rules 3.1350, 3.1354, and 8.204".
+'
+' The first number is linked together with the word that introduces it, so the
+' display reads "rule 3.1350"; each later number is linked on its own, since
+' the connectives between them are prose and do not belong in a link. Each gets
+' its own address -- an enumeration can cross titles.
+'
+' Applied RIGHT TO LEFT. A hyperlink field moves the text after it, so linking
+' the last number first leaves the offsets of the ones still to be linked
+' untouched -- the same reason the main loop applies the bridge's rows in
+' reverse document order.
+'
+' A trailing number is only taken when the text says the enumeration is one.
+' "rules" plural says it outright; after a singular "rule" the connector has to
+' be "and" or "or". A bare comma after "rule 3.1350" is far more often the end
+' of the clause than another rule, and "rule 3.1350, 4.2 percent of ..." must
+' not link "4.2". The first number that fails this, or that no address can be
+' built for, ends the enumeration -- what follows it is no longer a list of
+' rules.
+Private Sub LinkRuleReference(ByVal para As Range, ByVal refText As String, _
+                              ByVal isPlural As Boolean, ByVal reNum As Object, _
+                              ByRef keep() As CiteRow, ByRef added As Long)
+    On Error Resume Next
+
+    Dim nums As Object
+    Set nums = reNum.Execute(refText)
+    If nums.Count = 0 Then Exit Sub
+
+    ' Segment bounds, 1-based and inclusive, within refText. Segment 0 opens at
+    ' the word "rule"; the rest open at their own number.
+    Dim segA() As Long, segB() As Long, segUrl() As String
+    ReDim segA(0 To nums.Count - 1)
+    ReDim segB(0 To nums.Count - 1)
+    ReDim segUrl(0 To nums.Count - 1)
+
+    Dim n As Long
+    Dim k As Long
+    For k = 0 To nums.Count - 1
+        If k > 0 Then
+            If Not isPlural Then
+                ' Everything between the previous number and this one.
+                Dim gap As String
+                gap = Mid$(refText, segB(k - 1) + 1, nums.Item(k).FirstIndex - segB(k - 1))
+                If InStr(1, gap, "and", vbTextCompare) = 0 And _
+                   InStr(1, gap, "or", vbTextCompare) = 0 Then Exit For
+            End If
+        End If
+
+        Dim url As String
+        url = RuleUrl(nums.Item(k).Value, keep)
+        If Len(url) = 0 Then Exit For
+
+        If k = 0 Then segA(k) = 1 Else segA(k) = nums.Item(k).FirstIndex + 1
+        segB(k) = nums.Item(k).FirstIndex + Len(nums.Item(k).Value)
+        segUrl(k) = url
+        n = n + 1
+    Next k
+    If n = 0 Then Exit Sub
+
+    Dim fr As Range
+    Set fr = FindUnlinked(para, refText)
+    If fr Is Nothing Then Exit Sub
+
+    For k = n - 1 To 0 Step -1
+        Dim seg As Range
+        Set seg = SubRangeByChars(fr, segA(k), segB(k))
+        If Not seg Is Nothing Then
+            If AddLink(seg, segUrl(k), "rule", True) Then added = added + 1
+        End If
+    Next k
+End Sub
+
+
+' The address for one rule number, provider first.
+'
+' The bridge's own link for a full cite of this rule wins, so a bare "rule
+' 3.1350" opens the same Lexis or Westlaw page "Cal. Rules of Court, rule
+' 3.1350(f)" opens two paragraphs above it, and the Ctrl+Shift+H provider
+' toggle governs both. The free official page is the fallback: a rule the
+' document never cites in full has nothing to borrow, and so does every rule in
+' a document the bridge read nothing in.
+'
+' Subdivisions are dropped from the lookup and from the fallback address alike.
+' The rule is one document either way; "(f)(2)" says where to read in it.
+Private Function RuleUrl(ByVal numText As String, ByRef keep() As CiteRow) As String
+    Dim bare As String
+    bare = numText
+    Dim paren As Long
+    paren = InStr(bare, "(")
+    If paren > 0 Then bare = Left$(bare, paren - 1)
+
+    RuleUrl = ProviderUrlForRule(bare, keep)
+    If Len(RuleUrl) > 0 Then Exit Function
+
+    Dim dot As Long
+    dot = InStr(bare, ".")
+    If dot < 2 Or dot >= Len(bare) Then Exit Function
+    RuleUrl = RuleOfCourtUrl(Left$(bare, dot - 1), Mid$(bare, dot + 1))
+End Function
+
+
+' The URL the bridge gave a full cite of this rule, or "" when the document
+' carries none. A row qualifies when its text names a rule at all and carries
+' this rule number with no digit against either end -- so "3.135" is not read
+' out of "3.1350", and "3.10" not out of "13.10". Two rows disagreeing on the
+' address means the number is doing more than one job in this document, and
+' there is no way to choose: the fallback takes it from there.
+Private Function ProviderUrlForRule(ByVal bare As String, ByRef keep() As CiteRow) As String
+    On Error GoTo Fail
+    Dim wantUrl As String: wantUrl = ""
+
+    Dim i As Long
+    For i = LBound(keep) To UBound(keep)
+        Dim t As String: t = keep(i).txt
+        If Len(t) = 0 Or Len(keep(i).url) = 0 Then GoTo NextRow
+        If InStr(1, t, "rule", vbTextCompare) = 0 Then GoTo NextRow
+
+        Dim pos As Long: pos = InStr(1, t, bare, vbTextCompare)
+        Do While pos > 0
+            Dim okEdges As Boolean: okEdges = True
+            If pos > 1 Then okEdges = Not (Mid$(t, pos - 1, 1) Like "[0-9.]")
+            If okEdges Then
+                Dim after As Long: after = pos + Len(bare)
+                If after <= Len(t) Then okEdges = Not (Mid$(t, after, 1) Like "[0-9]")
+            End If
+            If okEdges Then
+                If wantUrl = "" Then
+                    wantUrl = keep(i).url
+                ElseIf StrComp(wantUrl, keep(i).url, vbTextCompare) <> 0 Then
+                    ProviderUrlForRule = ""      ' ambiguous rule number
+                    Exit Function
+                End If
+                Exit Do
+            End If
+            pos = InStr(pos + 1, t, bare, vbTextCompare)
+        Loop
+NextRow:
+    Next i
+
+    ProviderUrlForRule = wantUrl
+    Exit Function
+Fail:
+    ProviderUrlForRule = ""
+End Function
 
 
 ' The courts.ca.gov address for one rule: title "3" and number "1350" in,
@@ -2231,14 +2397,25 @@ Private Function IsRuleWordChar(ByVal ch As String) As Boolean
 End Function
 
 
-' Find needle inside scope with Word Find (so field/footnote positions are
-' handled) and hyperlink the first occurrence that is not already linked.
+' Hyperlink the first occurrence of needle inside scope that is not already
+' linked. The looking is FindUnlinked's; this puts the link on what it found.
 Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
-                               ByVal url As String, ByRef added As Long, _
-                               Optional ByVal typ As String = "case", _
-                               Optional ByVal noItalics As Boolean = False)
+                               ByVal url As String, ByRef added As Long)
+    Dim fr As Range
+    Set fr = FindUnlinked(scope, needle)
+    If fr Is Nothing Then Exit Sub
+    If AddLink(fr, url, "case") Then added = added + 1
+End Sub
+
+
+' The first occurrence of needle inside scope that is not already hyperlinked,
+' or Nothing. Word Find does the looking, so field and footnote positions are
+' handled; occurrences already linked are walked past rather than returned,
+' because a span inside a hyperlink is one some earlier pass has already
+' claimed and Word will not nest a field inside a field.
+Private Function FindUnlinked(ByVal scope As Range, ByVal needle As String) As Range
     On Error GoTo Done
-    If Len(needle) = 0 Or Len(needle) > 250 Then Exit Sub
+    If Len(needle) = 0 Or Len(needle) > 250 Then Exit Function
 
     Dim searchStart As Long: searchStart = scope.Start
     Dim guard As Long: guard = 0
@@ -2260,8 +2437,8 @@ Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
         If Not fr.Find.Found Then Exit Do
 
         If fr.Hyperlinks.Count = 0 Then
-            If AddLink(fr, url, typ, noItalics) Then added = added + 1
-            Exit Do
+            Set FindUnlinked = fr
+            Exit Function
         End If
 
         ' This occurrence is already linked -- resume past it.
@@ -2269,7 +2446,7 @@ Private Sub LinkTextIfUnlinked(ByVal scope As Range, ByVal needle As String, _
         If searchStart >= scope.End Then Exit Do
     Loop
 Done:
-End Sub
+End Function
 
 
 Private Sub ResetLinkFormatting(ByVal rng As Range)
