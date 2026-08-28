@@ -3116,13 +3116,41 @@ Private Sub LinkSectionList(ByVal p As Paragraph, ByVal mm As Object, _
     Set ns = reNum.Execute(tail)
     If ns.Count = 0 Then Exit Sub
 
+    ' The FIRST section's own link is the model for the ones after it. The
+    ' extractor wrote that link, and it carries what the extractor knows and the
+    ' document's own words do not -- the jurisdiction in front of the code name
+    ' above all: the row for "Code Civ. Proc., S 430.41" searches for the
+    ' California statute, and a search built from the page instead searched for
+    ' a "Code Civ. Proc." belonging to nobody. Swapping the section number
+    ' inside that address gives the section beside it the SAME search on the
+    ' same service, which is what the reader clicking either one expects.
+    Dim f As Long: f = -1
     Dim k As Long
+    For k = 0 To ns.Count - 1
+        If Not InsideParens(tail, ns.Item(k).FirstIndex + 1) Then
+            f = k
+            Exit For
+        End If
+    Next k
+    If f < 0 Then Exit Sub
+
+    Dim sibNum As String: sibNum = ns.Item(f).Value
+    Dim sibUrl As String
+    sibUrl = LinkAddressAt(p, base + ns.Item(f).FirstIndex, Len(sibNum))
+
     For k = ns.Count - 1 To 0 Step -1
         If k < MAXSEC Then
             ' A number inside "(...)" is a subdivision, not a section.
             If Not InsideParens(tail, ns.Item(k).FirstIndex + 1) Then
                 Dim num As String: num = ns.Item(k).Value
-                Dim url As String: url = SectionUrl(codeName, num, keep)
+
+                ' The sibling's address first; the citation text this pass can
+                ' build from the page only when there is no sibling to copy.
+                Dim url As String
+                url = ""
+                If k <> f Then url = SwapSectionNumber(sibUrl, sibNum, num)
+                If Len(url) = 0 Then url = SectionUrl(codeName, num, keep)
+
                 If Len(url) > 0 Then
                     Dim a As Long: a = base + ns.Item(k).FirstIndex
                     Dim seg As Range
@@ -3137,6 +3165,117 @@ Private Sub LinkSectionList(ByVal p As Paragraph, ByVal mm As Object, _
         End If
     Next k
 End Sub
+
+
+' The address of the link covering the run at a..a+n-1, or "" when nothing there
+' is linked. The fragment comes back with it: Word stores whatever follows a "#"
+' in SubAddress, and a provider's search URL can carry the citation there.
+Private Function LinkAddressAt(ByVal p As Paragraph, ByVal a As Long, _
+                               ByVal n As Long) As String
+    On Error Resume Next
+    Dim r As Range
+    Set r = SubRangeByChars(p.Range, a, a + n - 1)
+    If r Is Nothing Then Exit Function
+    If r.Hyperlinks.count < 1 Then Exit Function
+
+    Dim out As String: out = r.Hyperlinks(1).Address
+    Dim frag As String: frag = r.Hyperlinks(1).SubAddress
+    If Len(frag) > 0 Then out = out & "#" & frag
+    LinkAddressAt = out
+End Function
+
+
+' One section's address rewritten for the section beside it: the same URL with
+' oldNum swapped for newNum. "" when oldNum is not in it to swap -- and that
+' matters, because an address that does NOT carry its section number is an
+' address this cannot rewrite, and returning it unchanged would point the second
+' section at the FIRST one's text.
+'
+' Only a whole number is swapped. "1942" must not be read out of "1942.4", nor
+' "430.4" out of "430.41", so a digit, or a decimal point with a digit behind
+' it, against either end disqualifies the occurrence. A trailing bare period
+' does not: leginfo writes the section as "sectionNum=1942." and that period
+' ends the URL's own sentence, not the number.
+Private Function SwapSectionNumber(ByVal url As String, ByVal oldNum As String, _
+                                   ByVal newNum As String) As String
+    If Len(url) = 0 Or Len(oldNum) = 0 Then Exit Function
+    If StrComp(oldNum, newNum, vbTextCompare) = 0 Then
+        SwapSectionNumber = url
+        Exit Function
+    End If
+
+    Dim out As String
+    Dim at As Long: at = 1
+    Dim hits As Long
+    Dim guard As Long
+
+    Do While guard < 40
+        guard = guard + 1
+        Dim i As Long
+        i = InStr(at, url, oldNum, vbTextCompare)
+        If i = 0 Then Exit Do
+
+        If WholeNumberAt(url, i, Len(oldNum)) Then
+            out = out & Mid$(url, at, i - at) & newNum
+            hits = hits + 1
+        Else
+            out = out & Mid$(url, at, i + Len(oldNum) - at)
+        End If
+        at = i + Len(oldNum)
+    Loop
+
+    If hits = 0 Then Exit Function
+    SwapSectionNumber = out & Mid$(url, at)
+End Function
+
+
+' True when the run of n characters at i is a whole number rather than part of a
+' longer one -- nothing but a non-digit against each end, counting a decimal
+' point as part of the number only when a digit sits on the far side of it.
+'
+' The digit in front is read through PERCENT-ENCODING first. A provider's search
+' URL writes the space before the number as "%20", so the character against the
+' number is the "0" of that escape and every swap was refused -- and where the
+' address carried the number twice, once encoded and once not, refusing the
+' encoded one alone would have rewritten the fragment and left the search itself
+' pointing at the section before.
+Private Function WholeNumberAt(ByVal s As String, ByVal i As Long, _
+                               ByVal n As Long) As Boolean
+    If i > 1 Then
+        Dim b As String: b = Mid$(s, i - 1, 1)
+        If b Like "#" And Not InPercentEscape(s, i - 1) Then Exit Function
+        If b = "." And i > 2 Then
+            If Mid$(s, i - 2, 1) Like "#" Then Exit Function
+        End If
+    End If
+
+    Dim e As Long: e = i + n
+    If e <= Len(s) Then
+        Dim a As String: a = Mid$(s, e, 1)
+        If a Like "#" Then Exit Function
+        If a = "." And e < Len(s) Then
+            If Mid$(s, e + 1, 1) Like "#" Then Exit Function
+        End If
+    End If
+
+    WholeNumberAt = True
+End Function
+
+
+' True when the character at pos is one of the two hex digits of a "%XX" escape
+' -- so the "0" ending "%20" is not a digit the number in front of it runs on
+' from.
+Private Function InPercentEscape(ByVal s As String, ByVal pos As Long) As Boolean
+    If pos >= 3 Then
+        If Mid$(s, pos - 2, 1) = "%" Then
+            InPercentEscape = True
+            Exit Function
+        End If
+    End If
+    If pos >= 2 Then
+        If Mid$(s, pos - 1, 1) = "%" Then InPercentEscape = True
+    End If
+End Function
 
 
 ' True when position pos sits inside a "(...)" group -- more "(" than ")" ahead
@@ -3184,11 +3323,21 @@ End Function
 ' RuleUrl and ConstUrl.
 Private Function SectionUrl(ByVal codeName As String, ByVal num As String, _
                             ByRef keep() As CiteRow) As String
+    ' A California code is named as one. The page says "Code Civ. Proc." and
+    ' means the California statute; a search that only says "Code Civ. Proc."
+    ' means it to nobody, and the state has to be put back for it to land.
+    ' LegInfoLawCode is the test for "this is a California code" -- it answers
+    ' for those and for nothing else.
+    Dim nm As String: nm = codeName
+    If Len(LegInfoLawCode(nm)) > 0 Then
+        If Left$(LettersOnlyLower(nm), 3) <> "cal" Then nm = "Cal. " & nm
+    End If
+
     Dim cite As String
-    If Right$(LettersOnlyLower(codeName), 4) = "code" Then
-        cite = codeName & ", " & ChrW$(167) & " " & num      ' California style
+    If Right$(LettersOnlyLower(nm), 4) = "code" Then
+        cite = nm & ", " & ChrW$(167) & " " & num            ' California style
     Else
-        cite = codeName & " " & ChrW$(167) & " " & num       ' "28 U.S.C. S 1332"
+        cite = nm & " " & ChrW$(167) & " " & num             ' "28 U.S.C. S 1332"
     End If
 
     SectionUrl = ProviderSearchUrl(cite, keep)
