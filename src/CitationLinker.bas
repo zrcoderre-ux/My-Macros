@@ -7,6 +7,12 @@ Attribute VB_Name = "CitationLinker"
 ' (your existing tool) through word_cite_bridge.py, so there is one source of
 ' truth for citation parsing.
 '
+' Two bodies of authority the extractor does not read are read here instead --
+' a bare "rule 3.1350(f)" (LinkRulesOfCourt) and a California Constitution
+' reference (LinkCalConstitution) -- and both take their address from the
+' extractor's own rows, so every link in the document lands on the same
+' service.
+'
 ' MACROS YOU RUN:
 '   AddCitationLinks       - detect + hyperlink every authority (idempotent)
 '   RemoveCitationLinks    - remove only the links this tool added (recommended)
@@ -81,7 +87,7 @@ Private Sub AddCitationLinks()
     ' those exits hand it to the rule pass before the bridge's rows have been
     ' filtered into it, so its declaration has to come first. Unallocated is the
     ' right state there -- no bridge rows means no case cite to borrow a URL
-    ' from, and RuleUrl falls through to the public courts.ca.gov address.
+    ' from, and RuleUrl (like ConstUrl) falls through to a public address.
     Dim added As Long
     Dim keep() As CiteRow
 
@@ -160,10 +166,12 @@ Private Sub AddCitationLinks()
     tsv = ReadUtf8File(tmpOut)
     If Len(Trim$(tsv)) = 0 Then
         ' Nothing from the bridge is not nothing to link. The Rules of Court
-        ' pass reads the document itself, so a ruling that cites rules and no
-        ' cases still has links to place; CleanUp reports what it did.
+        ' and Constitution passes read the document itself, so a ruling that
+        ' cites a rule or article and no cases still has links to place;
+        ' CleanUp reports what it did.
         Application.ScreenUpdating = False
         LinkRulesOfCourt doc, keep, added
+        LinkCalConstitution doc, keep, added
         GoTo CleanUp
     End If
 
@@ -195,9 +203,10 @@ Private Sub AddCitationLinks()
         End If
     Next i
     If cnt = 0 Then
-        ' As above: no rows from the bridge still leaves the rule pass its work.
+        ' As above: no rows from the bridge still leaves those passes their work.
         Application.ScreenUpdating = False
         LinkRulesOfCourt doc, keep, added
+        LinkCalConstitution doc, keep, added
         GoTo CleanUp
     End If
     ReDim Preserve rows(0 To cnt - 1)
@@ -264,6 +273,11 @@ NextK:
     ' And the California Rules of Court references the bridge left bare. It
     ' hands over its own rows so those links can point where its do.
     LinkRulesOfCourt doc, keep, added
+
+    ' And the California Constitution, which the bridge does not read at all.
+    ' Same borrow, for the same reason: its links land on the provider the rest
+    ' of the document's links land on.
+    LinkCalConstitution doc, keep, added
 
 CleanUp:
     ' Capture the error before any On Error statement clears it.
@@ -1224,6 +1238,12 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
             Exit Do
         End If
     Loop
+
+    ' Then push the anchor back OUT to the left, over any of the case name the
+    ' extractor's span opened inside of -- see ExtendAnchorToCaseName. A rule
+    ' reference carries no case name, so the flag that skips its italics skips
+    ' this too.
+    If Not noItalics Then ExtendAnchorToCaseName rng
     On Error GoTo Fail
 
     ' An anchor with no text is the one input Word answers by writing the URL
@@ -1347,6 +1367,210 @@ Private Function OpensCitation(ByVal s As String, ByVal k As Long) As Boolean
     Loop
 End Function
 
+' Push a citation anchor back to the START of the case name.
+'
+' Where a full cite's span begins is the extractor's call, and two shapes defeat
+' it -- both leaving the link, and with it the italics, opening in the middle of
+' the case name:
+'
+'   NBC Subsidiary (KNBC-TV), Inc. v. Superior Court (1999) 20 Cal.4th 1178
+'                             ^ the span opened here: the parenthetical ended
+'                               the walk back through the parties
+'
+'   Board of Trustees v. Superior Court (2007) 149 Cal.App.4th 1154
+'            ^ and here: a lowercase word ended it
+'
+' So the anchor is walked left again from wherever it arrived, a word at a time,
+' and the link is widened to the leftmost CAPITALIZED word the walk accepts.
+' What it accepts is deliberately narrow, because guessing wide pulls the
+' judge's own prose into a Lexis link. See CaseNameStartBefore.
+'
+' Only a cite with PARTIES is touched -- " v. " somewhere in the anchor. A
+' statute has no case name to widen to, and its span sits in running prose where
+' the same walk would happily eat "the California Constitution and" out of
+' "under the California Constitution and Code of Civil Procedure section 437c".
+Private Sub ExtendAnchorToCaseName(ByVal rng As Range)
+    Const MAX_BACK As Long = 140
+
+    On Error Resume Next
+    If rng Is Nothing Then Exit Sub
+    If InStr(1, rng.text, " v. ", vbTextCompare) = 0 Then Exit Sub
+
+    Dim para As Range
+    Set para = rng.Paragraphs(1).Range
+    If para Is Nothing Then Exit Sub
+    If rng.start <= para.start Then Exit Sub
+
+    ' The text ahead of the anchor, inside its own paragraph. Character
+    ' positions have to run 1:1 with that string for MoveStart to land where the
+    ' walk says they will; a field or a footnote reference in front of the anchor
+    ' breaks that, and the length test is what catches it.
+    Dim before As Range
+    Set before = rng.Duplicate
+    before.SetRange para.start, rng.start
+    Dim s As String
+    s = before.text
+    If Len(s) = 0 Then Exit Sub
+    If Len(s) <> rng.start - para.start Then Exit Sub
+
+    Dim best As Long
+    best = CaseNameStartBefore(s)
+    If best = 0 Then Exit Sub
+
+    Dim back As Long
+    back = Len(s) - best + 1
+    If back <= 0 Or back > MAX_BACK Then Exit Sub
+
+    rng.MoveStart wdCharacter, -back
+
+    ' Never widen INTO an existing link. Word does not nest one field inside
+    ' another, and AddLink refuses an anchor that overlaps one -- so a widening
+    ' that reaches a link already there would cost the whole citation its own.
+    If rng.Hyperlinks.count > 0 Then rng.MoveStart wdCharacter, back
+End Sub
+
+
+' The 1-based index, in the text running up to a citation anchor, where the case
+' name that anchor opens inside of begins -- or 0 when the walk accepted no word
+' and the anchor should be left where the extractor put it.
+'
+' What the walk crosses, right to left:
+'
+'   - a capitalized word, unless it is one of the words that open a sentence or
+'     a signal rather than a case name ("See", "The", "Here", "Court"). "In re"
+'     is the exception, since that does open one;
+'   - a lowercase word ONLY as a joiner -- "of", "for", "the", "de", "ex rel."
+'     -- which joins a name and never starts it. See IsCaseNameJoiner for the
+'     two words a case name does use that this walk still will not cross;
+'   - a short parenthetical carrying no sentence punctuation, which is what
+'     "(KNBC-TV)" is and what the ")" closing a PREVIOUS citation is not.
+'
+' Anything else -- a bracket, a semicolon, a quote, a lowercase word that is no
+' joiner -- ends the walk where it stands. Since only a capitalized word ever
+' becomes the answer, a walk that ends on a joiner gives back the capitalized
+' word to its right, not the joiner.
+Private Function CaseNameStartBefore(ByVal s As String) As Long
+    Dim best As Long
+    Dim k As Long: k = Len(s)
+    Dim guard As Long
+
+    Do While k >= 1 And guard < 16
+        guard = guard + 1
+
+        ' Spaces, and the comma that separates the parts of a party's name.
+        Do While k >= 1
+            Dim sc As String: sc = Mid$(s, k, 1)
+            If sc = " " Or sc = Chr$(160) Or sc = "," Then k = k - 1 Else Exit Do
+        Loop
+        If k < 1 Then Exit Do
+
+        Dim c As String: c = Mid$(s, k, 1)
+
+        If c = ")" Then
+            Dim op As Long: op = MatchingOpenParen(s, k)
+            If op = 0 Then Exit Do
+            If Not IsNamePartParen(Mid$(s, op + 1, k - op - 1)) Then Exit Do
+            k = op - 1
+        ElseIf c = "(" Or c = "[" Or c = "]" Or c = ";" Or c = ":" Or IsQuoteChar(c) Then
+            Exit Do
+        Else
+            Dim ws As Long: ws = k
+            Do While ws >= 1
+                Dim wc As String: wc = Mid$(s, ws, 1)
+                If wc = " " Or wc = Chr$(160) Or wc = "(" Or wc = "[" Or wc = ")" Then Exit Do
+                ws = ws - 1
+            Loop
+            ws = ws + 1
+
+            Dim w As String: w = Mid$(s, ws, k - ws + 1)
+            Dim f As String: f = Left$(w, 1)
+
+            If f >= "A" And f <= "Z" Then
+                If IsSentenceLeadWord(w) And Not OpensInRe(s, ws) Then Exit Do
+                best = ws
+            ElseIf f >= "a" And f <= "z" Then
+                If Not IsCaseNameJoiner(w) Then Exit Do
+            ElseIf f = "&" Then
+                ' Joins two parties ("Smith & Jones"); never opens the name.
+            Else
+                Exit Do
+            End If
+            k = ws - 1
+        End If
+    Loop
+
+    CaseNameStartBefore = best
+End Function
+
+
+' The lowercase words this walk will cross to reach the rest of a case name.
+'
+' Deliberately NARROWER than IsNameConnector, which the italics pass uses. Two
+' of its words cannot be crossed from a standing start in the middle of a
+' sentence:
+'
+'   "and" -- "under the California Constitution and Smith v. Jones (2020)"
+'   would give up "California Constitution and" to the link, and a case name
+'   that really does carry an "and" ("Fair Employment and Housing v. Lucent")
+'   is the rarer of the two by a wide margin;
+'
+'   "in"  -- "the Court of Appeal in Ochoa v. Superior Court" would give up
+'   "Appeal in". "In re" is unaffected: its "In" is capitalized, and the
+'   capitalized branch of the walk reads it through OpensInRe.
+'
+' The cost is a link that stops short on a case name built around one of those
+' two words, which is the state the reference arrived in anyway.
+Private Function IsCaseNameJoiner(ByVal w As String) As Boolean
+    Select Case LCase$(StripWordPunct(w))
+        Case "of", "for", "the", "de", "del", "la", "las", "los", "van", _
+             "von", "der", "den", "da", "du", "ex", "rel", "et", "al", "re", _
+             "dba", "aka", "fka", "nka"
+            IsCaseNameJoiner = True
+    End Select
+End Function
+
+
+' The position of the "(" opening the group that closes at posClose, or 0 when
+' the group does not open inside this text.
+Private Function MatchingOpenParen(ByVal s As String, ByVal posClose As Long) As Long
+    Dim depth As Long
+    Dim i As Long
+    For i = posClose To 1 Step -1
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = ")" Then
+            depth = depth + 1
+        ElseIf c = "(" Then
+            depth = depth - 1
+            If depth = 0 Then
+                MatchingOpenParen = i
+                Exit Function
+            End If
+        End If
+    Next i
+End Function
+
+
+' True when a parenthetical sits INSIDE a case name -- "(KNBC-TV)", "(USA)" --
+' rather than closing something the case name has nothing to do with. It has to
+' be short, open on a letter or a digit, and carry none of the punctuation that
+' ends a sentence or a citation. That last test does the work: it is what stops
+' the walk at the ")" closing the citation before this one -- "... 20 Cal.4th
+' 1178, 1212.)" -- instead of swallowing that citation whole.
+Private Function IsNamePartParen(ByVal inner As String) As Boolean
+    If Len(inner) = 0 Or Len(inner) > 40 Then Exit Function
+    If Not Left$(inner, 1) Like "[A-Za-z0-9]" Then Exit Function
+
+    Dim i As Long
+    For i = 1 To Len(inner)
+        Dim c As String: c = Mid$(inner, i, 1)
+        If c = "." Or c = "!" Or c = "?" Or c = ";" Or c = ":" Then Exit Function
+        If IsQuoteChar(c) Then Exit Function
+    Next i
+
+    IsNamePartParen = True
+End Function
+
+
 ' Italicize the case-name portion of a linked citation's display text: the run
 ' from the case name's first letter up to the "(year)" date or ", supra". Works
 ' directly on that run (via the display Characters, whose positions are the true
@@ -1435,13 +1659,23 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     ' position before the first display character also italicizes whatever plain
     ' character sits immediately before the hyperlink field -- for a citation
     ' SENTENCE that is the outer "(" (e.g. "(Gutierrez v. Tostado (2025) ...").
-    ' The first display letter's italic is stored on its own character run, so
-    ' clearing italic on just that one preceding character removes the stray
-    ' italic on the "(" without disturbing the case name. Harmless when the
-    ' preceding character is a space (in-text cites): clearing invisible italic
-    ' on a space changes nothing visible.
+    ' Clearing italic on just that one preceding character takes the stray
+    ' italic off the "(" without disturbing the case name.
+    '
+    ' ONLY for a bracket, though. That undo ends AT the field boundary, and a
+    ' range ending there can reach the first display character as surely as the
+    ' back-extension reached it -- which is how a link opening on the case name
+    ' itself, "<link>Inc. v. Superior Court (1999) ...", came back with its
+    ' first letter roman in a document where the name around it was italic. A
+    ' bracket left italic is visible and worth that risk. The space or comma an
+    ' in-text cite follows is not: italic on a space shows nothing, so there is
+    ' nothing there to trade the case name's first letter for.
     If extendedBack Then
-        ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
+        Dim leadCh As String
+        leadCh = ActiveDocument.Range(startPos, disp.Characters(1).start).text
+        If leadCh = "(" Or leadCh = "[" Then
+            ActiveDocument.Range(startPos, disp.Characters(1).start).Font.Italic = False
+        End If
     End If
 
     ' When the whole supra cite is one link ("Galleria Plus, Inc., supra, 179
@@ -2348,6 +2582,426 @@ Private Function RuleTitleWord(ByVal titleNum As String) As String
         Case 9:  RuleTitleWord = "nine"
         Case 10: RuleTitleWord = "ten"
     End Select
+End Function
+
+
+' Hyperlink every California Constitution reference in the body: "Cal. Const.,
+' art. I, S 1", "California Constitution, article VI, section 10", and the
+' enumerated "Cal. Const., art. I, SS 7, 15". (S stands in for the section sign
+' in these comments; the code writes it as ChrW$(167) so this file stays ASCII.)
+'
+' The extractor does not read constitutional cites, so the reading is done here.
+' The ADDRESS, though, is the extractor's own: a constitutional cite goes to the
+' provider as a SEARCH for the citation itself, exactly as a statute does --
+' "Cal. Const., art. I, S 1" typed into Lexis lands on that section.
+'
+' What a provider's search URL looks like is not written down anywhere in this
+' module; the extractor builds those. So one is borrowed from a row the
+' extractor produced for THIS document and this citation is swapped in for the
+' row's own search terms -- see ProviderSearchUrl. What comes back is the same
+' search on the same service, which is how these links follow the Ctrl+Shift+H
+' provider toggle without this pass knowing anything about either service. The
+' rule pass borrows from the same rows for the same reason.
+'
+' The fallback, for a document the extractor read nothing in, is the free
+' official text on leginfo.legislature.ca.gov -- as courts.ca.gov is the rule
+' pass's fallback.
+'
+' Runs after the extractor's links are placed and skips any span already inside
+' a hyperlink, so a cite something else caught keeps the link it has.
+' Best-effort throughout: a failure here must not disturb the links already down.
+Private Sub LinkCalConstitution(ByVal doc As Document, ByRef keep() As CiteRow, _
+                                ByRef added As Long)
+    On Error Resume Next
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = ConstPattern()
+
+    Dim reNum As Object
+    Set reNum = CreateObject("VBScript.RegExp")
+    reNum.Global = True
+    reNum.Pattern = "\d+(?:\.\d+)?"
+
+    Dim p As Paragraph
+    For Each p In doc.Paragraphs
+        Dim raw As String
+        raw = ParagraphRawText(p.Range)
+        If Len(raw) = 0 Then GoTo NextPara
+
+        Dim ms As Object
+        Set ms = re.Execute(raw)
+        If ms.Count = 0 Then GoTo NextPara
+
+        Dim mm As Object
+        For Each mm In ms
+            LinkConstReference p.Range, mm, reNum, keep, added
+        Next mm
+NextPara:
+    Next p
+End Sub
+
+
+' The one reference this pass reads, in the forms a ruling writes it:
+'
+'   Cal. Const., art. I, S 1          California Constitution, article VI,
+'   Cal. Const. art. XIII A, S 2        section 10
+'   Cal. Const., art. I, SS 7, 15     Cal. Const., art. I, S 28, subd. (b)
+'
+' The article number is roman or arabic, with the letter that some of them carry
+' ("art. XIII A" -- Proposition 13); the section marker is the sign, singular or
+' doubled, or the word spelled out or abbreviated. What follows the first
+' section number is picked up only so an enumeration can be offered to
+' LinkConstReference, which decides for itself which of those numbers are really
+' sections. A subdivision tail ("subd. (b)(4)") is left outside the reference:
+' the section is one provision either way, and the subdivision says where in it
+' to read.
+Private Function ConstPattern() As String
+    Dim sec As String: sec = ChrW$(167)
+    Dim num As String: num = "\d+(?:\.\d+)?"
+
+    ConstPattern = "\bCal(?:if(?:ornia)?)?\.?\s*,?\s*Const(?:itution)?\.?\s*,?\s*" & _
+                   "art(?:icle)?\.?\s*((?:[IVXL]+|\d{1,2})(?:\s+[A-D])?)\s*,?\s*" & _
+                   "(" & sec & sec & "|" & sec & "|sections|section|secs\.|sec\.)\s*" & _
+                   "(" & num & ")" & _
+                   "(?:\s*,\s*(?:and\s+|or\s+)?" & num & ")*"
+End Function
+
+
+' Link one constitutional reference inside one paragraph.
+'
+' The first section number is linked together with everything that introduces it,
+' so the link reads "Cal. Const., art. I, S 1"; each later number in an
+' enumeration is linked on its own, the connectives between them being prose.
+' Each gets its own address, since each is its own section.
+'
+' A later number is only taken when the marker said SECTIONS -- "SS", "sections",
+' "secs.". After a singular marker a comma and a number is far more often the
+' rest of the sentence than another section.
+'
+' Applied right to left: a hyperlink field moves the text after it, so linking
+' the last number first leaves the ones still to be linked where they were.
+Private Sub LinkConstReference(ByVal para As Range, ByVal mm As Object, _
+                               ByVal reNum As Object, ByRef keep() As CiteRow, _
+                               ByRef added As Long)
+    On Error Resume Next
+
+    Dim refText As String: refText = mm.Value
+    Dim art As String: art = ConstArticleRoman(mm.SubMatches(0))
+    If Len(art) = 0 Then Exit Sub
+
+    Dim marker As String: marker = mm.SubMatches(1)
+    Dim firstNum As String: firstNum = mm.SubMatches(2)
+
+    ' Where that first section number sits inside the reference. Found through
+    ' the marker rather than by searching for the number outright, so an arabic
+    ' ARTICLE number is never mistaken for it ("art. 1, S 1").
+    Dim mpos As Long: mpos = InStr(1, refText, marker, vbTextCompare)
+    If mpos = 0 Then Exit Sub
+    Dim numStart As Long
+    numStart = InStr(mpos + Len(marker), refText, firstNum, vbTextCompare)
+    If numStart = 0 Then Exit Sub
+
+    ' Segment bounds, 1-based and inclusive, within refText.
+    Const MAXSEG As Long = 8
+    Dim segA() As Long, segB() As Long, segUrl() As String
+    ReDim segA(0 To MAXSEG - 1)
+    ReDim segB(0 To MAXSEG - 1)
+    ReDim segUrl(0 To MAXSEG - 1)
+
+    Dim n As Long
+    Dim k As Long
+
+    segA(0) = 1
+    segB(0) = numStart + Len(firstNum) - 1
+    segUrl(0) = ConstUrl(art, firstNum, keep)
+    If Len(segUrl(0)) = 0 Then Exit Sub
+    n = 1
+
+    If ConstMarkerIsPlural(marker) Then
+        Dim tail As String
+        tail = Mid$(refText, segB(0) + 1)
+        Dim ms2 As Object
+        Set ms2 = reNum.Execute(tail)
+        For k = 0 To ms2.Count - 1
+            If n >= MAXSEG Then Exit For
+            Dim u2 As String
+            u2 = ConstUrl(art, ms2.Item(k).Value, keep)
+            If Len(u2) = 0 Then Exit For
+            segA(n) = segB(0) + ms2.Item(k).FirstIndex + 1
+            segB(n) = segA(n) + Len(ms2.Item(k).Value) - 1
+            segUrl(n) = u2
+            n = n + 1
+        Next k
+    End If
+
+    Dim fr As Range
+    Set fr = FindUnlinked(para, refText)
+    If fr Is Nothing Then Exit Sub
+
+    For k = n - 1 To 0 Step -1
+        Dim seg As Range
+        Set seg = SubRangeByChars(fr, segA(k), segB(k))
+        If Not seg Is Nothing Then
+            ' noItalics: a constitutional cite carries no case name, and nothing
+            ' in it is italic.
+            If AddLink(seg, segUrl(k), "constitution", True) Then added = added + 1
+        End If
+    Next k
+End Sub
+
+
+' The address for one article and section, provider first.
+Private Function ConstUrl(ByVal artRoman As String, ByVal secNum As String, _
+                          ByRef keep() As CiteRow) As String
+    Dim cite As String
+    cite = "Cal. Const., art. " & artRoman & ", " & ChrW$(167) & " " & secNum
+
+    ConstUrl = ProviderSearchUrl(cite, keep)
+    If Len(ConstUrl) > 0 Then Exit Function
+
+    ' leginfo writes the section with its trailing period and the article
+    ' letter with a "+" for the space: ".../?lawCode=CONS&sectionNum=SEC.+2.1.
+    ' &article=XIII+A".
+    ConstUrl = "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml" & _
+               "?lawCode=CONS&sectionNum=SEC.+" & secNum & ".&article=" & _
+               Replace(artRoman, " ", "+")
+End Function
+
+
+' A provider search URL for arbitrary citation text, built from one the
+' extractor already produced for this document.
+'
+' Two ways in, tried in that order against each row's URL:
+'
+'   1. the query string names a parameter a search puts its terms in
+'      ("pdsearchterms", "query", ...) -- replace that parameter's value;
+'   2. the row's OWN citation text is findable in its URL -- replace it there.
+'
+' The first is the reliable one, because it does not care how the extractor
+' encoded the terms; the second is the safety net for a service that names its
+' parameter something this does not know. Either way the rest of the URL is left
+' exactly as it was, so the service, the other parameters, and the Ctrl+Shift+H
+' provider toggle all carry over untouched.
+'
+' "" when the document has no row to copy -- which includes the paths where the
+' extractor found nothing at all and keep() was never allocated, hence the trap
+' around a bare LBound.
+Private Function ProviderSearchUrl(ByVal term As String, ByRef keep() As CiteRow) As String
+    On Error GoTo Fail
+
+    Dim i As Long
+    For i = LBound(keep) To UBound(keep)
+        Dim u As String: u = keep(i).url
+        If Len(u) > 0 Then
+            If LooksLikeSearchUrl(u) Then
+                Dim out As String
+                out = SwapSearchTerms(u, term)
+                If Len(out) = 0 Then out = SwapCiteText(u, keep(i).txt, term)
+                If Len(out) > 0 Then
+                    ProviderSearchUrl = out
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+
+Fail:
+End Function
+
+
+' The URL with the value of its search-terms parameter replaced by term, or ""
+' when it carries no parameter this recognises. The replacement is written in
+' whatever encoding the value it replaces was written in.
+Private Function SwapSearchTerms(ByVal u As String, ByVal term As String) As String
+    Dim names As Variant
+    names = Array("pdsearchterms", "searchterms", "searchterm", "query", "terms", "q")
+
+    Dim lu As String: lu = LCase$(u)
+    Dim qs As Long: qs = InStr(1, lu, "?")
+    If qs = 0 Then Exit Function
+
+    Dim j As Long
+    For j = LBound(names) To UBound(names)
+        Dim key As String: key = names(j) & "="
+
+        Dim pos As Long: pos = InStr(qs, lu, key)
+        Do While pos > 0
+            ' The parameter has to open the query string or follow an "&", so a
+            ' short name is never read out of the tail of a longer one.
+            Dim prev As String: prev = Mid$(u, pos - 1, 1)
+            If prev = "?" Or prev = "&" Then
+                Dim vs As Long: vs = pos + Len(key)
+                Dim ve As Long: ve = InStr(vs, u, "&")
+                If ve = 0 Then ve = Len(u) + 1
+                SwapSearchTerms = Left$(u, vs - 1) & _
+                                  EncodeSearchTerm(term, EncodingOf(Mid$(u, vs, ve - vs))) & _
+                                  Mid$(u, ve)
+                Exit Function
+            End If
+            pos = InStr(pos + 1, lu, key)
+        Loop
+    Next j
+End Function
+
+
+' The URL with the row's own citation text -- wherever inside it that text sits,
+' in whichever of the three encodings it was written in -- replaced by term. ""
+' when the citation is not findable in its own URL, which is the case for a URL
+' that is not a search after all.
+Private Function SwapCiteText(ByVal u As String, ByVal cite As String, _
+                              ByVal term As String) As String
+    If Len(cite) < 6 Then Exit Function
+
+    Dim mode As Long
+    For mode = 0 To 2
+        Dim enc As String: enc = EncodeSearchTerm(cite, mode)
+        If Len(enc) > 0 Then
+            Dim pos As Long: pos = InStr(1, u, enc, vbTextCompare)
+            If pos > 0 Then
+                SwapCiteText = Left$(u, pos - 1) & EncodeSearchTerm(term, mode) & _
+                               Mid$(u, pos + Len(enc))
+                Exit Function
+            End If
+        End If
+    Next mode
+End Function
+
+
+' Which of EncodeSearchTerm's spellings an existing parameter value is written
+' in: "+" for a space, or percent-encoding. Percent-encoding is the answer when
+' the value settles nothing, since a URL cannot carry a raw space anyway.
+Private Function EncodingOf(ByVal val As String) As Long
+    If InStr(1, val, "%20") > 0 Then
+        EncodingOf = 1
+    ElseIf InStr(1, val, "+") > 0 Then
+        EncodingOf = 2
+    Else
+        EncodingOf = 1
+    End If
+End Function
+
+
+' True when a URL reads as a search rather than a link to one document: it has a
+' query string, and that query string names the parameter a search puts its
+' terms in. Substituting into anything else would build an address for a
+' document this citation has nothing to do with.
+Private Function LooksLikeSearchUrl(ByVal u As String) As Boolean
+    If InStr(1, u, "?") = 0 Then Exit Function
+    Dim lu As String: lu = LCase$(u)
+    LooksLikeSearchUrl = (InStr(1, lu, "search") > 0) Or _
+                         (InStr(1, lu, "query") > 0) Or _
+                         (InStr(1, lu, "terms") > 0)
+End Function
+
+
+' Citation text as a search URL writes it. Mode 0 leaves it alone, mode 1
+' percent-encodes it with "%20" for a space, mode 2 with "+" -- the three
+' spellings a search URL uses. Non-ASCII characters (the section sign) go out as
+' percent-encoded UTF-8, which is what a browser sends and what the extractor's
+' own URLs carry.
+Private Function EncodeSearchTerm(ByVal s As String, ByVal mode As Long) As String
+    If mode = 0 Then
+        EncodeSearchTerm = s
+        Exit Function
+    End If
+
+    Dim out As String
+    Dim i As Long
+    For i = 1 To Len(s)
+        Dim ch As String: ch = Mid$(s, i, 1)
+        Dim code As Long: code = AscW(ch)
+        If code < 0 Then code = code + 65536
+
+        If ch Like "[A-Za-z0-9]" Or ch = "-" Or ch = "_" Or ch = "." Or ch = "~" Then
+            out = out & ch
+        ElseIf ch = " " Then
+            If mode = 2 Then out = out & "+" Else out = out & "%20"
+        ElseIf code < 128 Then
+            out = out & "%" & Right$("0" & Hex$(code), 2)
+        ElseIf code < 2048 Then
+            out = out & "%" & Hex$(&HC0 Or (code \ 64)) & _
+                  "%" & Hex$(&H80 Or (code And 63))
+        Else
+            out = out & "%" & Hex$(&HE0 Or (code \ 4096)) & _
+                  "%" & Hex$(&H80 Or ((code \ 64) And 63)) & _
+                  "%" & Hex$(&H80 Or (code And 63))
+        End If
+    Next i
+
+    EncodeSearchTerm = out
+End Function
+
+
+' True when the section marker is the plural one: "SS", "sections", "secs.".
+Private Function ConstMarkerIsPlural(ByVal marker As String) As Boolean
+    Dim t As String: t = LCase$(Trim$(marker))
+    ConstMarkerIsPlural = (t = ChrW$(167) & ChrW$(167)) Or _
+                          (t = "sections") Or (t = "secs.")
+End Function
+
+
+' The article as leginfo and the reporters both write it -- a roman numeral in
+' capitals, and the letter after it when the article carries one ("XIII A"). A
+' ruling that wrote the number in arabic gets it converted; anything that is
+' neither roman nor arabic returns "", which leaves the reference unlinked.
+Private Function ConstArticleRoman(ByVal art As String) As String
+    Dim t As String: t = UCase$(Trim$(art))
+    If Len(t) = 0 Then Exit Function
+
+    ' Split off the article letter, whatever run of whitespace introduced it.
+    Dim letter As String
+    Dim sp As Long: sp = InStr(1, t, " ")
+    If sp > 0 Then
+        letter = Trim$(Mid$(t, sp + 1))
+        t = Trim$(Left$(t, sp - 1))
+        If Len(letter) <> 1 Then Exit Function
+        If Not letter Like "[A-D]" Then Exit Function
+    End If
+
+    Dim num As String
+    If t Like "*[!IVXL]*" Then
+        If Not IsNumeric(t) Then Exit Function
+        num = ArabicToRoman(CLng(t))
+    Else
+        num = t
+    End If
+    If Len(num) = 0 Then Exit Function
+
+    If Len(letter) > 0 Then num = num & " " & letter
+    ConstArticleRoman = num
+End Function
+
+
+' 1 to 39 as a roman numeral, which covers every article the California
+' Constitution has. "" for anything outside that.
+Private Function ArabicToRoman(ByVal n As Long) As String
+    If n < 1 Or n > 39 Then Exit Function
+
+    Dim out As String
+    Do While n >= 10
+        out = out & "X"
+        n = n - 10
+    Loop
+    If n = 9 Then
+        out = out & "IX"
+        n = 0
+    ElseIf n >= 5 Then
+        out = out & "V"
+        n = n - 5
+    End If
+    If n = 4 Then
+        out = out & "IV"
+        n = 0
+    End If
+    Do While n >= 1
+        out = out & "I"
+        n = n - 1
+    Loop
+
+    ArabicToRoman = out
 End Function
 
 
