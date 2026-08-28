@@ -525,8 +525,76 @@ Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
     Loop
 
     If found = 0 Then Exit Function
+
+    ' Reading the citations right is not the same as undoing a paragraph they
+    ' were read wrong in once. This adds the marks that undo it.
+    ClearStaleItalicGaps p, marks
+
     NormalizeParaItalics = ApplyMarks(p, marks)
 End Function
+
+' Take the italic back off the prose BETWEEN two citations when every character
+' of it is italic.
+'
+' This pass never sets that. A run it does not recognize is marked 0 and left
+' exactly as it was found, so an entirely italic gap is the fingerprint of a
+' citation this tool once misread. Before an 1800s date counted as a date --
+' see FindYearPos -- this paragraph
+'
+'     ... (Payne v. Elliot (1880) 54 Cal. 339, 342.) "It is the general rule
+'     that in actions for the conversion of personal property ... the property
+'     was wrongfully converted." (Wendling Lumber Co. v. Glenwood Lumber Co.
+'     (1908) 153 Cal. 411, 414.)
+'
+' read as ONE case name running from "Payne" to Wendling's "(1908)", because
+' 1880 was not a year and the next year in the paragraph was Wendling's. The
+' whole quotation between the two cites went italic with it. The date is read
+' correctly now; the documents it was read wrongly in are what this is for.
+'
+' Guarded three ways, because the judge's own italics live in these gaps too:
+' the gap must sit BETWEEN two citations this pass read, it must be long enough
+' to be a swallowed sentence rather than the punctuation between two cites, and
+' EVERY character in it must be italic. A gap carrying emphasis on some of its
+' words -- or an italic "supra" or short name among roman prose -- reads as
+' mixed, not italic, and is left alone.
+Private Sub ClearStaleItalicGaps(ByVal p As Paragraph, ByRef marks() As Byte)
+    Const MIN_GAP As Long = 20
+
+    On Error Resume Next
+    Dim top As Long: top = UBound(marks)
+    Dim i As Long: i = 1
+
+    ' Past the first marked run: a gap ahead of every citation is the sentence
+    ' the paragraph opens with, not something read as part of a case name.
+    Do While i <= top
+        If marks(i) <> 0 Then Exit Do
+        i = i + 1
+    Loop
+
+    Do While i <= top
+        Do While i <= top
+            If marks(i) = 0 Then Exit Do
+            i = i + 1
+        Loop
+        If i > top Then Exit Sub
+
+        Dim a As Long: a = i
+        Do While i <= top
+            If marks(i) <> 0 Then Exit Do
+            i = i + 1
+        Loop
+        If i > top Then Exit Sub          ' trailing gap: no citation after it
+        Dim b As Long: b = i - 1
+
+        If b - a + 1 >= MIN_GAP Then
+            Dim r As Range
+            Set r = SubRangeByChars(p.Range, a, b)
+            If Not r Is Nothing Then
+                If r.Font.Italic = True Then MarkRun marks, a, b, MARK_ROMAN
+            End If
+        End If
+    Loop
+End Sub
 
 ' Write the marks onto the paragraph, ONE CHARACTER AT A TIME.
 '
@@ -2165,38 +2233,63 @@ End Function
 ' containing a 4-digit year (19xx/20xx). Handles "(1992)" (California) as well
 ' as "(C.D. Cal. 2021)" / "(9th Cir. 2019)" (federal: court + year). Returns 0
 ' when no parenthesized year is present.
+' Every four-digit year in the text is tried, not just the first. A citation's
+' page numbers read as years -- "173 Cal.App.4th 1543, 1554" carries two -- and
+' giving up on the first candidate that turned out not to be in parentheses cost
+' the citation behind it its date.
 Private Function FindYearParen(ByVal s As String) As Long
-    Dim yearPos As Long
-    yearPos = FindYearPos(s)
-    If yearPos = 0 Then
-        FindYearParen = 0
-        Exit Function
-    End If
+    Dim scanAt As Long: scanAt = 1
+    Dim guard As Long
 
-    ' Walk left from the year to the "(" that opens its parenthetical. Stop if a
-    ' ")" is reached first (the year is not inside parentheses).
-    Dim i As Long
-    For i = yearPos - 1 To 1 Step -1
-        Dim c As String: c = Mid$(s, i, 1)
-        If c = "(" Then
-            FindYearParen = i
-            Exit Function
-        ElseIf c = ")" Then
-            Exit For
-        End If
-    Next i
+    Do While guard < 12
+        guard = guard + 1
+
+        Dim yearPos As Long
+        yearPos = FindYearPos(s, scanAt)
+        If yearPos = 0 Then Exit Do
+
+        ' Walk left from the year to the "(" that opens its parenthetical. Stop
+        ' if a ")" is reached first (the year is not inside parentheses).
+        Dim i As Long
+        For i = yearPos - 1 To 1 Step -1
+            Dim c As String: c = Mid$(s, i, 1)
+            If c = "(" Then
+                FindYearParen = i
+                Exit Function
+            ElseIf c = ")" Then
+                Exit For
+            End If
+        Next i
+
+        scanAt = yearPos + 4
+    Loop
+
     FindYearParen = 0
 End Function
 
 ' Position of the first standalone 4-digit year (19xx/20xx) in s, or 0.
-Private Function FindYearPos(ByVal s As String) As Long
+' The first four-digit year at or after startAt, or 0.
+'
+' 18-, 19-, and 20-hundreds. The 1800s belong here: the first volume of the
+' California Reports is 1850, and a ruling reaches back that far whenever the
+' point is old law -- "(Payne v. Elliot (1880) 54 Cal. 339, 342.)". While only
+' "19" and "20" counted, an 1880 date was not a date at all, and everything that
+' asks this where a citation's name stops and its tail begins ran on to the NEXT
+' citation's year: the case name read from "Payne" through the quotation that
+' followed the cite and into the case name after it, and the italics followed.
+'
+' It stops at 1800. A date before that is not something a California civil
+' ruling cites, and "17" would collect the section numbers that are: Civil Code
+' section 1717 is in half the fee motions there are.
+Private Function FindYearPos(ByVal s As String, Optional ByVal startAt As Long = 1) As Long
     Dim i As Long
-    For i = 1 To Len(s) - 3
+    If startAt < 1 Then startAt = 1
+    For i = startAt To Len(s) - 3
         Dim d1 As String, d2 As String, d3 As String, d4 As String
         d1 = Mid$(s, i, 1): d2 = Mid$(s, i + 1, 1)
         d3 = Mid$(s, i + 2, 1): d4 = Mid$(s, i + 3, 1)
         If d1 Like "#" And d2 Like "#" And d3 Like "#" And d4 Like "#" Then
-            If (d1 = "1" And d2 = "9") Or (d1 = "2" And d2 = "0") Then
+            If (d1 = "1" And (d2 = "8" Or d2 = "9")) Or (d1 = "2" And d2 = "0") Then
                 Dim okBefore As Boolean, okAfter As Boolean
                 okBefore = (i = 1)
                 If Not okBefore Then okBefore = Not (Mid$(s, i - 1, 1) Like "#")
