@@ -7,11 +7,12 @@ Attribute VB_Name = "CitationLinker"
 ' (your existing tool) through word_cite_bridge.py, so there is one source of
 ' truth for citation parsing.
 '
-' Two bodies of authority the extractor does not read are read here instead --
-' a bare "rule 3.1350(f)" (LinkRulesOfCourt) and a California Constitution
-' reference (LinkCalConstitution) -- and both take their address from the
-' extractor's own rows, so every link in the document lands on the same
-' service.
+' Three things the extractor does not read are read here instead -- a bare
+' "rule 3.1350(f)" (LinkRulesOfCourt), a California Constitution reference
+' (LinkCalConstitution), and the second and later section of an enumerated
+' statute cite (LinkEnumeratedSections) -- and all three take their address
+' from the extractor's own rows, so every link in the document lands on the
+' same service.
 '
 ' MACROS YOU RUN:
 '   AddCitationLinks       - detect + hyperlink every authority (idempotent)
@@ -165,13 +166,14 @@ Private Sub AddCitationLinks()
     Dim tsv As String
     tsv = ReadUtf8File(tmpOut)
     If Len(Trim$(tsv)) = 0 Then
-        ' Nothing from the bridge is not nothing to link. The Rules of Court
-        ' and Constitution passes read the document itself, so a ruling that
-        ' cites a rule or article and no cases still has links to place;
-        ' CleanUp reports what it did.
+        ' Nothing from the bridge is not nothing to link. The Rules of Court,
+        ' Constitution and code-section passes read the document itself, so a
+        ' ruling that cites a rule, an article or a statute and no cases still
+        ' has links to place; CleanUp reports what it did.
         Application.ScreenUpdating = False
         LinkRulesOfCourt doc, keep, added
         LinkCalConstitution doc, keep, added
+        LinkEnumeratedSections doc, keep, added
         GoTo CleanUp
     End If
 
@@ -207,6 +209,7 @@ Private Sub AddCitationLinks()
         Application.ScreenUpdating = False
         LinkRulesOfCourt doc, keep, added
         LinkCalConstitution doc, keep, added
+        LinkEnumeratedSections doc, keep, added
         GoTo CleanUp
     End If
     ReDim Preserve rows(0 To cnt - 1)
@@ -278,6 +281,10 @@ NextK:
     ' Same borrow, for the same reason: its links land on the provider the rest
     ' of the document's links land on.
     LinkCalConstitution doc, keep, added
+
+    ' And the sections after the first in an enumerated statute cite, which the
+    ' bridge reads as one citation and links once. Same borrow again.
+    LinkEnumeratedSections doc, keep, added
 
 CleanUp:
     ' Capture the error before any On Error statement clears it.
@@ -2954,6 +2961,295 @@ Private Function ConstUrl(ByVal artRoman As String, ByVal secNum As String, _
     ConstUrl = "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml" & _
                "?lawCode=CONS&sectionNum=SEC.+" & secNum & ".&article=" & _
                Replace(artRoman, " ", "+")
+End Function
+
+
+'==============================================================================
+' ENUMERATED CODE SECTIONS
+'==============================================================================
+
+' Hyperlink the SECOND and later section of an enumerated statute cite:
+'
+'   (Code Civ. Proc., SS 430.41, subd. (f), 430.80, subd. (a).)
+'                     ^^^^^^^^^ linked by the extractor
+'                                            ^^^^^^ left as plain text
+'
+' (S stands in for the section sign in these comments; the code writes it as
+' ChrW$(167) so this file stays ASCII.)
+'
+' The extractor reads that as ONE citation and links the section it opens with.
+' Every section after it is the same authority to a reader and no link at all to
+' the mouse, which is the whole point of the pass -- a ruling that pleads
+' "SS 430.41, 430.80" is citing two statutes and both should open.
+'
+' The ADDRESS is the extractor's own, borrowed exactly as the rule and
+' constitution passes borrow it: a search for the citation text, on the service
+' the rest of the document's links point at, so these follow the Ctrl+Shift+H
+' provider toggle without knowing anything about either service. See
+' ProviderSearchUrl. The fallback, for a document the extractor read nothing in,
+' is the free official text on leginfo.legislature.ca.gov.
+'
+' The citation text each link searches for is built from the enumeration's own
+' opening -- "Code Civ. Proc." + the section number -- so a code this pass has
+' never heard of still gets the right search. Only the leginfo fallback needs
+' the code by name, and a code it cannot name is left unlinked rather than sent
+' somewhere wrong.
+'
+' What it will read: a code name, the PLURAL section marker, and the numbers
+' after it. The marker has to be plural ("SS", "sections", "secs.") -- after a
+' singular "S" a comma and a number is far more often the rest of the sentence
+' than another section, the same line the rule and constitution passes draw. A
+' subdivision's own numbers are not sections: they sit inside "(...)", and
+' anything inside parentheses is skipped.
+'
+' Runs after the extractor's links are placed and skips any number already
+' inside a hyperlink, so the section it did read keeps the link it has.
+' Best-effort throughout: a failure here must not disturb the links already down.
+Private Sub LinkEnumeratedSections(ByVal doc As Document, ByRef keep() As CiteRow, _
+                                   ByRef added As Long)
+    On Error Resume Next
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = False              ' a code name is capitalized; prose is not
+    re.Pattern = SectionListPattern()
+
+    Dim reNum As Object
+    Set reNum = CreateObject("VBScript.RegExp")
+    reNum.Global = True
+    reNum.Pattern = SectionNumPattern()
+
+    Dim p As Paragraph
+    For Each p In doc.Paragraphs
+        Dim raw As String
+        raw = ParagraphRawText(p.Range)
+        If Len(raw) = 0 Then GoTo NextPara
+
+        Dim ms As Object
+        Set ms = re.Execute(raw)
+        If ms.Count = 0 Then GoTo NextPara
+
+        ' Right to left across the paragraph, for the same reason the numbers
+        ' inside one enumeration are linked right to left: this pass addresses
+        ' the text by POSITION, and a hyperlink field moves every position after
+        ' it. Working backwards leaves the positions not yet used untouched.
+        Dim mi As Long
+        For mi = ms.Count - 1 To 0 Step -1
+            LinkSectionList p, ms.Item(mi), reNum, keep, added
+        Next mi
+NextPara:
+    Next p
+End Sub
+
+
+' The enumeration, in the forms a ruling writes it:
+'
+'   Code Civ. Proc., SS 430.41, subd. (f), 430.80, subd. (a)
+'   Civ. Code, SS 1942, 1942.4          Gov. Code, SS 12940, 12965, subd. (b)
+'   Code of Civil Procedure sections 128.7 and 1005
+'   28 U.S.C. SS 1331, 1332
+'
+' The code name is a capitalized word and up to five more that join it -- the
+' words a code's name is built from, and the "of"/"and"/"&" between them. It has
+' to be capitalized, which is what keeps the match off the prose in front of it:
+' "under the provisions of Code Civ. Proc., SS ..." starts at "Code".
+'
+' A section number is two or more digits, the decimal parts some of them carry
+' ("2019.030"), and the letter a few end with ("437c"). Between two of them
+' there may be a subdivision -- which is left OUT of the link, since the section
+' is one provision either way -- and a comma, an "and", or an "or".
+Private Function SectionListPattern() As String
+    Dim sec As String: sec = ChrW$(167)
+    Dim num As String: num = SectionNumPattern()
+    Dim subd As String
+    subd = "(?:\s*,?\s*subds?\.\s*(?:\([^()]{1,10}\)\s*)+|(?:\([^()]{1,10}\))+)?"
+    Dim sep As String
+    sep = "(?:\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+)"
+
+    SectionListPattern = _
+        "((?:\d{1,2}\s+)?[A-Z][A-Za-z.&]*(?:\s+(?:of|and|the|&|[A-Z][A-Za-z.&]*)){0,5})" & _
+        "\s*,?\s*(" & sec & sec & "|[Ss]ections|[Ss]ecs\.)\s*" & _
+        num & subd & "(?:" & sep & num & subd & ")*"
+End Function
+
+
+' One section number. Shared by the enumeration pattern and the scan that walks
+' the numbers back out of it, so the two can never disagree about what one is.
+Private Function SectionNumPattern() As String
+    SectionNumPattern = "\d{2,5}(?:\.\d{1,4})*[a-z]?"
+End Function
+
+
+' Link the numbers of one enumeration, right to left.
+'
+' Each number is linked ON ITS OWN: the connectives between them are prose, and
+' the extractor's link on the first section already carries the code name. The
+' first number is offered too -- AddLink refuses an anchor already inside a
+' hyperlink, so on the usual document that is a no-op, and on one the extractor
+' read nothing in it is the link the section would otherwise never get.
+'
+' Positions come from the paragraph's own text and are converted through
+' SubRangeByChars, which is the only way to turn a text index back into a range
+' where a hyperlink field sits -- and by this point the first section has one.
+Private Sub LinkSectionList(ByVal p As Paragraph, ByVal mm As Object, _
+                            ByVal reNum As Object, ByRef keep() As CiteRow, _
+                            ByRef added As Long)
+    Const MAXSEC As Long = 8
+
+    On Error Resume Next
+
+    Dim refText As String: refText = mm.Value
+    Dim codeName As String: codeName = CodeNameOf(mm.SubMatches(0))
+    If Len(codeName) = 0 Then Exit Sub
+
+    Dim marker As String: marker = mm.SubMatches(1)
+    Dim mpos As Long: mpos = InStr(1, refText, marker, vbTextCompare)
+    If mpos = 0 Then Exit Sub
+
+    ' Everything after the marker, and where its first character sits in the
+    ' paragraph. mm.FirstIndex is 0-based; the rest of this is 1-based.
+    Dim tail As String: tail = Mid$(refText, mpos + Len(marker))
+    Dim base As Long: base = mm.FirstIndex + mpos + Len(marker)
+
+    Dim ns As Object
+    Set ns = reNum.Execute(tail)
+    If ns.Count = 0 Then Exit Sub
+
+    Dim k As Long
+    For k = ns.Count - 1 To 0 Step -1
+        If k < MAXSEC Then
+            ' A number inside "(...)" is a subdivision, not a section.
+            If Not InsideParens(tail, ns.Item(k).FirstIndex + 1) Then
+                Dim num As String: num = ns.Item(k).Value
+                Dim url As String: url = SectionUrl(codeName, num, keep)
+                If Len(url) > 0 Then
+                    Dim a As Long: a = base + ns.Item(k).FirstIndex
+                    Dim seg As Range
+                    Set seg = SubRangeByChars(p.Range, a, a + Len(num) - 1)
+                    If Not seg Is Nothing Then
+                        If seg.Hyperlinks.Count = 0 Then
+                            If AddLink(seg, url, "statute", True) Then added = added + 1
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next k
+End Sub
+
+
+' True when position pos sits inside a "(...)" group -- more "(" than ")" ahead
+' of it. That is how a subdivision's digits are told from a section's:
+' "SS 430.41, subd. (f)(2), 430.80" carries a "2" that is no section.
+Private Function InsideParens(ByVal s As String, ByVal pos As Long) As Boolean
+    Dim depth As Long
+    Dim i As Long
+    For i = 1 To pos - 1
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = "(" Then
+            depth = depth + 1
+        ElseIf c = ")" Then
+            If depth > 0 Then depth = depth - 1
+        End If
+    Next i
+    InsideParens = (depth > 0)
+End Function
+
+
+' The code name a section list opens with, tidied of its trailing comma, or ""
+' when what the pattern matched names no code at all.
+'
+' The test is that the name says "Code" (or "U.S.C.", or "C.F.R."). It is what
+' keeps the pass off every other capitalized run that can precede a section
+' sign -- a court's name, a party's, "Cal. Const., art. I, SS 7, 15", which
+' belongs to LinkCalConstitution and is left to it.
+Private Function CodeNameOf(ByVal prefix As String) As String
+    Dim t As String: t = Trim$(prefix)
+    Do While Len(t) > 0
+        Dim last As String: last = Right$(t, 1)
+        If last = "," Or last = " " Then t = Left$(t, Len(t) - 1) Else Exit Do
+    Loop
+    If Len(t) = 0 Then Exit Function
+
+    Dim key As String: key = LettersOnlyLower(t)
+    If InStr(1, key, "code") = 0 And InStr(1, key, "u s c") = 0 And _
+       InStr(1, key, "c f r") = 0 Then Exit Function
+
+    CodeNameOf = t
+End Function
+
+
+' The address for one code section, provider first -- the same order as
+' RuleUrl and ConstUrl.
+Private Function SectionUrl(ByVal codeName As String, ByVal num As String, _
+                            ByRef keep() As CiteRow) As String
+    Dim cite As String
+    If Right$(LettersOnlyLower(codeName), 4) = "code" Then
+        cite = codeName & ", " & ChrW$(167) & " " & num      ' California style
+    Else
+        cite = codeName & " " & ChrW$(167) & " " & num       ' "28 U.S.C. S 1332"
+    End If
+
+    SectionUrl = ProviderSearchUrl(cite, keep)
+    If Len(SectionUrl) > 0 Then Exit Function
+
+    Dim law As String: law = LegInfoLawCode(codeName)
+    If Len(law) = 0 Then Exit Function
+    SectionUrl = "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml" & _
+                 "?lawCode=" & law & "&sectionNum=" & num & "."
+End Function
+
+
+' The leginfo code token for a California code, by either of the names a ruling
+' writes it under -- the abbreviation ("Code Civ. Proc.") and the spelled-out
+' name ("Code of Civil Procedure"). "" for anything else, including federal
+' law, which is not on leginfo at all.
+'
+' Only the fallback needs this. When the extractor read anything in the
+' document, the link is a search for the citation text and the code's own name
+' does the work.
+Private Function LegInfoLawCode(ByVal codeName As String) As String
+    Select Case LettersOnlyLower(codeName)
+        Case "code civ proc", "code of civil procedure", "civ proc code"
+            LegInfoLawCode = "CCP"
+        Case "civ code", "civil code"
+            LegInfoLawCode = "CIV"
+        Case "evid code", "evidence code"
+            LegInfoLawCode = "EVID"
+        Case "gov code", "government code"
+            LegInfoLawCode = "GOV"
+        Case "bus prof code", "business and professions code"
+            LegInfoLawCode = "BPC"
+        Case "corp code", "corporations code"
+            LegInfoLawCode = "CORP"
+        Case "fam code", "family code"
+            LegInfoLawCode = "FAM"
+        Case "health saf code", "health and safety code"
+            LegInfoLawCode = "HSC"
+        Case "lab code", "labor code"
+            LegInfoLawCode = "LAB"
+        Case "pen code", "penal code"
+            LegInfoLawCode = "PEN"
+        Case "prob code", "probate code"
+            LegInfoLawCode = "PROB"
+        Case "veh code", "vehicle code"
+            LegInfoLawCode = "VEH"
+        Case "welf inst code", "welfare and institutions code"
+            LegInfoLawCode = "WIC"
+        Case "ins code", "insurance code"
+            LegInfoLawCode = "INS"
+        Case "rev tax code", "revenue and taxation code"
+            LegInfoLawCode = "RTC"
+        Case "educ code", "education code"
+            LegInfoLawCode = "EDC"
+        Case "com code", "commercial code"
+            LegInfoLawCode = "COM"
+        Case "pub util code", "public utilities code"
+            LegInfoLawCode = "PUC"
+        Case "lab code ann"
+            LegInfoLawCode = "LAB"
+    End Select
 End Function
 
 
