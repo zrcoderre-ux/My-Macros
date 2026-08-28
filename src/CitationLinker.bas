@@ -1348,10 +1348,10 @@ Private Sub TrimLeadingProse(ByVal rng As Range)
     cut = ProseRunEnd(s)
     If cut = 0 Or cut >= Len(s) Then Exit Sub
 
-    ' Repair pass, before the range gives the prose up. SubRangeByChars is the
-    ' only safe way to turn a text index back into a range here -- the span can
-    ' already contain a link from an earlier row, and .Start counts positions
-    ' .Text never returns.
+    ' The repair, taken while the range still holds the prose. SubRangeByChars is
+    ' the only safe way to turn a text index back into a range here: the span can
+    ' already contain a link placed for an earlier row, and .Start counts
+    ' positions .Text never returns.
     Dim dropped As Range
     Set dropped = SubRangeByChars(rng, 1, cut)
     If Not dropped Is Nothing Then
