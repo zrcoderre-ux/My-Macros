@@ -1313,43 +1313,112 @@ End Function
 '     English." (Penilla v. Westmont Corp. (2016) 3 Cal.App.5th 205, 209.)
 '
 ' -- so the judge's own quoted sentence ended up inside a Lexis link. The span
-' arrives that way; the character trim below only strips punctuation, so a span
-' opening on a WORD defeated it entirely.
+' arrives that way; the character trim in AddLink only strips punctuation, so a
+' span opening on a WORD defeated it entirely.
 '
-' The boundary used here is sentence-ending punctuation, a CLOSING QUOTE, and
-' then the "(" or "[" that opens the citation sentence: `English." (Penilla`.
-' All three are required. The quote alone would misfire on a citation carrying a
-' quoted parenthetical -- `Smith v. Jones (2020) 1 Cal.5th 1 ["no."]` ends in the
-' same two characters -- and it is the opening bracket after it that says a new
-' citation sentence starts here rather than a parenthetical closing.
+' The whole span is examined, not a window of it. It used to be the first 60
+' characters, which is enough for the sentence fragment above and nothing like
+' enough for a BLOCK QUOTATION -- the shape a ruling uses constantly:
 '
-' Only the first LOOK characters are examined, and the LAST boundary in that
-' window wins, so a span that swallowed two sentences still lands on the citation.
+'     "It is the general rule that in actions for the conversion of personal
+'     property ... it is sufficient to declare generally, that the property was
+'     wrongfully converted." (Wendling Lumber Co. v. Glenwood Lumber Co. (1908)
+'     153 Cal. 411, 414.)
+'
+' There the boundary sits some 250 characters into the span, the trim never saw
+' it, and the whole quotation went into the link -- and then into the italics,
+' since ItalicizeCaseName reads everything ahead of the "(year)" as the case
+' name. The quotation came back italic from its first word to the case name's
+' last.
+'
+' See ProseRunEnd for what counts as the boundary and which one wins.
+'
+' The prose that gets cut is also taken back OUT of italic when it is entirely
+' italic -- which is the signature of a document linked by the build that had
+' the window, and nothing a judge writes. (A quotation carrying emphasis on some
+' of its words reads as mixed, not italic, and is left exactly as it is.) The
+' case-name italics inside that prose are not lost: NormalizeCitationItalics
+' runs after every link pass and re-derives them from the paragraph text.
 Private Sub TrimLeadingProse(ByVal rng As Range)
-    Const LOOK As Long = 60
-
     Dim s As String
     s = rng.text
     If Len(s) < 2 Then Exit Sub
 
-    Dim window As Long: window = Len(s) - 1
-    If window > LOOK Then window = LOOK
+    Dim cut As Long
+    cut = ProseRunEnd(s)
+    If cut = 0 Or cut >= Len(s) Then Exit Sub
 
-    Dim cut As Long: cut = 0
+    ' Repair pass, before the range gives the prose up. SubRangeByChars is the
+    ' only safe way to turn a text index back into a range here -- the span can
+    ' already contain a link from an earlier row, and .Start counts positions
+    ' .Text never returns.
+    Dim dropped As Range
+    Set dropped = SubRangeByChars(rng, 1, cut)
+    If Not dropped Is Nothing Then
+        If dropped.Font.Italic = True Then dropped.Font.Italic = False
+    End If
+
+    rng.MoveStart wdCharacter, cut
+End Sub
+
+' The last character of the PROSE that a citation span opened inside of, or 0
+' when the span opens on the citation itself.
+'
+' The boundary is sentence-ending punctuation, a CLOSING QUOTE, and then the "("
+' or "[" that opens the citation sentence: `English." (Penilla`. All three are
+' required. The quote alone would misfire on a citation carrying a quoted
+' parenthetical -- `Smith v. Jones (2020) 1 Cal.5th 1 ["no."]` ends in the same
+' two characters -- and it is the opening bracket after it that says a new
+' citation sentence starts here rather than a parenthetical closing. The period
+' alone would be worse still: every "Lumber Co. (1908)" in the language ends a
+' case name with one.
+'
+' The LAST boundary wins, so a span that swallowed two sentences still lands on
+' the citation -- but only among the boundaries a CITATION still follows
+' (CiteFollows). That is what keeps the walk from cutting into the citation
+' itself on the one shape where a boundary appears inside it, a quotation closed
+' inside a parenthetical: `... 209 ["a quote." (Italics added.)]`. With no such
+' boundary anywhere the last one found is used regardless, which is how a
+' statute or rule span -- no case name to test for -- still gets its prose cut.
+Private Function ProseRunEnd(ByVal s As String) As Long
+    If Len(s) < 3 Then Exit Function
+
+    Dim last As Long, lastCite As Long
     Dim i As Long
-    For i = 1 To window
+    For i = 1 To Len(s) - 2
         Dim c As String: c = Mid$(s, i, 1)
         If c = "." Or c = "!" Or c = "?" Then
             Dim nx As String: nx = Mid$(s, i + 1, 1)
             If nx = ChrW$(8221) Or nx = ChrW$(8217) Or nx = Chr$(34) Or nx = "'" Then
-                If OpensCitation(s, i + 2) Then cut = i + 1   ' through the quote
+                If OpensCitation(s, i + 2) Then
+                    last = i + 1                       ' through the quote
+                    If CiteFollows(s, i + 2) Then lastCite = last
+                End If
             End If
         End If
     Next i
 
-    If cut = 0 Or cut >= Len(s) Then Exit Sub
-    rng.MoveStart wdCharacter, cut
-End Sub
+    If lastCite > 0 Then ProseRunEnd = lastCite Else ProseRunEnd = last
+End Function
+
+' True when what follows position k still reads as an authority -- parties, a
+' "(year)", a ", supra", or a section sign. Used to tell the boundary that opens
+' the citation from one that merely sits inside it.
+Private Function CiteFollows(ByVal s As String, ByVal k As Long) As Boolean
+    Dim rest As String
+    rest = Mid$(s, k)
+    If Len(rest) = 0 Then Exit Function
+
+    If InStr(1, rest, " v. ", vbTextCompare) > 0 Then
+        CiteFollows = True
+    ElseIf InStr(1, rest, ", supra", vbTextCompare) > 0 Then
+        CiteFollows = True
+    ElseIf FindYearParen(rest) > 0 Then
+        CiteFollows = True
+    ElseIf InStr(rest, ChrW$(167)) > 0 Then
+        CiteFollows = True
+    End If
+End Function
 
 ' True when, from position k, the text opens a citation sentence: any run of
 ' spaces and then "(" or "[". Anything else -- more prose, a closing bracket, the
@@ -1610,10 +1679,25 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     m = disp.Characters.count
     If tailStart > m + 1 Then tailStart = m + 1
 
-    ' First letter of the case name: skip a leading outer "(", quote, or space,
-    ' then any lowercase signal words ("see", "cf.", "see also"). A case short
-    ' name always starts with a capital.
+    ' A display that still carries the tail of the sentence BEFORE the citation
+    ' -- the span opened there and TrimLeadingProse could not cut it -- must not
+    ' hand that prose to the case name. Everything ahead of the "(year)" reads as
+    ' the name otherwise, so a block quotation the span swallowed came back
+    ' italic from its first word ("It is the general rule that ... the property
+    ' was wrongfully converted." (Wendling Lumber Co. v. Glenwood Lumber Co.
+    ' (1908) 153 Cal. 411, 414.)). The same boundary the trim looks for is looked
+    ' for here, inside the part of the display that reads as the name, and the
+    ' name starts after it. Belt and braces: the trim is what keeps that prose
+    ' out of the LINK; this is what keeps it out of the ITALICS whatever else
+    ' put it there.
+    Dim proseEnd As Long
+    proseEnd = ProseRunEnd(Left$(s, tailStart - 1))
+
+    ' First letter of the case name: skip the prose above if there was any, then
+    ' a leading outer "(", quote, or space, then any lowercase signal words
+    ' ("see", "cf.", "see also"). A case short name always starts with a capital.
     Dim nameStart As Long: nameStart = 1
+    If proseEnd > 0 And proseEnd < tailStart Then nameStart = proseEnd + 1
     Do While nameStart < tailStart
         If Mid$(s, nameStart, 1) Like "[A-Za-z]" Then Exit Do
         nameStart = nameStart + 1
@@ -1641,7 +1725,16 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     ' character is reached too. This removes any stray italic -- e.g. a leading
     ' "(" left italic by an earlier build or a previous link/unlink cycle -- so
     ' only the case name ends up italic no matter the document's prior state.
-    ActiveDocument.Range(disp.Characters(1).start - 1, disp.Characters(m).End).Font.Italic = False
+    ' Where the prose above was found, the slate starts at the citation instead:
+    ' clearing across prose the link should never have covered would flatten the
+    ' judge's own emphasis along with everything else.
+    Dim clearFrom As Long: clearFrom = 1
+    If proseEnd > 0 And proseEnd < m Then clearFrom = proseEnd + 1
+    If clearFrom <= 1 Then
+        ActiveDocument.Range(disp.Characters(1).start - 1, disp.Characters(m).End).Font.Italic = False
+    Else
+        ActiveDocument.Range(disp.Characters(clearFrom).start, disp.Characters(m).End).Font.Italic = False
+    End If
 
     ' Now italicize the case-name run as one range. Only when it starts at the
     ' very first display character do we extend the start one position back into
