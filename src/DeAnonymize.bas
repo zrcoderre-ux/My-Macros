@@ -8,8 +8,9 @@ Attribute VB_Name = "DeAnonymize"
 ' tentative from that anonymized text, so the draft contains the fakes. This
 ' macro reads the key and swaps every fake back to its real value.
 '
-' The key file PDF-Linker writes is "pseudonym_key.xlsx", a worksheet with the
-' columns:
+' The key file PDF-Linker writes is "pseudonym_key.xlsx", a worksheet titled
+' "Pseudonym Key" (found by that name, whatever tab order the file was saved
+' in; first sheet only as a fallback) with the columns:
 '     Category | Real Value | Replacement | Status | Source | Occurrences
 ' (columns are located by HEADER NAME, so a key from an older version that lacks
 ' Status still reads). Two Status values change what a row means here:
@@ -137,6 +138,9 @@ Option Explicit
 ' PDF-Linker writes "pseudonym_key.xlsx"; match that plus any de-duplicated
 ' copies Windows may create (e.g. "pseudonym_key (1).xlsx"). Newest wins.
 Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
+' The worksheet PDF-Linker titles inside that file; FindKeySheet looks it up
+' by name so the key still reads when another tab was saved in front of it.
+Private Const KEY_SHEET_NAME As String = "Pseudonym Key"
 
 ' Subfolders the exports go to WHEN THEY EXIST beside the document: the real-
 ' names copy is quarantined in one, the shareable anonymized copy filed in the
@@ -2184,8 +2188,15 @@ Private Function ReadPseudonymKey(ByVal path As String, _
         Set wb = xl.Workbooks.Open(FileName:=path, ReadOnly:=True, AddToMRU:=False)
     End If
 
+    ' The key lives on the sheet PDF-Linker titles "Pseudonym Key". Find it by
+    ' NAME, not position: a user who eyeballed the key, pinned a scratch tab of
+    ' their own in front, and saved leaves the mappings on sheet 2, and reading
+    ' whatever sits first would then restore nothing. Fall back to the first
+    ' sheet only when no tab carries that title (a key from an older PDF-Linker
+    ' that never named its sheet).
     Dim ws As Object
-    Set ws = wb.Worksheets(1)
+    Set ws = FindKeySheet(wb)
+    If ws Is Nothing Then GoTo CleanFail
 
     ' Pull the whole used range into a 2-D variant array in one COM round-trip.
     Dim data As Variant
@@ -2272,6 +2283,22 @@ Fail:
     If startedXl And Not xl Is Nothing Then xl.Quit
     On Error GoTo 0
     ReadPseudonymKey = False
+End Function
+
+' The worksheet holding the key: the tab titled "Pseudonym Key" (matched
+' case-insensitively, whatever its position), else the first sheet in the
+' workbook, else Nothing for a workbook with no sheets at all.
+Private Function FindKeySheet(ByVal wb As Object) As Object
+    Dim sh As Object
+    On Error Resume Next
+    For Each sh In wb.Worksheets
+        If StrComp(Trim$(sh.Name), KEY_SHEET_NAME, vbTextCompare) = 0 Then
+            Set FindKeySheet = sh
+            Exit Function
+        End If
+    Next sh
+    If wb.Worksheets.Count > 0 Then Set FindKeySheet = wb.Worksheets(1)
+    On Error GoTo 0
 End Function
 
 ' Empty cells arrive as Null/Empty; fold to "" so CStr never errors.
