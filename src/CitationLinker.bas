@@ -995,6 +995,11 @@ Private Function CaseNameLeftEdge(ByVal s As String, ByVal anchor As Long, _
         If f >= "A" And f <= "Z" Then
             If IsSentenceLeadWord(w) And Not OpensInRe(s, ws) Then Exit Do
             best = ws
+        ElseIf IsNumericNameWord(w) Then
+            ' "21st Century", "24 Hour Fitness", "3M": a party name can open
+            ' on a digit, and that word is as much the name's start as a
+            ' capitalized one.
+            best = ws
         ElseIf f >= "a" And f <= "z" Then
             If Not IsNameConnector(w) Then Exit Do
         ElseIf f = "&" Then
@@ -1632,6 +1637,11 @@ Private Function CaseNameStartBefore(ByVal s As String) As Long
             If f >= "A" And f <= "Z" Then
                 If IsSentenceLeadWord(w) And Not OpensInRe(s, ws) Then Exit Do
                 best = ws
+            ElseIf IsNumericNameWord(w) Then
+                ' A party name that opens on a digit -- "21st Century Ins. Co.",
+                ' "24 Hour Fitness", "9th Street Market Lofts" -- and this walk
+                ' gave up on the "21st", leaving the link to open on "Century".
+                best = ws
             ElseIf f >= "a" And f <= "z" Then
                 If Not IsCaseNameJoiner(w) Then Exit Do
             ElseIf f = "&" Then
@@ -1671,6 +1681,29 @@ Private Function IsCaseNameJoiner(ByVal w As String) As Boolean
              "dba", "aka", "fka", "nka"
             IsCaseNameJoiner = True
     End Select
+End Function
+
+
+' True when w is a word a party name can OPEN on that starts with a digit
+' rather than a capital: an ordinal or an alphanumeric -- "21st", "9th", "3M",
+' "1-800-Flowers". A BARE number is deliberately not one. "24 Hour Fitness"
+' does open on one, but so does "In 2019 Smith v. Jones was decided", and from
+' inside a sentence the two cannot be told apart; the extractor, which reads
+' the whole citation, decides that span, and these walks only widen it. Both
+' case-name walks use this, so a plaintiff that opens on an ordinal keeps its
+' first word.
+Private Function IsNumericNameWord(ByVal w As String) As Boolean
+    Dim core As String: core = StripWordPunct(w)
+    If Len(core) = 0 Then Exit Function
+    If Not Left$(core, 1) Like "#" Then Exit Function
+
+    Dim i As Long
+    For i = 1 To Len(core)
+        If Mid$(core, i, 1) Like "[A-Za-z]" Then
+            IsNumericNameWord = True
+            Exit Function
+        End If
+    Next i
 End Function
 
 
@@ -1770,11 +1803,13 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
 
     ' First letter of the case name: skip the prose above if there was any, then
     ' a leading outer "(", quote, or space, then any lowercase signal words
-    ' ("see", "cf.", "see also"). A case short name always starts with a capital.
+    ' ("see", "cf.", "see also"). A case short name starts with a capital, or
+    ' with a digit ("21st Century Ins. Co.", "24 Hour Fitness") -- skipping to a
+    ' LETTER there left "21" roman and then read "st" as a signal word.
     Dim nameStart As Long: nameStart = 1
     If proseEnd > 0 And proseEnd < tailStart Then nameStart = proseEnd + 1
     Do While nameStart < tailStart
-        If Mid$(s, nameStart, 1) Like "[A-Za-z]" Then Exit Do
+        If Mid$(s, nameStart, 1) Like "[A-Za-z0-9]" Then Exit Do
         nameStart = nameStart + 1
     Loop
     Do While nameStart < tailStart
