@@ -88,6 +88,77 @@ Public Function TitleEndsWithDate(Doc As Document) As Boolean
     re.Pattern = "\d{1,2}\.\d{1,2}\.\d{4}(\.[A-Za-z]{2,5})?$"
     TitleEndsWithDate = re.Test(nm)
 End Function
+
+' ============================================================
+' UPCOMING-DATE GUARD  (alternative close-review trigger)
+' Returns True when the document's file name CONTAINS a date in
+' M.D.YYYY form that has NOT YET PASSED -- today itself counts.
+'
+' This is a second way into the close review, independent of
+' where the file is saved. A ruling named for a hearing still to
+' come is live work wherever it sits, so it is reviewed on close
+' from Downloads or a network share too; a name whose only dates
+' are in the past is a finished matter and does not trigger it.
+' See CloseReview in clsAppEvents for how the two triggers meet.
+'
+' CONTAINS, not "ends with" (contrast TitleEndsWithDate): the
+' date may sit mid-name -- "Smith v Jones 6.25.2026 draft.docx"
+' -- and EVERY M.D.YYYY run in the name is considered, so a name
+' carrying both an old date and a new one triggers on the new.
+'
+' A run is read as a date only when it is a real calendar day and
+' is not glued to further digits on either side, so neither
+' "12.25.20261" nor a version string is mistaken for one.
+' Returns False for unsaved/untitled documents.
+' ============================================================
+Public Function TitleHasUpcomingDate(Doc As Document) As Boolean
+    Dim nm As String
+    nm = ""
+    On Error Resume Next
+    nm = Doc.Name
+    On Error GoTo 0
+    If nm = "" Then Exit Function
+
+    Dim re As Object: Set re = CreateObject("VBScript.RegExp")
+    re.Global = True                ' every date in the name, not just the first
+    re.IgnoreCase = True
+    ' The trailing (?!\d) keeps a 4-digit year from being cut out of a longer
+    ' digit run. VBScript's engine has no LOOKBEHIND, so the character BEFORE
+    ' the match is checked by hand -- see PrecededByDigit.
+    re.Pattern = "(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)"
+
+    Dim today As Date: today = Date
+    Dim m As Object, d As Date
+    Dim mo As Long, dy As Long, yr As Long
+    For Each m In re.Execute(nm)
+        If Not PrecededByDigit(nm, m.FirstIndex) Then
+            mo = CLng(m.SubMatches(0))
+            dy = CLng(m.SubMatches(1))
+            yr = CLng(m.SubMatches(2))
+            If mo >= 1 And mo <= 12 And dy >= 1 And dy <= 31 Then
+                d = DateSerial(yr, mo, dy)
+                ' DateSerial ROLLS an impossible day forward (2.30.2026 comes
+                ' back as 3.2.2026), so compare the parts back out of it: only
+                ' a day that survives the round trip is a real date.
+                If Year(d) = yr And Month(d) = mo And Day(d) = dy Then
+                    If d >= today Then
+                        TitleHasUpcomingDate = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next m
+End Function
+
+' True when the character immediately before position idx is a digit. idx is a
+' RegExp FirstIndex, which is 0-BASED, so the character before it is Mid$(s, idx)
+' in VBA's 1-based terms. This guards the LEFT edge of an M.D.YYYY run the way
+' (?!\d) guards the right, which the VBScript engine cannot do with a lookbehind.
+Private Function PrecededByDigit(ByVal s As String, ByVal idx As Long) As Boolean
+    If idx <= 0 Then Exit Function
+    PrecededByDigit = (Mid$(s, idx, 1) Like "[0-9]")
+End Function
 ' ============================================================
 ' FAST-EXIT CHECK
 ' Runs checks in order, stops at the very first issue found,

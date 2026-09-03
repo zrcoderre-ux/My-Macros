@@ -128,10 +128,13 @@ Attribute VB_Name = "DeAnonymize"
 '     ENTRY POINTS" -- hands it the reader, the writer, and the two path helpers.
 '     Everything anonymization-specific stays private to this module.
 '   - AUTOMATIC ON CLOSE: RunDeAnonymizeOnClose (called from the close-review in
-'     clsAppEvents) restores real names when a dated OneDrive tentative is
-'     closed -- once per document, and never for re-anonymize output. It keys
-'     off a pseudonym_key.xlsx in the document's folder and does nothing
-'     silently if there isn't one. Two document variables track state:
+'     clsAppEvents) restores real names when a document that clears the close
+'     review's gates is closed -- a dated OneDrive tentative, or any document
+'     whose file name carries an M.D.YYYY date that has not yet passed. Once per
+'     document, and never for re-anonymize output. It keys off a
+'     pseudonym_key.xlsx in the document's folder and does nothing silently if
+'     there isn't one -- which is what keeps the second, location-free trigger
+'     harmless: a dated document in a folder with no key is left alone. Two document variables track state:
 '     MM_DeAnonymizeDone and MM_ReAnonymizeCreated.
 '==============================================================================
 Option Explicit
@@ -1881,9 +1884,11 @@ End Sub
 '==============================================================================
 ' AUTOMATIC DE-ANONYMIZE ON CLOSE
 '==============================================================================
-' Called from clsAppEvents.App_DocumentBeforeClose. Restores real names when a
-' dated OneDrive tentative is closed, but ONLY if de-anonymize hasn't already
-' run on it and it wasn't produced by the re-anonymize macro. Silent: with no
+' Called from clsAppEvents.App_DocumentBeforeClose, so it inherits that close
+' review's gates: a dated OneDrive tentative, or any document whose file name
+' carries an M.D.YYYY date that has not yet passed. Restores real names when
+' such a document is closed, but ONLY if de-anonymize hasn't already run on it
+' and it wasn't produced by the re-anonymize macro. Silent: with no
 ' pseudonym key in the document's folder it does nothing (the document isn't an
 ' anonymized draft, or the key is unavailable). Never sets Cancel, so it can't
 ' block the close.
@@ -1951,8 +1956,8 @@ End Sub
 '   3. The filename ends in .md/.markdown -- the export is now a Markdown file
 '      whose default name is the FAKED document title (which ends in the same
 '      date as the original), so a re-anonymized .md opened in Word would pass
-'      the close hook's dated-OneDrive gates with neither signal 1 nor 2 to
-'      protect it. The only dated .md in those folders is re-anonymize output.
+'      the close hook's gates -- under either trigger -- with neither signal 1
+'      nor 2 to protect it. The only dated .md in those folders is re-anonymize output.
 ' A blanked-header content heuristic used to be a third signal, but it false-
 ' positived on ordinary documents (header text layout varies) and tripped the
 ' manual-macro warning on every run, so it was removed. Same-session safety no

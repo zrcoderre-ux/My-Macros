@@ -78,12 +78,22 @@ Private Function NoteBlock(ByVal notes As String) As String
 End Function
 
 Private Sub CloseReview(ByVal Doc As Document, ByRef Cancel As Boolean)
-    ' Silent gates: the close review runs ONLY on dated work documents saved
-    ' in OneDrive. If either condition fails, do nothing at all -- no popup,
-    ' no checks. (A document whose title doesn't end in M.D.YYYY, or that
-    ' isn't in OneDrive, just closes normally.)
-    If Not IsInOneDrive(Doc) Then Exit Sub
-    If Not TitleEndsWithDate(Doc) Then Exit Sub
+    ' Silent gates. The close review runs on either of two triggers:
+    '   1. a dated work document saved in OneDrive -- a title ENDING in
+    '      M.D.YYYY, in the OneDrive/SharePoint tree (the original gate); or
+    '   2. ANY document, saved anywhere, whose file name CONTAINS an M.D.YYYY
+    '      date that has not yet passed (today counts).
+    ' The second is an ALTERNATIVE trigger, not a further condition on the
+    ' first: a ruling named for a hearing still to come is live work whether or
+    ' not it sits in OneDrive, so it is reviewed on close from Downloads, the
+    ' Desktop, or a network share too.
+    '
+    ' Anything else -- an undated document, or one outside OneDrive whose dates
+    ' have all passed -- does nothing at all: no popup, no checks, it just
+    ' closes. See TitleEndsWithDate and TitleHasUpcomingDate in modMain.
+    If Not (IsInOneDrive(Doc) And TitleEndsWithDate(Doc)) Then
+        If Not TitleHasUpcomingDate(Doc) Then Exit Sub
+    End If
 
     ' Skip checks when the mail merge macro is closing documents mid-workflow
     If modMain.gSkipCloseChecks Then Exit Sub
