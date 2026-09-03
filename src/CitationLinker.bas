@@ -533,6 +533,10 @@ Private Function NormalizeParaItalics(ByVal p As Paragraph) As Long
 
     If found = 0 Then Exit Function
 
+    ' Whatever the reads above decided, a "quoting", a "citing", and a pincite
+    ' "at p. 105" are never italic. See RomanizeSignalMarks.
+    RomanizeSignalMarks s, marks
+
     ' Reading the citations right is not the same as undoing a paragraph they
     ' were read wrong in once. This adds the marks that undo it.
     ClearStaleItalicGaps p, marks
@@ -757,6 +761,15 @@ Private Function MarkCitationAt(ByVal s As String, ByVal anchor As Long, _
     Dim ns As Long: ns = CaseNameLeftEdge(s, anchor, boundary)
     If ns <= 0 Then Exit Function
 
+    ' A citation sentence can carry a "quoting" or "citing" between an earlier
+    ' cite and this one's name: "(Smith, supra, 10 Cal.5th at p. 105, quoting
+    ' Doe v. Roe (2010) 50 Cal.4th 1, 5.)". The bracket walk in CaseNameLeftEdge
+    ' reads everything from the "(" as the name, and Doe's italics then ran back
+    ' over Smith's tail and the signal -- and, when Smith was itself a supra
+    ' cite read a moment later, over the roman its tail had just been given.
+    ' The name starts after the last such signal, and the signal is roman.
+    ns = PastLastCiteSignal(s, ns, anchor, marks)
+
     Dim ne As Long: ne = ts - 1
     Do While ne >= ns
         If Mid$(s, ne, 1) = " " Then ne = ne - 1 Else Exit Do
@@ -791,6 +804,152 @@ End Function
 Private Function IsSupraTail(ByVal s As String, ByVal k As Long) As Boolean
     If k < 1 Then Exit Function
     IsSupraTail = (LCase$(Mid$(s, k, 7)) = ", supra")
+End Function
+
+' Where a case name that was read as starting at ns really starts, once the
+' last "quoting" or "citing" ahead of limit is put behind it: the character
+' after that signal and the spaces and commas that follow it. The signal
+' itself is marked roman. ns comes back unchanged when the span carries none.
+Private Function PastLastCiteSignal(ByVal s As String, ByVal ns As Long, _
+                                     ByVal limit As Long, ByRef marks() As Byte) As Long
+    PastLastCiteSignal = ns
+    Dim i As Long: i = ns
+    Dim a As Long, b As Long
+    Do While NextRomanSignal(s, i, a, b)
+        If b >= limit Then Exit Do
+        If IsSignalWordAt(s, a) Then
+            MarkRun marks, a, b, MARK_ROMAN
+            Dim k As Long: k = b + 1
+            Do While k < limit
+                If Mid$(s, k, 1) = " " Or Mid$(s, k, 1) = "," Then k = k + 1 Else Exit Do
+            Loop
+            PastLastCiteSignal = k
+        End If
+        i = b + 1
+    Loop
+End Function
+
+' Take the italic back off every run in s that a citation never italicizes --
+' see NextRomanSignal -- when any character of it was marked italic. A run the
+' pass did not mark is left exactly as it is: the "citing" is only ever known
+' to be a citation's when it sits inside a citation the pass has read.
+Private Sub RomanizeSignalMarks(ByVal s As String, ByRef marks() As Byte)
+    Dim i As Long: i = 1
+    Dim a As Long, b As Long
+    Do While NextRomanSignal(s, i, a, b)
+        If b > UBound(marks) Then b = UBound(marks)
+        Dim k As Long
+        For k = a To b
+            If marks(k) = MARK_ITALIC Then
+                MarkRun marks, a, b, MARK_ROMAN
+                Exit For
+            End If
+        Next k
+        i = b + 1
+    Loop
+End Sub
+
+' The next run at or after fromPos that a citation keeps ROMAN whatever else
+' is italic around it: the signals "quoting" and "citing" as whole words in
+' either case, and a pincite "at p. 105" / "at pp. 105-106" through the end of
+' its page numbers. a and b come back as the run's first and last characters,
+' 1-based in s. False when there is none left.
+Private Function NextRomanSignal(ByVal s As String, ByVal fromPos As Long, _
+                                 ByRef a As Long, ByRef b As Long) As Boolean
+    Dim n As Long: n = Len(s)
+    Dim i As Long
+    If fromPos < 1 Then fromPos = 1
+    For i = fromPos To n
+        ' A word boundary on the left: "Quoting" opens a citation sentence or a
+        ' parenthetical and "requoting" is nothing a citation says, but only
+        ' the first of those is being looked for.
+        If i > 1 Then
+            If Mid$(s, i - 1, 1) Like "[A-Za-z]" Then GoTo NextChar
+        End If
+
+        If IsSignalWordAt(s, i) Then
+            a = i
+            b = i + SignalWordLen(s, i) - 1
+            NextRomanSignal = True
+            Exit Function
+        End If
+
+        Dim e As Long: e = PincitePhraseEnd(s, i)
+        If e > 0 Then
+            a = i
+            b = e
+            NextRomanSignal = True
+            Exit Function
+        End If
+NextChar:
+    Next i
+End Function
+
+' True when a whole-word "quoting" or "citing" starts at i.
+Private Function IsSignalWordAt(ByVal s As String, ByVal i As Long) As Boolean
+    IsSignalWordAt = (SignalWordLen(s, i) > 0)
+End Function
+
+' The length of the "quoting" or "citing" that starts at i as a whole word, or
+' 0 when neither does. The character after the word must not be a letter, so
+' "citing" is never read out of "reciting" -- the letter ahead of i is the
+' caller's to check.
+Private Function SignalWordLen(ByVal s As String, ByVal i As Long) As Long
+    Dim wl As Long
+    If LCase$(Mid$(s, i, 7)) = "quoting" Then
+        wl = 7
+    ElseIf LCase$(Mid$(s, i, 6)) = "citing" Then
+        wl = 6
+    Else
+        Exit Function
+    End If
+    If Mid$(s, i + wl, 1) Like "[A-Za-z]" Then Exit Function
+    SignalWordLen = wl
+End Function
+
+' The last character of the pincite phrase that starts at i -- "at", spaces,
+' "p." or "pp.", spaces, then a page number or a hyphenated or en-dashed page
+' range -- or 0 when what starts at i is not one. The trailing comma or period
+' is not part of it.
+Private Function PincitePhraseEnd(ByVal s As String, ByVal i As Long) As Long
+    If LCase$(Mid$(s, i, 2)) <> "at" Then Exit Function
+
+    Dim k As Long: k = i + 2
+    Dim spaces As Long
+    Do While k <= Len(s)
+        If Mid$(s, k, 1) = " " Or Mid$(s, k, 1) = Chr$(160) Then
+            k = k + 1
+            spaces = spaces + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If spaces = 0 Then Exit Function
+
+    If LCase$(Mid$(s, k, 3)) = "pp." Then
+        k = k + 3
+    ElseIf LCase$(Mid$(s, k, 2)) = "p." Then
+        k = k + 2
+    Else
+        Exit Function
+    End If
+
+    Do While k <= Len(s)
+        If Mid$(s, k, 1) = " " Or Mid$(s, k, 1) = Chr$(160) Then k = k + 1 Else Exit Do
+    Loop
+    If Not Mid$(s, k, 1) Like "#" Then Exit Function
+
+    Dim e As Long: e = k
+    Do While e <= Len(s)
+        Dim c As String: c = Mid$(s, e, 1)
+        If c Like "#" Or c = "-" Or c = ChrW$(8211) Then e = e + 1 Else Exit Do
+    Loop
+    ' A range that trails off on its dash ends on the digits before it.
+    Do While e - 1 > k
+        If Mid$(s, e - 1, 1) Like "#" Then Exit Do
+        e = e - 1
+    Loop
+    PincitePhraseEnd = e - 1
 End Function
 
 ' The start of the roman tail after the parties: the ", supra" or the "(year)",
@@ -1803,9 +1962,11 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
 
     ' First letter of the case name: skip the prose above if there was any, then
     ' a leading outer "(", quote, or space, then any lowercase signal words
-    ' ("see", "cf.", "see also"). A case short name starts with a capital, or
-    ' with a digit ("21st Century Ins. Co.", "24 Hour Fitness") -- skipping to a
-    ' LETTER there left "21" roman and then read "st" as a signal word.
+    ' ("see", "cf.", "see also") -- and a capitalized one when it is on the
+    ' signal list ("Quoting", "See"), since a signal opens a parenthetical with
+    ' a capital. A case short name starts with a capital, or with a digit
+    ' ("21st Century Ins. Co.", "24 Hour Fitness") -- skipping to a LETTER there
+    ' left "21" roman and then read "st" as a signal word.
     Dim nameStart As Long: nameStart = 1
     If proseEnd > 0 And proseEnd < tailStart Then nameStart = proseEnd + 1
     Do While nameStart < tailStart
@@ -1813,9 +1974,12 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
         nameStart = nameStart + 1
     Loop
     Do While nameStart < tailStart
-        If Mid$(s, nameStart, 1) Like "[a-z]" Then
-            Do While nameStart < tailStart And Mid$(s, nameStart, 1) <> " ": nameStart = nameStart + 1
-            Loop
+        Dim leadEnd As Long: leadEnd = nameStart
+        Do While leadEnd < tailStart And Mid$(s, leadEnd, 1) <> " ": leadEnd = leadEnd + 1
+        Loop
+        If Mid$(s, nameStart, 1) Like "[a-z]" Or _
+           IsCiteSignalWord(LCase$(StripWordPunct(Mid$(s, nameStart, leadEnd - nameStart)))) Then
+            nameStart = leadEnd
             Do While nameStart < tailStart And Mid$(s, nameStart, 1) = " ": nameStart = nameStart + 1
             Loop
         Else
@@ -1890,6 +2054,34 @@ Private Sub ItalicizeCaseName(ByVal disp As Range)
     ' And the parenthetical that introduces the case's short name, which the
     ' clean slate above would otherwise leave roman.
     ItalicizeShortNameParen disp, Mid$(s, nameStart, nameEnd - nameStart + 1), tailStart
+
+    ' Last, whatever the runs above put italic: a "quoting", a "citing", and a
+    ' pincite "at p. 105" never are.
+    RomanizeSignalsInDisplay disp
+End Sub
+
+' Take the italic back off the runs a citation never italicizes, wherever they
+' sit in a link's display text: "quoting", "citing", and a pincite "at p. 105"
+' / "at pp. 105-106" (NextRomanSignal). Positioned through the display's
+' Characters, which are the true text positions. The first display character
+' is not touched: a signal there was skipped by the name walk above and is
+' roman already, and formatting the boundary character alone would not reach
+' it anyway.
+Private Sub RomanizeSignalsInDisplay(ByVal disp As Range)
+    On Error Resume Next
+    Dim s As String: s = disp.text
+    Dim m As Long: m = disp.Characters.count
+    If m < 2 Then Exit Sub
+
+    Dim i As Long: i = 2
+    Dim a As Long, b As Long
+    Do While NextRomanSignal(s, i, a, b)
+        If b > m Then b = m
+        If a >= 2 And a <= b Then
+            ActiveDocument.Range(disp.Characters(a).start, disp.Characters(b).End).Font.Italic = False
+        End If
+        i = b + 1
+    Loop
 End Sub
 
 ' Italicize the parenthetical that introduces a case's SHORT NAME. The short name
@@ -2498,11 +2690,15 @@ Private Function SupraShortNameStart(ByVal raw As String, ByVal commaPos As Long
 End Function
 
 ' A leading citation signal word (case-insensitive, trailing punctuation already
-' stripped) that precedes a case name and should stay OUT of the hyperlink.
+' stripped) that precedes a case name and should stay OUT of the hyperlink --
+' and out of the case name's italics, which every walk that uses this list
+' derives from the link's start. "quoting" and "citing" introduce the cite a
+' citation relies on ("... at p. 105, quoting Doe v. Roe (2010) ...") and are
+' roman like the rest of the signals.
 Private Function IsCiteSignalWord(ByVal w As String) As Boolean
     Select Case w
         Case "see", "also", "generally", "cf", "accord", "contra", "but", _
-             "compare", "e.g", "eg"
+             "compare", "e.g", "eg", "quoting", "citing"
             IsCiteSignalWord = True
     End Select
 End Function
