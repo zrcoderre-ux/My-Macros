@@ -10,7 +10,8 @@ Attribute VB_Name = "DeAnonymize"
 '
 ' The key file PDF-Linker writes is "pseudonym_key.xlsx", a worksheet titled
 ' "Pseudonym Key" (found by that name, whatever tab order the file was saved
-' in; first sheet only as a fallback) with the columns:
+' in; the first NON-PINNED sheet only as a fallback -- see FindKeySheet) with
+' the columns:
 '     Category | Real Value | Replacement | Status | Source | Occurrences
 ' (columns are located by HEADER NAME, so a key from an older version that lacks
 ' Status still reads). Two Status values change what a row means here:
@@ -141,6 +142,21 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 ' The worksheet PDF-Linker titles inside that file; FindKeySheet looks it up
 ' by name so the key still reads when another tab was saved in front of it.
 Private Const KEY_SHEET_NAME As String = "Pseudonym Key"
+
+' The OTHER tab PDF-Linker writes: bindings no export ever carried -- a party
+' pinned so a later run reuses the same fake, whose pseudonym was never written
+' into any anonymized text. Its rows are NOT reversible and must never be run in
+' reverse. Two reasons, and the second is the one that bites:
+'   - the fake cannot be in a draft written from those exports, so searching for
+'     it is at best wasted work; and
+'   - a pinned row can bind a real value the applied sheet also binds, under a
+'     different fake. Loaded together, two rows then claim one pseudonym and the
+'     ambiguity guard in ReplaceAllMappings retires BOTH -- so reading the pinned
+'     tab does not merely add dead rows, it can retire live ones and leave a real
+'     name unrestored.
+' FindKeySheet therefore skips this tab, and skips it even when it is the only
+' one left to fall back to.
+Private Const PINNED_SHEET_NAME As String = "Pinned (never in text)"
 
 ' Subfolders the exports go to WHEN THEY EXIST beside the document: the real-
 ' names copy is quarantined in one, the shareable anonymized copy filed in the
@@ -2192,8 +2208,9 @@ Private Function ReadPseudonymKey(ByVal path As String, _
     ' NAME, not position: a user who eyeballed the key, pinned a scratch tab of
     ' their own in front, and saved leaves the mappings on sheet 2, and reading
     ' whatever sits first would then restore nothing. Fall back to the first
-    ' sheet only when no tab carries that title (a key from an older PDF-Linker
-    ' that never named its sheet).
+    ' NON-PINNED sheet only when no tab carries that title (a key from an older
+    ' PDF-Linker that never named its sheet); the pinned tab is never read in
+    ' either direction. See FindKeySheet and PINNED_SHEET_NAME.
     Dim ws As Object
     Set ws = FindKeySheet(wb)
     If ws Is Nothing Then GoTo CleanFail
@@ -2285,20 +2302,59 @@ Fail:
     ReadPseudonymKey = False
 End Function
 
-' The worksheet holding the key: the tab titled "Pseudonym Key" (matched
-' case-insensitively, whatever its position), else the first sheet in the
-' workbook, else Nothing for a workbook with no sheets at all.
+' The worksheet holding the APPLIED bindings: the tab titled "Pseudonym Key"
+' (matched case-insensitively, whatever its position), else the first sheet that
+' is NOT the pinned tab, else Nothing.
+'
+' NEVER the first sheet outright, and never the ACTIVE one. Excel records
+' whichever tab was selected when the file was last saved, so a key the operator
+' clicked across to the pinned tab to read comes back with that tab selected --
+' and if the pinned tab was also dragged in front, "sheet 1" is it too. Reading
+' the key that way restores nothing (the applied rows were never loaded) while
+' looking like a bad key.
+'
+' The by-name fallback covers a key from an older PDF-Linker that never titled
+' its sheet: that version wrote ONE sheet, so "the sheet that is not the pinned
+' one" is it. A workbook offering nothing but the pinned tab answers Nothing, and
+' the caller reports it could not read the key -- which is right, because there
+' are no reversible bindings in it.
 Private Function FindKeySheet(ByVal wb As Object) As Object
     Dim sh As Object
     On Error Resume Next
+
     For Each sh In wb.Worksheets
         If StrComp(Trim$(sh.Name), KEY_SHEET_NAME, vbTextCompare) = 0 Then
             Set FindKeySheet = sh
             Exit Function
         End If
     Next sh
-    If wb.Worksheets.Count > 0 Then Set FindKeySheet = wb.Worksheets(1)
+
+    For Each sh In wb.Worksheets
+        If Not IsPinnedSheet(sh) Then
+            Set FindKeySheet = sh
+            Exit Function
+        End If
+    Next sh
+
     On Error GoTo 0
+End Function
+
+' True for the pinned tab -- the one sheet whose rows must never be reversed.
+' Matched by name, trimmed and case-insensitively, the same way the key sheet is.
+'
+' Answers True when the name cannot be read at all. This is the only place the
+' two failures are not symmetric: skipping a sheet that turns out to be the key
+' costs a "could not read the key" dialog and a second look, whereas reversing a
+' sheet that turns out to be the pinned one silently retires live mappings. So a
+' sheet we cannot identify is treated as the one we must not read.
+Private Function IsPinnedSheet(ByVal sh As Object) As Boolean
+    IsPinnedSheet = True
+    On Error Resume Next
+    Dim nm As String
+    Err.Clear                       ' Err is not cleared on entry; test OUR call
+    nm = Trim$(sh.Name)
+    If Err.Number <> 0 Then Err.Clear: Exit Function
+    IsPinnedSheet = (StrComp(nm, PINNED_SHEET_NAME, vbTextCompare) = 0)
 End Function
 
 ' Empty cells arrive as Null/Empty; fold to "" so CStr never errors.
