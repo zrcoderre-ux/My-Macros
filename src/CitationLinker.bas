@@ -198,7 +198,9 @@ Private Sub AddCitationLinks()
                 rows(cnt).s = CLng(f(1))
                 rows(cnt).e = CLng(f(2))
                 rows(cnt).typ = f(3)
-                rows(cnt).url = f(4)
+                ' A Rules of Court search carries the rule alone; see
+                ' StripRuleSubdivisions.
+                rows(cnt).url = StripRuleSubdivisions(f(4), f(5))
                 rows(cnt).txt = f(5)
                 cnt = cnt + 1
             End If
@@ -2913,7 +2915,9 @@ End Sub
 ' a document the bridge read nothing in.
 '
 ' Subdivisions are dropped from the lookup and from the fallback address alike.
-' The rule is one document either way; "(f)(2)" says where to read in it.
+' The rule is one document either way; "(f)(2)" says where to read in it. The
+' bridge's own search URL had its subdivisions stripped when its rows were read
+' in (StripRuleSubdivisions), so the borrowed address is clean as well.
 Private Function RuleUrl(ByVal numText As String, ByRef keep() As CiteRow) As String
     Dim bare As String
     bare = numText
@@ -2928,6 +2932,42 @@ Private Function RuleUrl(ByVal numText As String, ByRef keep() As CiteRow) As St
     dot = InStr(bare, ".")
     If dot < 2 Or dot >= Len(bare) Then Exit Function
     RuleUrl = RuleOfCourtUrl(Left$(bare, dot - 1), Mid$(bare, dot + 1))
+End Function
+
+
+' The bridge's search URL for a Rules of Court cite with the subdivisions taken
+' out of its search terms: "rule 3.1350(f)(2)" searched as "rule 3.1350".
+'
+' Lexis and Westlaw file a rule as one document and do not find it when the
+' search terms carry a subdivision; "Cal. Rules of Court, rule 3.1350(f)"
+' misses where "Cal. Rules of Court, rule 3.1350" lands. So the search asks
+' for the main rule only. The link's own span is not touched -- the ruling
+' still reads "rule 3.1350(f)" -- and neither is the row's text, which the Find
+' fallback matches against the paragraph verbatim.
+'
+' Works on the URL as encoded, so no decode-and-re-encode round trip has to get
+' the section sign right: a parenthesis is "(" or "%28", a space "%20", "+" or
+' itself, and the subdivision inside is letters and digits. Only a number that
+' follows the word "rule" is touched, and only in a row whose text names a
+' rule; a case cite's URL passes through untouched. Any other URL, or any
+' failure, returns the URL as it came.
+Private Function StripRuleSubdivisions(ByVal url As String, ByVal txt As String) As String
+    On Error GoTo Fail
+    StripRuleSubdivisions = url
+    If Len(url) = 0 Then Exit Function
+    If InStr(1, txt, "rule", vbTextCompare) = 0 Then Exit Function
+    If InStr(1, url, "(") = 0 And InStr(1, url, "%28", vbTextCompare) = 0 Then Exit Function
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "(rules?(?:%20|\+|\s)+\d{1,2}(?:\.|%2E)\d{1,4})" & _
+                 "((?:(?:\(|%28)[A-Za-z0-9]{1,8}(?:\)|%29))+)"
+    StripRuleSubdivisions = re.Replace(url, "$1")
+    Exit Function
+Fail:
+    StripRuleSubdivisions = url
 End Function
 
 
