@@ -14,16 +14,34 @@ Attribute VB_Name = "DeAnonymize"
 ' the columns:
 '     Category | Real Value | Replacement | Status | Source | Occurrences
 ' (columns are located by HEADER NAME, so a key from an older version that lacks
-' Status still reads). Two Status values change what a row means here:
+' Status still reads).
+'
+' WHAT THE DOCUMENT IN HAND CONTAINS is the only thing that decides whether a
+' row applies -- at the owner's direction. If the Real Value is in the text,
+' fake it; if the fake is in the text, reverse it. What the anonymized exports
+' happened to carry is a fact about other files and is never asked. So Status
+' "no match" -- the key pinning a binding for a party this batch of filings
+' never mentioned -- changes NOTHING about how a row is applied in either
+' direction. It cannot: PDF-Linker writes it for a party's BARE TOKEN whenever
+' the export only ever spelled the full name, and that token's fake is standing
+' in the export as a word of the composed name. It is read here for one thing
+' only, the result dialog's tally, so a row that hit nothing does not read as a
+' de-anonymize failure.
+'
+' Two Status values DO change what a row means, and neither is about what the
+' filings mentioned -- both are about what the MAP cannot answer backward:
 '   "alt spelling"  the Real Value is a synthetic spelling PDF-Linker invented
-'                   to widen matching, sharing the CANONICAL row's fake. Usable
-'                   real -> fake only; see Mapping.forwardOnly.
-'   "no match"      the fake was never written into the exported text -- the key
-'                   pins the binding for a party this batch of filings never
-'                   mentioned -- so it cannot appear in a draft written from
-'                   those exports.
-' Neither can be a de-anonymize MISS, so both are counted out of the result
-' dialog's tally rather than left to read as failures.
+'                   to widen matching, sharing the CANONICAL row's fake. Right
+'                   forward; backward, two rows claim one pseudonym and there is
+'                   no telling which spelling to restore.
+'   "ocr fix"       a scan-error correction ("Smlth" -> Smith's own stand-in,
+'                   "cuve!nants" -> "covenants"). Its Replacement is the
+'                   canonical row's fake or the corrected word itself, so in
+'                   reverse it either makes that fake ambiguous or un-fixes the
+'                   word. PDF-Linker keeps these on the pinned tab, which this
+'                   macro never reads -- the check below is the belt.
+' Both are FORWARD-ONLY (see Mapping.forwardOnly), and neither can be a
+' de-anonymize MISS, so they join "no match" in the tally.
 ' "Replacement" is USUALLY the fake that appears in the anonymized draft.
 ' It can instead hold an operator KEEP instruction -- "no" or "never" (leave
 ' this Real Value verbatim), or a "[bracketed]" / "{braced}" keep-spec -- which
@@ -146,10 +164,8 @@ Private Const KEY_PATTERN As String = "pseudonym_key*.xlsx"
 ' by name so the key still reads when another tab was saved in front of it.
 Private Const KEY_SHEET_NAME As String = "Pseudonym Key"
 
-' The OTHER tab PDF-Linker writes: bindings no export ever carried -- a party
-' pinned so a later run reuses the same fake, whose pseudonym was never written
-' into any anonymized text. Its rows are NOT reversible and must never be run in
-' reverse. Two reasons, and the second is the one that bites:
+' The OTHER tab PDF-Linker writes. Its rows are NOT reversible and must never be
+' run in reverse. Two reasons, and the second is the one that bites:
 '   - the fake cannot be in a draft written from those exports, so searching for
 '     it is at best wasted work; and
 '   - a pinned row can bind a real value the applied sheet also binds, under a
@@ -159,6 +175,18 @@ Private Const KEY_SHEET_NAME As String = "Pseudonym Key"
 '     name unrestored.
 ' FindKeySheet therefore skips this tab, and skips it even when it is the only
 ' one left to fall back to.
+'
+' WHAT IS ON IT has changed, and the skip is right either way. It used to hold
+' every binding no export carried -- a party pinned so a later run reuses the
+' same fake. At the owner's direction PDF-Linker now writes those to the MAIN
+' sheet, so a real value typed by hand in another program can find its stand-in
+' and a draft carrying that stand-in reverses like any other; what is left here
+' is the scan-error correction ("ocr fix"), whose Replacement is the canonical
+' row's own fake. So the tab is still never read, and the rows that moved need
+' no special handling at all -- they are ordinary bindings now, applied in
+' whichever direction the document in hand calls for. A key an older PDF-Linker
+' wrote still carries them here; skipping the tab keeps that key reading exactly
+' as it always has.
 Private Const PINNED_SHEET_NAME As String = "Pinned (never in text)"
 
 ' Subfolders the exports go to WHEN THEY EXIST beside the document: the real-
@@ -204,14 +232,30 @@ Private g_ReAnonThisSession As Boolean
 Private Type Mapping
     real As String
     fake As String
-    ' FORWARD-ONLY row (key Status = "alt spelling"): a synthetic spelling
-    ' PDF-Linker invented to widen matching -- a hyphenated surname a line wrap
-    ' split open ("Ardeshirpour- Zartoshti"), an OCR near-miss ("Sarra" for
-    ' "Sara") -- registered against the CANONICAL value's fake so that every
-    ' spelling gets scrubbed. Real -> fake is right, so re-anonymize uses it.
-    ' Fake -> real is not: two rows then claim one pseudonym and there is no way
-    ' to know which spelling to restore. PDF-Linker marks the non-canonical one
-    ' so exactly one row owns each reversal; de-anonymize skips these.
+    ' FORWARD-ONLY row: real -> fake is right, so re-anonymize uses it; fake ->
+    ' real is not, so de-anonymize skips it. The test is what the MAP can
+    ' answer backward -- never what the anonymized exports happened to carry,
+    ' which is a fact about other files. Two Status words say so.
+    '   "alt spelling"  a synthetic spelling PDF-Linker invented to widen
+    '                   matching -- a hyphenated surname a line wrap split open
+    '                   ("Ardeshirpour- Zartoshti"), an OCR near-miss ("Sarra"
+    '                   for "Sara") -- registered against the CANONICAL value's
+    '                   fake so every spelling gets scrubbed. Backward, two rows
+    '                   claim one pseudonym and there is no way to know which
+    '                   spelling to restore; PDF-Linker marks the non-canonical
+    '                   one so exactly one row owns each reversal.
+    '   "ocr fix"       a scan-error correction whose Replacement is the
+    '                   canonical value's own stand-in, or the corrected word
+    '                   itself. Reversed, it makes that fake ambiguous or
+    '                   un-fixes the word. It lives on the pinned tab, which is
+    '                   never read; this is the belt for one that ever arrives
+    '                   here.
+    ' "no match" is deliberately NOT one of them: see the file header. Its fake
+    ' can be standing in the document -- a bare token row of a party the export
+    ' only ever spelled in full carries that word -- and after the move to the
+    ' main sheet a draft can carry the stand-in of a party no filing mentioned,
+    ' which is the point of the move. Either way, if the fake is in the text it
+    ' reverses.
     forwardOnly As Boolean
 End Type
 
@@ -2258,20 +2302,25 @@ Private Function ReadPseudonymKey(ByVal path As String, _
                 maps(nMaps).real = rv
                 maps(nMaps).fake = fk
                 ' PDF-Linker's own verdict on the row. Two of its values say
-                ' this row cannot be a de-anonymize MISS, so the result dialog
-                ' can stop them reading as failures:
-                '   "alt spelling" - a synthetic spelling of another row's
-                '                    value, sharing that row's fake. Forward
-                '                    only; see Mapping.forwardOnly.
-                '   "no match"     - the fake was never written into the
-                '                    exported text (the key pins the binding for
-                '                    a party this batch never mentioned), so it
-                '                    cannot be in a draft written from those
-                '                    exports.
+                ' the row is FORWARD-ONLY -- re-anonymize uses it, de-anonymize
+                ' must not -- because the MAP cannot answer them backward; see
+                ' Mapping.forwardOnly. "ocr fix" is a belt: those rows live on
+                ' the pinned tab, which FindKeySheet refuses outright.
+                '
+                ' "no match" sets nothing. It says only that this ROW'S OWN
+                ' pattern matched nothing in the filings, which decides nothing
+                ' about the document in hand -- and the two shapes it covers
+                ' pull opposite ways, so it could not decide anything even if it
+                ' were asked: a bare token row of a party the export spelled
+                ' only in full has its fake standing in that export, while a
+                ' party no filing mentioned has a stand-in the operator may have
+                ' typed into this draft from another program. Both reverse when
+                ' their fake is in the text. It is read for the TALLY alone, so
+                ' a row that hit nothing does not read as a failure.
                 If statCol > 0 Then
                     st = LCase$(Trim$(CStr(NzText(data(r, statCol)))))
-                    maps(nMaps).forwardOnly = (st = "alt spelling")
-                    If st = "alt spelling" Or st = "no match" Then _
+                    maps(nMaps).forwardOnly = (st = "alt spelling" Or st = "ocr fix")
+                    If maps(nMaps).forwardOnly Or st = "no match" Then _
                         nUnusedRows = nUnusedRows + 1
                 End If
             End If
@@ -2694,19 +2743,21 @@ Private Function AmbiguousNote(ByVal nAmbiguous As Long) As String
                     "pink highlights and correct them by hand."
 End Function
 
-' One line for the result dialog when the key holds rows that cannot be restored
-' HERE and are not misses: a binding the anonymizer never wrote into the exported
-' text (Status "no match" -- a party this batch never mentioned) or an alternate
-' spelling whose fake another row already reverses (Status "alt spelling").
-' Without this they read as a large de-anonymize failure in the "restored X of Y"
-' count. Empty when there were none.
+' One line for the result dialog when the key holds rows that were not expected
+' to be restored HERE and are not misses: a binding whose own pattern matched
+' nothing in the filings (Status "no match"), an alternate spelling whose fake
+' another row already reverses (Status "alt spelling"), or a scan-error
+' correction (Status "ocr fix"). Reporting only -- a "no match" row is applied
+' in both directions like any other, and if its fake was in the document it is
+' in the restored count too. Without this they read as a large de-anonymize
+' failure in the "restored X of Y" tally. Empty when there were none.
 Private Function UnusedRowsNote(ByVal nUnusedRows As Long) As String
     If nUnusedRows <= 0 Then Exit Function
     UnusedRowsNote = vbCrLf & vbCrLf & "That total includes " & nUnusedRows & _
-                     " mapping(s) that could not apply here -- the key pins them " & _
-                     "for parties this batch of filings never mentioned, or they " & _
-                     "are alternate spellings another row already restores -- so " & _
-                     "they are not misses."
+                     " mapping(s) that were not expected here -- the key pins " & _
+                     "them for parties this batch of filings never mentioned, " & _
+                     "or they are alternate spellings or scan-error corrections " & _
+                     "another row already restores -- so they are not misses."
 End Function
 
 ' One line for the result dialog when the key carried operator KEEP rows, so it
@@ -2865,7 +2916,9 @@ Private Function ReplaceAllMappings(ByVal oDoc As Document, ByRef maps() As Mapp
     ' "alt spelling"); skipping those first leaves exactly one row per fake and
     ' the guard sees a clean key. The guard still matters: it is the only thing
     ' standing between a genuine collision -- or a key written before the marker
-    ' existed -- and a wrong restore.
+    ' existed -- and a wrong restore, and it is what answers a "no match" row
+    ' that really does collide with a live one, which is the ordinary ambiguity
+    ' and not a reason to refuse the row up front.
     '
     ' Re-anonymize: skip a real value shorter than 3 characters. Rows like
     ' real "JR" and real "TO" are extraction junk, and replacing every standalone
