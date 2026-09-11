@@ -1161,6 +1161,148 @@ Private Function HasDocketNumber(ByVal s As String) As Boolean
     Next i
 End Function
 
+' The position of the first court-and-docket parenthetical in s, or 0 when it
+' carries none.
+Private Function DocketParenIn(ByVal s As String) As Long
+    Dim op As Long: op = InStr(1, s, "(")
+    Dim guard As Long
+
+    Do While op > 0 And guard < 8
+        guard = guard + 1
+        Dim cl As Long: cl = ClosingParenAt(s, op)
+        If cl = 0 Then Exit Function
+        If IsDocketParen(Mid$(s, op + 1, cl - op - 1)) Then
+            DocketParenIn = op
+            Exit Function
+        End If
+        op = InStr(cl + 1, s, "(")
+    Loop
+End Function
+
+' True when characters a..b of paragraph text s sit in a reference to a TRIAL
+' COURT case -- a case identified by its court and docket number
+'
+'     Ridgeline Builders, Inc. v. Sunset Plaza, LLC
+'     (Super. Ct. L.A. County, No. 22STCV01234)
+'
+' rather than by a date and a reporter. Three shapes count: the span carries the
+' docket parenthetical itself, the span sits INSIDE one (a case number matched on
+' its own), or the span is in the case name and the docket parenthetical follows
+' it across the rest of the parties.
+'
+' Two things turn on it, one here and one in DeAnonymize (which reaches it
+' through IsTrialCourtCite). The linker does not link such a reference: an
+' unpublished trial court order is not in the provider's database, so a search
+' on its name lands on nothing. And the pseudonymizer does not treat it as a
+' cited authority: the italic-contact rule that keeps a published case name from
+' being renamed (ReplaceInRange's protectCitations) must not protect this one,
+' whose parties and case number are exactly what the pseudonym key exists to
+' replace.
+'
+' A published citation cannot be mistaken for one. What ends it is the date, and
+' IsDocketParen refuses a parenthetical carrying a year.
+Private Function InTrialCourtCiteText(ByVal s As String, ByVal a As Long, _
+                                       ByVal b As Long) As Boolean
+    If a < 1 Or b < a Or b > Len(s) Then Exit Function
+
+    ' (1) The span carries the docket parenthetical.
+    Dim op As Long, cl As Long
+    op = InStr(a, s, "(")
+    Do While op > 0 And op <= b
+        cl = ClosingParenAt(s, op)
+        If cl = 0 Then Exit Do
+        If IsDocketParen(Mid$(s, op + 1, cl - op - 1)) Then
+            InTrialCourtCiteText = True
+            Exit Function
+        End If
+        op = InStr(cl + 1, s, "(")
+    Loop
+
+    ' (2) The span sits inside one. No case name is required here: a docket
+    ' number is never a published citation, whatever it is written next to.
+    op = EnclosingParenOpen(s, a)
+    If op > 0 Then
+        cl = ClosingParenAt(s, op)
+        If cl >= b Then
+            InTrialCourtCiteText = IsDocketParen(Mid$(s, op + 1, cl - op - 1))
+        End If
+        Exit Function
+    End If
+
+    ' (3) The span is in the case name, with the docket parenthetical after it.
+    Dim pp As Long: pp = CiteParenAfterName(s, b + 1)
+    If pp = 0 Then Exit Function
+    cl = ClosingParenAt(s, pp)
+    If cl = 0 Then Exit Function
+    If Not IsDocketParen(Mid$(s, pp + 1, cl - pp - 1)) Then Exit Function
+
+    ' And it really is a case name: parties, or an "In re", somewhere between the
+    ' run-up to the span and that parenthetical. Without this a name italicized
+    ' in ordinary prose ahead of any docket number would read as a case.
+    InTrialCourtCiteText = PartiesAround(s, b, pp)
+End Function
+
+' The "(" or "[" the position pos sits inside, or 0 when it sits inside none. A
+' ")" or "]" reached first means the bracket further left closed something this
+' position is not in.
+Private Function EnclosingParenOpen(ByVal s As String, ByVal pos As Long) As Long
+    Dim i As Long
+    For i = pos - 1 To 1 Step -1
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = ")" Or c = "]" Then Exit Function
+        If c = "(" Or c = "[" Then
+            EnclosingParenOpen = i
+            Exit Function
+        End If
+    Next i
+End Function
+
+' True when the text running from a little before b up to the parenthetical at
+' pp names parties -- a " v. " or an "In re". The look-back is what lets the
+' FIRST party of a case name qualify: its " v. " sits to the right of it.
+Private Function PartiesAround(ByVal s As String, ByVal b As Long, _
+                                ByVal pp As Long) As Boolean
+    Const LOOK_BACK As Long = 160
+
+    Dim a As Long: a = b - LOOK_BACK
+    If a < 1 Then a = 1
+    If pp <= a Then Exit Function
+
+    Dim span As String: span = Mid$(s, a, pp - a)
+    PartiesAround = (InStr(1, span, " v. ", vbTextCompare) > 0) _
+                 Or (InStr(1, span, "In re ", vbTextCompare) > 0)
+End Function
+
+' InTrialCourtCiteText for a Range: the paragraph it sits in, and where in that
+' paragraph's text it falls. A paragraph carrying a field or a footnote reference
+' does not run 1:1 with its own .Text, and the length test is what catches that
+' -- an unreadable position answers False, which leaves every caller doing what
+' it did before this test existed.
+'
+' Public because DeAnonymize asks the same question of a matched range: see
+' ReplaceInRange's protectCitations and InCaseName there.
+Public Function IsTrialCourtCite(ByVal rng As Range) As Boolean
+    On Error Resume Next
+    If rng Is Nothing Then Exit Function
+
+    Dim para As Range
+    Set para = rng.Paragraphs(1).Range
+    If para Is Nothing Then Exit Function
+
+    Dim s As String: s = para.text
+    If Len(s) = 0 Then Exit Function
+
+    Dim t As String: t = rng.text
+    If Len(t) = 0 Then Exit Function
+
+    Dim a As Long: a = rng.start - para.start + 1
+    Dim b As Long: b = a + Len(t) - 1
+    If a < 1 Or b > Len(s) Then Exit Function
+    If StrComp(Mid$(s, a, Len(t)), t, vbTextCompare) <> 0 Then Exit Function
+
+    IsTrialCourtCite = InTrialCourtCiteText(s, a, b)
+End Function
+
 ' The last character of the roman tail: the date through the reporter and
 ' pincite, stopping before whatever comes next -- a short-name or explanatory
 ' parenthetical, a parallel cite after ";", the ")" closing the citation
@@ -1680,6 +1822,16 @@ Private Function AddLink(ByVal rng As Range, ByVal url As String, ByVal typ As S
     ' this too.
     If Not noItalics Then ExtendAnchorToCaseName rng
     On Error GoTo Fail
+
+    ' A TRIAL COURT case -- "Ridgeline Builders, Inc. v. Sunset Plaza, LLC
+    ' (Super. Ct. L.A. County, No. 22STCV01234)" -- is not published authority
+    ' and is not in the provider's database, so a search link on its name lands
+    ' on nothing. It is left as text. The case name still gets its italics:
+    ' NormalizeCitationItalics reads the paragraph after every link pass and
+    ' does not care whether the citation it reads was linked.
+    If Not noItalics Then
+        If IsTrialCourtCite(rng) Then Exit Function
+    End If
 
     ' An anchor with no text is the one input Word answers by writing the URL
     ' into the document as literal text. Hyperlinks.Add reads a collapsed range
@@ -2635,7 +2787,18 @@ Private Function CaseNameTailStart(ByVal s As String) As Long
         Exit Function
     End If
 
+    ' The court-and-docket parenthetical of a trial court case, when it comes
+    ' first. A year further along the display is not this citation's date --
+    ' "... LLC (Super. Ct. L.A. County, No. 22STCV01234), filed Jan. 10, 2022"
+    ' would otherwise read the docket parenthetical and the prose after it as
+    ' part of the case name.
+    Dim pDoc As Long: pDoc = DocketParenIn(s)
+
     p = FindYearParen(s)
+    If pDoc > 0 And (p = 0 Or pDoc < p) Then
+        CaseNameTailStart = pDoc
+        Exit Function
+    End If
     If p > 0 Then
         CaseNameTailStart = p
         Exit Function

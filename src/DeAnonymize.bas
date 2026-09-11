@@ -90,6 +90,11 @@ Attribute VB_Name = "DeAnonymize"
 '     This mirrors PDF-Linker's rule -- renaming a cited decision is worse than
 '     leaving a party name in -- and its caption exemption (the own caption/prose
 '     aren't italic, so the current parties are still replaced).
+'     A TRIAL COURT case reference -- "Ridgeline Builders, Inc. v. Sunset
+'     Plaza, LLC (Super. Ct. L.A. County, No. 22STCV01234)" -- is NOT covered
+'     by that exemption, italics and all: nothing is published there to
+'     preserve, and its parties and case number are exactly what the key
+'     replaces. See CitationLinker.IsTrialCourtCite.
 '   - MARKUP. Replacement covers the comments story too, so a comment that names
 '     a party is scrubbed like the prose. A comment AUTHOR is document metadata,
 '     which no pseudonym key covers and no replacement pass can reach, so the
@@ -758,7 +763,9 @@ Public Sub ReAnonymizeTentative()
            "body only, so nothing in a header reaches either file." & vbCrLf & vbCrLf & _
            "Names touching italic text (cited case names, even partly italic) " & _
            "were left as-is so a published case wasn't renamed -- check " & _
-           "any italicized cites if a real party name should have been replaced." & _
+           "any italicized cites if a real party name should have been " & _
+           "replaced. A trial court case cited by its docket number is not a " & _
+           "published case and WAS replaced, italics and all." & _
            MarkupNote(nComments, markedReal, markedFake, nResidual) & vbCrLf & vbCrLf & _
            "Saved an anonymized Markdown file (safe to share) to:" & vbCrLf & _
            savePath & vbCrLf & vbCrLf & _
@@ -3409,12 +3416,26 @@ Private Function ReplaceInRange(ByVal rng As Range, _
         '     citation's edge -- and renaming a cited decision is a worse
         '     failure than leaving a real name in the shared copy. Only a
         '     uniformly NON-italic match (ordinary prose) is replaced.
+        '
+        '     EXCEPT in a TRIAL COURT case reference -- "Ridgeline Builders,
+        '     Inc. v. Sunset Plaza, LLC (Super. Ct. L.A. County, No.
+        '     22STCV01234)". Its name is italicized like any case name, so the
+        '     italic rule protected it, and a party and a case number the key
+        '     carries rows for went into the shared copy unscrubbed. Nothing is
+        '     published there to preserve: the reason the rule exists -- a cited
+        '     decision must not be renamed -- does not reach a matter that has
+        '     no reporter and is identified by its docket number. See
+        '     CitationLinker.IsTrialCourtCite, which reads the parenthetical
+        '     that ends the reference; a published citation ends in its date and
+        '     is never read as one.
         Dim doReplace As Boolean: doReplace = True
         If whole Then
             If Not WholeTokenBoundaries(scan) Then doReplace = False
         End If
         If doReplace And protectCitations Then
-            If Not (scan.Font.Italic = False) Then doReplace = False
+            If Not (scan.Font.Italic = False) Then
+                If Not CitationLinker.IsTrialCourtCite(scan) Then doReplace = False
+            End If
         End If
         If doReplace Then
             ' assign directly (no smart-case) after recasing the replacement
@@ -3913,14 +3934,25 @@ End Function
 ' edge. This used to require the WHOLE match to be italic, and the ragged ones
 ' were the pink marks that kept landing on case names after a de-anonymize run.
 '
-' Italic is deliberately the ONLY signal. The textual grammar of a citation
-' ("X v. Y") would also match the caption and running header, where the parties
-' are the pseudonyms and a fake left behind is the most damaging one to miss.
+' Italic is deliberately the ONLY signal for a CITED case. The textual grammar
+' of a citation ("X v. Y") would also match the caption and running header, where
+' the parties are the pseudonyms and a fake left behind is the most damaging one
+' to miss.
+'
+' A TRIAL COURT case reference is the one italic run this does not count as a
+' cited case: it names no published decision, so its parties ARE pseudonymized
+' and a pool word sitting in one is a fake like any other. Same test the
+' replacement sweep uses (CitationLinker.IsTrialCourtCite).
 Private Function InCaseName(ByVal rng As Range) As Boolean
     On Error Resume Next
-    ' Not (= False): True and wdUndefined both mean italic is present. An
-    ' unreadable font leaves the default False -- the hit stays flagged.
-    InCaseName = Not (rng.Font.Italic = False)
+    ' True and wdUndefined both mean italic is present. Read into a variable
+    ' first so an unreadable font leaves the default False -- the statement is
+    ' skipped under Resume Next, and the hit stays flagged, as it always has.
+    Dim it As Long: it = False
+    it = rng.Font.Italic
+    If it = False Then Exit Function
+
+    InCaseName = Not CitationLinker.IsTrialCourtCite(rng)
 End Function
 
 ' The fixed pool of fake words the pseudonymizer assigns: person surnames,
