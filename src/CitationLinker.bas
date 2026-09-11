@@ -596,7 +596,12 @@ Private Sub ClearStaleItalicGaps(ByVal p As Paragraph, ByRef marks() As Byte)
             If marks(i) <> 0 Then Exit Do
             i = i + 1
         Loop
-        If i > top Then Exit Sub          ' trailing gap: no citation after it
+        ' A trailing gap -- no citation after it -- has one shape this pass
+        ' will still take italic off. See ClearStaleTrailingRun.
+        If i > top Then
+            ClearStaleTrailingRun p, marks, a, top
+            Exit Sub
+        End If
         Dim b As Long: b = i - 1
 
         If b - a + 1 >= MIN_GAP Then
@@ -607,6 +612,43 @@ Private Sub ClearStaleItalicGaps(ByVal p As Paragraph, ByRef marks() As Byte)
             End If
         End If
     Loop
+End Sub
+
+' The one TRAILING gap this pass will take italic off: the run the build before
+' this one italicized when it read a case name as running to the next "(year)"
+' anywhere in the paragraph rather than to the parenthetical that follows the
+' parties (see CiteTailStartAfter). A judicial notice entry naming a trial court
+' case came back with four lines of the judge's own prose in italics, and the
+' gap-between-two-citations test above cannot reach it: there is no citation
+' after it, and the parenthetical the old walk stopped at was never italic, so
+' the gap as a whole reads as mixed rather than italic.
+'
+' Trimmed to where that old walk stopped -- the "(" of the year it found -- the
+' damage is exactly what is left, and the same two guards decide it: long enough
+' to be a swallowed sentence rather than punctuation, and italic from end to end.
+' A paragraph with no year after the citation has nothing this describes and is
+' left alone.
+Private Sub ClearStaleTrailingRun(ByVal p As Paragraph, ByRef marks() As Byte, _
+                                   ByVal a As Long, ByVal top As Long)
+    Const MIN_GAP As Long = 20
+
+    On Error Resume Next
+    If a < 1 Or a > top Then Exit Sub
+
+    Dim s As String: s = p.Range.text
+    If Len(s) = 0 Then Exit Sub
+
+    Dim yr As Long: yr = FindYearParen(Mid$(s, a))
+    If yr = 0 Then Exit Sub
+
+    Dim b As Long: b = a + yr - 2          ' the character before that "("
+    If b > top Then b = top
+    If b - a + 1 < MIN_GAP Then Exit Sub
+
+    Dim r As Range
+    Set r = SubRangeByChars(p.Range, a, b)
+    If r Is Nothing Then Exit Sub
+    If r.Font.Italic = True Then MarkRun marks, a, b, MARK_ROMAN
 End Sub
 
 ' Write the marks onto the paragraph, ONE CHARACTER AT A TIME.
@@ -954,17 +996,169 @@ Private Function PincitePhraseEnd(ByVal s As String, ByVal i As Long) As Long
     PincitePhraseEnd = e - 1
 End Function
 
-' The start of the roman tail after the parties: the ", supra" or the "(year)",
-' whichever comes first. 0 when neither is there -- and then the citation is left
-' alone, because without a tail there is nothing to say where the name stops.
+' The start of the roman tail after the parties: the ", supra", or the
+' parenthetical the case name ends at, whichever comes first. 0 when neither is
+' there -- and then the citation is left alone, because without a tail there is
+' nothing to say where the name stops.
+'
+' The parenthetical is the FIRST one after the parties (CiteParenAfterName), not
+' the first one anywhere in the paragraph that happens to carry a year. It was
+' the latter -- FindYearParen over everything from the anchor to the end of the
+' paragraph -- and a judicial notice entry naming a TRIAL COURT case has no year
+' until some parenthetical much further along:
+'
+'     Ridgeline Builders, Inc. v. Sunset Plaza, LLC (Super. Ct. L.A. County,
+'     No. 22STCV01234), offered as a court record under Evidence Code section
+'     452 ... were in Sunset Plaza's name. (RJN, Exh. B, complaint filed Jan. 10,
+'     2022.)
+'
+' The case name was read as running from "Ridgeline" all the way to "(RJN", and
+' four lines of the judge's own prose went italic with it. A paragraph whose
+' later sentence carries a published cite did the same thing with that cite's
+' date, and a sentence that merely NAMES parties ("Smith v. Jones was decided in
+' 2019.") borrowed the date of the citation that followed it.
 Private Function CiteTailStartAfter(ByVal s As String, ByVal anchor As Long) As Long
     Dim rest As String: rest = Mid$(s, anchor)
     Dim pSup As Long: pSup = InStr(1, rest, ", supra", vbTextCompare)
-    Dim pYr As Long: pYr = FindYearParen(rest)
-    Dim p As Long
-    If pSup > 0 And (pYr = 0 Or pSup < pYr) Then p = pSup Else p = pYr
-    If p = 0 Then Exit Function
-    CiteTailStartAfter = anchor + p - 1
+    If pSup > 0 Then pSup = anchor + pSup - 1
+
+    Dim pPar As Long: pPar = CiteParenAfterName(s, anchor)
+
+    If pSup > 0 And (pPar = 0 Or pSup < pPar) Then
+        CiteTailStartAfter = pSup
+    Else
+        CiteTailStartAfter = pPar
+    End If
+End Function
+
+' The parenthetical a case citation ends with, at or after fromPos: the first
+' "(" or "[" reached by walking over what a party name is made of, with a
+' parenthetical that sits INSIDE a name ("(USA)", "(KNBC-TV)") stepped over.
+'
+' 0 when the walk meets anything a name cannot contain first, when it runs past
+' MAX_NAME characters, or when the parenthetical it reaches is neither the
+' citation's date ("(2020)", "(9th Cir. 2019)") nor a court-and-docket
+' parenthetical ("(Super. Ct. L.A. County, No. 22STCV01234)"). Those two are the
+' only things a case name ends at; a "(" that opens the next citation sentence,
+' or a parenthetical explaining the point, means the walk has left the citation,
+' and a citation this cannot read is one it leaves alone.
+Private Function CiteParenAfterName(ByVal s As String, ByVal fromPos As Long) As Long
+    Const MAX_NAME As Long = 160
+
+    Dim i As Long: i = fromPos
+    If i < 1 Then i = 1
+    Dim guard As Long
+
+    Do While i <= Len(s) And i - fromPos <= MAX_NAME And guard < 6
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = "(" Or c = "[" Then
+            Dim cl As Long: cl = ClosingParenAt(s, i)
+            If cl = 0 Then Exit Function
+            Dim inner As String: inner = Mid$(s, i + 1, cl - i - 1)
+            If IsDateParen(inner) Or IsDocketParen(inner) Then
+                CiteParenAfterName = i
+                Exit Function
+            End If
+            If Not IsNamePartParen(inner) Then Exit Function
+            guard = guard + 1
+            i = cl + 1
+        ElseIf IsNameTextChar(c) Then
+            i = i + 1
+        Else
+            Exit Function
+        End If
+    Loop
+End Function
+
+' The bracket that closes the one opening at op, or 0 when it never closes.
+' Deliberately the FIRST matching bracket rather than a nesting walk: what this
+' reads are the short parentheticals inside and after a case name, and a nested
+' "(" inside one of those is itself the sign that the span is something else
+' (see IsDateParen and IsDocketParen, which both refuse one).
+Private Function ClosingParenAt(ByVal s As String, ByVal op As Long) As Long
+    Dim want As String
+    If Mid$(s, op, 1) = "[" Then want = "]" Else want = ")"
+    ClosingParenAt = InStr(op + 1, s, want)
+End Function
+
+' True for a character a party name can contain. Written as a REFUSAL -- the
+' brackets, the quotation marks, the semicolon and colon, the sentence-ending
+' marks other than the period a case name is full of, and anything below a
+' space -- so that a letter this list never thought of ("Pena" with its tilde,
+' a name in another alphabet) is crossed rather than read as the end of the
+' name.
+Private Function IsNameTextChar(ByVal c As String) As Boolean
+    If Len(c) = 0 Then Exit Function
+    If AscW(c) < 32 Then Exit Function
+    If IsQuoteChar(c) Then Exit Function
+    Select Case c
+        Case "(", ")", "[", "]", "{", "}", ";", ":", "!", "?"
+            Exit Function
+    End Select
+    IsNameTextChar = True
+End Function
+
+' True when a parenthetical's inner text is a citation's DATE -- "1992",
+' "9th Cir. 2019", "C.D. Cal. 2021". Short, carrying a four-digit year, and with
+' no parenthetical of its own inside it: "See Doe v. Roe (2010) 50 Cal.4th 1"
+' carries a year too, and it is the next citation sentence, not this citation's
+' date.
+Private Function IsDateParen(ByVal inner As String) As Boolean
+    If Len(inner) = 0 Or Len(inner) > 40 Then Exit Function
+    If InStr(1, inner, "(") > 0 Then Exit Function
+    IsDateParen = (FindYearPos(inner) > 0)
+End Function
+
+' True when a parenthetical's inner text identifies a case by its COURT AND
+' DOCKET NUMBER -- "Super. Ct. L.A. County, No. 22STCV01234", "C.D.Cal., No.
+' 2:21-cv-04915-KS" -- which is how a TRIAL COURT matter is cited, there being
+' no reporter to cite it to.
+'
+' A date disqualifies it, so an unpublished federal order given a date and a
+' Westlaw number ("(C.D.Cal., Jan. 5, 2022, No. 2:21-cv-04915-KS) 2022 WL
+' 12345") reads as the date parenthetical it is and keeps the treatment a
+' published citation gets.
+Private Function IsDocketParen(ByVal inner As String) As Boolean
+    If Len(inner) = 0 Or Len(inner) > 100 Then Exit Function
+    If InStr(1, inner, "(") > 0 Then Exit Function
+    If FindYearPos(inner) > 0 Then Exit Function
+    IsDocketParen = HasDocketNumber(inner)
+End Function
+
+' True when s carries a whole-word "No." or "Nos." followed by a token with a
+' digit in it -- the docket number itself. The whole-word test keeps it off
+' anything ending in those letters, and requiring the digit keeps it off the
+' "No." that opens a sentence.
+Private Function HasDocketNumber(ByVal s As String) As Boolean
+    Dim i As Long
+    For i = 1 To Len(s) - 2
+        Dim wl As Long
+        wl = 0
+        If LCase$(Mid$(s, i, 4)) = "nos." Then
+            wl = 4
+        ElseIf LCase$(Mid$(s, i, 3)) = "no." Then
+            wl = 3
+        End If
+        If wl > 0 Then
+            Dim okLeft As Boolean: okLeft = True
+            If i > 1 Then okLeft = Not (Mid$(s, i - 1, 1) Like "[A-Za-z0-9]")
+            If okLeft Then
+                Dim k As Long: k = i + wl
+                Do While k <= Len(s)
+                    If Mid$(s, k, 1) = " " Or Mid$(s, k, 1) = Chr$(160) Then k = k + 1 Else Exit Do
+                Loop
+                Do While k <= Len(s)
+                    Dim c As String: c = Mid$(s, k, 1)
+                    If c = " " Or c = "," Or c = ")" Or c = "]" Then Exit Do
+                    If c Like "#" Then
+                        HasDocketNumber = True
+                        Exit Function
+                    End If
+                    k = k + 1
+                Loop
+            End If
+        End If
+    Next i
 End Function
 
 ' The last character of the roman tail: the date through the reporter and
