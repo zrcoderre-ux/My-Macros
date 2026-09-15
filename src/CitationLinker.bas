@@ -798,7 +798,13 @@ Private Function MarkCitationAt(ByVal s As String, ByVal anchor As Long, _
     ' Where the roman tail starts: the "(year)" or the ", supra".
     Dim ts As Long
     If IsSupraTail(s, anchor) Then ts = anchor Else ts = CiteTailStartAfter(s, anchor)
-    If ts <= 0 Then Exit Function
+    If ts <= 0 Then
+        ' No tail: the paragraph MENTIONS the case rather than citing it. The
+        ' name is still italic, and the walk that could not find a tail is what
+        ' says where the name stops. See MarkProseCaseName.
+        MarkCitationAt = MarkProseCaseName(s, anchor, nextScan, marks)
+        Exit Function
+    End If
 
     ' Where the case name starts. 0 means the left edge could not be trusted.
     Dim boundary As Long
@@ -842,6 +848,180 @@ Private Function MarkCitationAt(ByVal s As String, ByVal anchor As Long, _
 
     If te + 1 > nextScan Then nextScan = te + 1
     MarkCitationAt = 1
+End Function
+
+' Italicize a case name the paragraph MENTIONS rather than cites -- "The Court
+' has read and considered Hahn v. Mirda and is not persuaded ..." -- which has
+' no tail to say where the name stops.
+'
+' The two walks bound it between them: CaseNameStartBefore for its first word,
+' ProseNameEnd for its last. Nothing else here is touched. There is no roman
+' run to lay down, no short-name parenthetical to take in, and no reading of
+' the sentence around the name beyond the two guards below.
+'
+' Those guards keep a CAPTION from reading as a mention, because a caption is
+' the one other place a paragraph says "X v. Y" and it is never italic. A
+' caption is set in capitals, and it is a line naming a case rather than a
+' sentence about one -- so the name must carry a lowercase letter of its own,
+' and the paragraph must carry an ordinary lowercase word outside the name.
+Private Function MarkProseCaseName(ByVal s As String, ByVal anchor As Long, _
+                                    ByRef nextScan As Long, ByRef marks() As Byte) As Long
+    Dim ne As Long: ne = ProseNameEnd(s, anchor + 4)
+    If ne <= 0 Then Exit Function
+
+    ' CaseNameStartBefore, not the CaseNameLeftEdge the citations use: a mention
+    ' is read from a standing start in the middle of a sentence, which is the
+    ' case that walk's narrow joiner list was written for. "The Court has read
+    ' Hahn v. Mirda and Gutierrez v. Tostado" is two mentions, and the wide list
+    ' crosses the "and" between them to open the second one on "Hahn".
+    Dim ns As Long: ns = CaseNameStartBefore(Left$(s, anchor - 1))
+    If ns <= 0 Or ns >= anchor Then Exit Function
+
+    Dim nm As String: nm = Mid$(s, ns, ne - ns + 1)
+    If NameIsAllCaps(nm) Then Exit Function
+    If Not CarriesProseOutside(s, ns, ne) Then Exit Function
+
+    MarkRun marks, ns, ne, MARK_ITALIC
+    If ne + 1 > nextScan Then nextScan = ne + 1
+    MarkProseCaseName = 1
+End Function
+
+' The last character of a case name that runs into PROSE rather than into a
+' citation tail, walking forward from fromPos (just past the " v. "), or 0 when
+' the walk accepted no word of the second party's name.
+'
+' Deliberately NARROWER than the walk in CiteTailStartAfter, for the same reason
+' CaseNameStartBefore is narrower than CaseNameLeftEdge: there, a tail found
+' further along says where the name ends and the walk only has to reach it;
+' here, where the walk stops IS where the italics stop. Three differences:
+'
+'   - a capitalized word that opens a sentence or a signal -- "The", "There",
+'     "See" -- ends the name instead of joining it. "Court" is the exception,
+'     since "Superior Court" and "Supreme Court" are what half the party names
+'     in a California ruling end with;
+'   - the lowercase words it crosses are the NARROW list (IsCaseNameJoiner),
+'     which has neither "and" nor "in": "Hahn v. Mirda and is not persuaded"
+'     would otherwise cross the "and";
+'   - a word the judge's sentence ends on ("... v. Mirda. There, the court")
+'     ends the name, and its period stays roman.
+'
+' Only a word a name can END on is ever the answer, so a walk that stops on a
+' joiner gives back the word to its left, not the joiner: "Mirda, the case Dr.
+' Nelson relies on" ends the name at "Mirda".
+Private Function ProseNameEnd(ByVal s As String, ByVal fromPos As Long) As Long
+    Const MAX_NAME As Long = 120
+    Const MAX_WORDS As Long = 8
+
+    Dim n As Long: n = Len(s)
+    Dim i As Long: i = fromPos
+    If i < 1 Then i = 1
+    Dim words As Long
+    Dim best As Long
+
+    Do While i <= n And i - fromPos <= MAX_NAME And words <= MAX_WORDS
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = " " Or c = Chr$(160) Or c = "," Then
+            i = i + 1
+        ElseIf c = "(" Or c = "[" Then
+            ' "(KNBC-TV)" sits inside the name and ends it as readily as a word.
+            Dim cl As Long: cl = ClosingParenAt(s, i)
+            If cl = 0 Then Exit Do
+            If Not IsNamePartParen(Mid$(s, i + 1, cl - i - 1)) Then Exit Do
+            best = cl
+            words = words + 1
+            i = cl + 1
+        ElseIf Not IsNameTextChar(c) Then
+            Exit Do
+        Else
+            Dim ws As Long: ws = i
+            Do While i <= n
+                Dim wc As String: wc = Mid$(s, i, 1)
+                If wc = " " Or wc = Chr$(160) Or wc = "," Then Exit Do
+                If Not IsNameTextChar(wc) Then Exit Do
+                i = i + 1
+            Loop
+
+            Dim w As String: w = Mid$(s, ws, i - ws)
+            Dim f As String: f = Left$(w, 1)
+            If f >= "a" And f <= "z" Then
+                If HasInteriorCapital(w) Then
+                    best = i - 1
+                ElseIf Not IsCaseNameJoiner(w) Then
+                    Exit Do
+                End If
+            ElseIf f = "&" Then
+                ' joins two parties; never the end of the name
+            ElseIf f Like "#" Then
+                If Not IsNumericNameWord(w) Then Exit Do
+                best = i - 1
+            Else
+                If IsProseLeadWord(w) Then Exit Do
+                If EndsSentenceWord(w) Then
+                    best = i - 2             ' the sentence's period stays roman
+                    Exit Do
+                End If
+                best = i - 1
+            End If
+            words = words + 1
+        End If
+    Loop
+
+    ProseNameEnd = best
+End Function
+
+' A capitalized word that opens a sentence or a signal rather than joining a
+' party name, for the forward walk. IsSentenceLeadWord's list, less the one
+' word a party name ends on more often than a sentence begins with it.
+Private Function IsProseLeadWord(ByVal w As String) As Boolean
+    If LCase$(StripWordPunct(w)) = "court" Then Exit Function
+    IsProseLeadWord = IsSentenceLeadWord(w)
+End Function
+
+' True when w is a whole word the judge's sentence ended on rather than an
+' abbreviation a party name carries. A case name is full of periods -- "Ins.
+' Co.", "Dept. of Transportation", "U.S.A." -- but the words they end are
+' abbreviations: short, or carrying a period of their own. A period after a
+' longer whole word ends the sentence, and what follows belongs to it.
+Private Function EndsSentenceWord(ByVal w As String) As Boolean
+    If Right$(w, 1) <> "." Then Exit Function
+    Dim core As String: core = StripWordPunct(w)
+    If InStr(1, core, ".") > 0 Then Exit Function
+    EndsSentenceWord = (Len(core) > 4)
+End Function
+
+' True when nm carries no lowercase letter of its own -- a caption, "MARY ROE
+' v. ACME CORP.", rather than a case a sentence names. The " v. " between the
+' parties is lowercase in a caption too and says nothing either way.
+Private Function NameIsAllCaps(ByVal nm As String) As Boolean
+    Dim t As String: t = Replace(nm, " v. ", " ", 1, -1, vbTextCompare)
+    Dim i As Long
+    For i = 1 To Len(t)
+        If Mid$(t, i, 1) Like "[a-z]" Then Exit Function
+    Next i
+    NameIsAllCaps = True
+End Function
+
+' True when the paragraph carries an ordinary lowercase-initial word somewhere
+' outside the span a..b -- the mark of a SENTENCE about a case, as against a
+' caption or a heading that is nothing but the case's name.
+Private Function CarriesProseOutside(ByVal s As String, ByVal a As Long, _
+                                      ByVal b As Long) As Boolean
+    Dim i As Long: i = 1
+    Do While i <= Len(s)
+        If i >= a And i <= b Then
+            i = b + 1
+        Else
+            If Mid$(s, i, 1) Like "[a-z]" Then
+                Dim opensWord As Boolean: opensWord = (i = 1)
+                If Not opensWord Then opensWord = Not (Mid$(s, i - 1, 1) Like "[A-Za-z0-9]")
+                If opensWord Then
+                    CarriesProseOutside = True
+                    Exit Function
+                End If
+            End If
+            i = i + 1
+        End If
+    Loop
 End Function
 
 ' True when ", supra" starts at position k.
@@ -1123,23 +1303,25 @@ Private Function IsNameWordForward(ByVal w As String) As Boolean
     End If
 
     If f >= "a" And f <= "z" Then
-        If IsNameConnector(w) Then
-            IsNameWordForward = True
-            Exit Function
-        End If
-        ' "eBay", "iHeartMedia": a party that spells itself with an interior
-        ' capital is a name, and no prose word looks like one.
-        Dim k As Long
-        For k = 2 To Len(core)
-            If Mid$(core, k, 1) Like "[A-Z]" Then
-                IsNameWordForward = True
-                Exit Function
-            End If
-        Next k
+        IsNameWordForward = IsNameConnector(w) Or HasInteriorCapital(w)
         Exit Function
     End If
 
     IsNameWordForward = True
+End Function
+
+' True when a lowercase word carries a capital of its own further in -- "eBay",
+' "iHeartMedia". A party that spells itself that way is a name, and no prose
+' word looks like one.
+Private Function HasInteriorCapital(ByVal w As String) As Boolean
+    Dim core As String: core = StripWordPunct(w)
+    Dim k As Long
+    For k = 2 To Len(core)
+        If Mid$(core, k, 1) Like "[A-Z]" Then
+            HasInteriorCapital = True
+            Exit Function
+        End If
+    Next k
 End Function
 
 ' The parenthetical a case citation ends with, at or after fromPos: the first
