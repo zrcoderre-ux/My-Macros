@@ -997,14 +997,30 @@ Private Function PincitePhraseEnd(ByVal s As String, ByVal i As Long) As Long
 End Function
 
 ' The start of the roman tail after the parties: the ", supra", or the
-' parenthetical the case name ends at, whichever comes first. 0 when neither is
-' there -- and then the citation is left alone, because without a tail there is
-' nothing to say where the name stops.
+' parenthetical the case name ends at, whichever the WALK reaches first. 0 when
+' it reaches neither -- and then the citation is left alone, because without a
+' tail there is nothing to say where the name stops.
 '
-' The parenthetical is the FIRST one after the parties (CiteParenAfterName), not
-' the first one anywhere in the paragraph that happens to carry a year. It was
-' the latter -- FindYearParen over everything from the anchor to the end of the
-' paragraph -- and a judicial notice entry naming a TRIAL COURT case has no year
+' Both tails are reached by WALKING the party name forward, never by searching
+' the rest of the paragraph for one. Searching is what italicized the judge's
+' own prose: a tail the walk cannot reach belongs to some other citation, and
+' the run from this name to that tail is the sentences in between.
+'
+' The ", supra" was found by InStr over everything from the parties to the end
+' of the paragraph, and a paragraph that NAMES a case in prose before citing it
+' further along --
+'
+'     The Court has read and considered Hahn v. Mirda and is not persuaded that
+'     it supplies the threshold Dr. Nelson describes. There, the court reversed
+'     ... the same facts supported her claim for professional negligence. (Hahn
+'     v. Mirda, supra, 147 Cal.App.4th at pp. 748-750.)
+'
+' read as ONE case name running from the first "Hahn" to the parenthetical's
+' ", supra", and three lines of prose went italic with it.
+'
+' The parenthetical had the same hole, and this is the second narrowing of it.
+' It was FindYearParen over everything from the anchor to the end of the
+' paragraph, and a judicial notice entry naming a TRIAL COURT case has no year
 ' until some parenthetical much further along:
 '
 '     Ridgeline Builders, Inc. v. Sunset Plaza, LLC (Super. Ct. L.A. County,
@@ -1013,22 +1029,117 @@ End Function
 '     2022.)
 '
 ' The case name was read as running from "Ridgeline" all the way to "(RJN", and
-' four lines of the judge's own prose went italic with it. A paragraph whose
-' later sentence carries a published cite did the same thing with that cite's
-' date, and a sentence that merely NAMES parties ("Smith v. Jones was decided in
-' 2019.") borrowed the date of the citation that followed it.
+' four lines of prose went italic with it. Taking the first parenthetical the
+' NAME walk reaches (CiteParenAfterName) cured that one, but that walk reads
+' character by character -- every character a name may contain is one prose is
+' made of too -- so a mention still ran on to the next sentence's citation:
+'
+'     The Court has read and considered Hahn v. Mirda and is not persuaded. The
+'     concealment rule appears in Gutierrez v. Tostado (2025) 18 Cal.5th 222.
+'
+' The walk reads WORDS now, and prose gives itself away on its first lowercase
+' one -- "is" in both paragraphs above.
+'
+' What the walk crosses, left to right, is what a PARTY NAME is made of:
+'
+'   - a capitalized word, a word opening on a digit that a name can open on
+'     ("21st", "3M"), a word carrying an interior capital ("eBay"), and a word
+'     in an alphabet this code never thought of;
+'   - a lowercase word ONLY as a connector -- "of", "for", "and", "ex rel.",
+'     "dba" -- which sits inside a name and is no part of prose's vocabulary;
+'   - a short parenthetical that sits inside a name, "(USA)" or "(KNBC-TV)",
+'     which is stepped over rather than read as the tail.
+'
+' Anything else ends the walk where it stands, and in prose that is the first
+' LOWERCASE word which is no connector -- "is", "was", "held", "that". A name
+' the walk gives up on costs the reading nothing: the citation is left
+' exactly as the judge typed it, and a ", supra" is read a second time as a
+' short cite in its own right, anchored on its own comma, with its left edge
+' taken from the bracket it sits inside.
 Private Function CiteTailStartAfter(ByVal s As String, ByVal anchor As Long) As Long
-    Dim rest As String: rest = Mid$(s, anchor)
-    Dim pSup As Long: pSup = InStr(1, rest, ", supra", vbTextCompare)
-    If pSup > 0 Then pSup = anchor + pSup - 1
+    Const MAX_NAME As Long = 160
+    Const MAX_WORDS As Long = 12
 
-    Dim pPar As Long: pPar = CiteParenAfterName(s, anchor)
+    Dim n As Long: n = Len(s)
+    Dim i As Long: i = anchor
+    If i < 1 Then i = 1
+    Dim words As Long
 
-    If pSup > 0 And (pPar = 0 Or pSup < pPar) Then
-        CiteTailStartAfter = pSup
-    Else
-        CiteTailStartAfter = pPar
+    Do While i <= n And i - anchor <= MAX_NAME And words <= MAX_WORDS
+        ' The comma ahead of "supra" opens the tail; it is asked about here,
+        ' before the walk steps over that comma as a separator inside a name.
+        If IsSupraTail(s, i) Then
+            CiteTailStartAfter = i
+            Exit Function
+        End If
+
+        Dim c As String: c = Mid$(s, i, 1)
+        If c = " " Or c = Chr$(160) Or c = "," Then
+            i = i + 1
+        ElseIf c = "(" Or c = "[" Then
+            Dim cl As Long: cl = ClosingParenAt(s, i)
+            If cl = 0 Then Exit Function
+            Dim inner As String: inner = Mid$(s, i + 1, cl - i - 1)
+            If IsDateParen(inner) Or IsDocketParen(inner) Then
+                CiteTailStartAfter = i
+                Exit Function
+            End If
+            If Not IsNamePartParen(inner) Then Exit Function
+            words = words + 1
+            i = cl + 1
+        ElseIf Not IsNameTextChar(c) Then
+            Exit Function
+        Else
+            Dim ws As Long: ws = i
+            Do While i <= n
+                Dim wc As String: wc = Mid$(s, i, 1)
+                If wc = " " Or wc = Chr$(160) Or wc = "," Then Exit Do
+                If Not IsNameTextChar(wc) Then Exit Do
+                i = i + 1
+            Loop
+            If Not IsNameWordForward(Mid$(s, ws, i - ws)) Then Exit Function
+            words = words + 1
+        End If
+    Loop
+End Function
+
+' True when the forward name walk may cross w to reach the citation's tail.
+'
+' Written as a REFUSAL, the way IsNameTextChar is: what stops the walk is a
+' LOWERCASE word that is no connector, and everything else is crossed. The
+' defendant's name follows the " v. " and needs no word filter of its own --
+' party names are built from the very words a filter has to distrust. Telling
+' that name from the PROSE that follows a case the paragraph merely mentions is
+' the whole job, and English prose reaches a lowercase word of its own within a
+' word or two of anywhere.
+Private Function IsNameWordForward(ByVal w As String) As Boolean
+    Dim core As String: core = StripWordPunct(w)
+    If Len(core) = 0 Then Exit Function
+
+    Dim f As String: f = Left$(w, 1)
+    If f Like "#" Then
+        IsNameWordForward = IsNumericNameWord(w)
+        Exit Function
     End If
+
+    If f >= "a" And f <= "z" Then
+        If IsNameConnector(w) Then
+            IsNameWordForward = True
+            Exit Function
+        End If
+        ' "eBay", "iHeartMedia": a party that spells itself with an interior
+        ' capital is a name, and no prose word looks like one.
+        Dim k As Long
+        For k = 2 To Len(core)
+            If Mid$(core, k, 1) Like "[A-Z]" Then
+                IsNameWordForward = True
+                Exit Function
+            End If
+        Next k
+        Exit Function
+    End If
+
+    IsNameWordForward = True
 End Function
 
 ' The parenthetical a case citation ends with, at or after fromPos: the first
